@@ -5,8 +5,8 @@ const UciError = uciErr.UciError;
 
 pub fn main() void {
     tryMain() catch |err| {
-        std.debug.print("Encountered an unrecoverable error while running Sykora.\n", .{});
-        std.debug.print("\t|> {s}\n", .{uciErr.getErrorDescriptor(err)});
+        std.log.err("Encountered an unrecoverable error while running Sykora.\n", .{});
+        std.log.err("\t|> {s}\n", .{uciErr.getErrorDescriptor(err)});
     };
 }
 
