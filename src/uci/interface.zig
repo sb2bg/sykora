@@ -6,6 +6,10 @@ const UciError = uciErr.UciError;
 const board = @import("../board/bitboard.zig");
 const BitBoard = board.BitBoard;
 
+const name = "Sykora";
+const author = "Sullivan Bognar";
+const version = "0.1.0";
+
 pub const Uci = struct {
     const Self = @This();
     const maxCommandLength = 1024;
@@ -17,8 +21,8 @@ pub const Uci = struct {
     searchThread: ?std.Thread,
     board: BitBoard,
 
-    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) Self {
-        return Uci{
+    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !Self {
+        const uci = Uci{
             .stdin = stdin,
             .stdout = stdout,
             .uciParser = UciParser{},
@@ -27,6 +31,9 @@ pub const Uci = struct {
             .options = std.StringHashMap([]const u8).init(allocator),
             .board = BitBoard{},
         };
+
+        try uci.writeStdout("{s} version {s} by {s}", .{ name, version, author });
+        return uci;
     }
 
     pub fn run(self: *Self) UciError!void {
@@ -52,9 +59,6 @@ pub const Uci = struct {
         }
     }
 
-    const name = "Sykora";
-    const author = "Sullivan Bognar";
-
     fn handleCommand(self: *Self, command: ToEngineCommand) UciError!void {
         switch (command) {
             .uci => {
@@ -74,6 +78,24 @@ pub const Uci = struct {
                 if (self.searchThread != null) {
                     // TODO: is this what we want?
                     self.searchThread.?.detach();
+                }
+            },
+            .position => |positionOptions| {
+                switch (positionOptions.value) {
+                    .startpos => {
+                        try self.board.reset();
+                    },
+                    .fen => {
+                        try self.writeInfoString("FEN not yet implemented.", .{});
+                        // TODO: implement
+                    },
+                }
+
+                if (positionOptions.moves) |moves| {
+                    for (moves) |algebraicMove| {
+                        const move = try self.board.algebraicToBitboard(algebraicMove);
+                        try self.board.makeMove(move);
+                    }
                 }
             },
             .quit => {
