@@ -3,6 +3,8 @@ const UciParser = @import("uci_parser.zig").UciParser;
 const ToEngineCommand = @import("uci_command.zig").ToEngineCommand;
 const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
+const board = @import("../board/bitboard.zig");
+const BitBoard = board.BitBoard;
 
 pub const Uci = struct {
     const Self = @This();
@@ -10,9 +12,10 @@ pub const Uci = struct {
     stdin: std.io.AnyReader,
     stdout: std.io.AnyWriter,
     uciParser: UciParser,
-    searchThread: ?std.Thread,
     debug: bool,
     options: std.StringHashMap([]const u8),
+    searchThread: ?std.Thread,
+    board: BitBoard,
 
     pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) Self {
         return Uci{
@@ -22,6 +25,7 @@ pub const Uci = struct {
             .searchThread = null,
             .debug = false,
             .options = std.StringHashMap([]const u8).init(allocator),
+            .board = BitBoard{},
         };
     }
 
@@ -38,12 +42,12 @@ pub const Uci = struct {
             };
 
             const command = self.uciParser.parseCommand(buf.buffer[0..buf.len]) catch |err| {
-                try self.writeInfoString(uciErr.getErrorDescriptor(err));
+                try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
                 continue;
             };
 
             self.handleCommand(command) catch |err| {
-                try self.writeInfoString(uciErr.getErrorDescriptor(err));
+                try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
             };
         }
     }
@@ -54,20 +58,23 @@ pub const Uci = struct {
     fn handleCommand(self: *Self, command: ToEngineCommand) UciError!void {
         switch (command) {
             .uci => {
-                try self.writeStdout("id name " ++ name);
-                try self.writeStdout("id author " ++ author);
-                try self.writeStdout("uciok");
+                try self.writeStdout("id name {s}", .{name});
+                try self.writeStdout("id author {s}", .{author});
+                try self.writeStdout("uciok", .{});
             },
             .debug => |value| {
                 self.debug = value;
             },
             .isready => {
-                try self.writeStdout("readyok");
+                try self.writeStdout("readyok", .{});
             },
-            .setoption => |setOptionOptions| {
-                self.options.put(setOptionOptions.name, setOptionOptions.value) catch {
-                    return error.OutOfMemory;
-                };
+            .ucinewgame => {
+                try self.board.reset();
+
+                if (self.searchThread != null) {
+                    // TODO: is this what we want?
+                    self.searchThread.?.detach();
+                }
             },
             .quit => {
                 // user wanted to quit, no need to return an error
@@ -79,19 +86,25 @@ pub const Uci = struct {
         }
     }
 
-    fn writeStdout(self: Self, message: []const u8) UciError!void {
-        self.stdout.print("{s}\n", .{message}) catch {
+    fn writeStdout(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
+        self.stdout.print(fmt, args) catch {
+            return error.IOError;
+        };
+
+        self.stdout.writeByte('\n') catch {
             return error.IOError;
         };
     }
 
-    fn writeInfoString(self: Self, message: []const u8) UciError!void {
+    fn writeInfoString(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
         if (!self.debug) {
             return;
         }
 
-        self.stdout.print("info string {s}\n", .{message}) catch {
+        self.stdout.print("info string ", .{}) catch {
             return error.IOError;
         };
+
+        try self.writeStdout(fmt, args);
     }
 };
