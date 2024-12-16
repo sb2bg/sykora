@@ -13,7 +13,12 @@ pub fn main() void {
 fn tryMain() UciError!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    var uci_interface = uci.Uci.init(std.io.getStdIn().reader().any(), std.io.getStdOut().writer().any());
+    var uci_interface = uci.Uci.init(
+        std.io.getStdIn().reader().any(),
+        std.io.getStdOut().writer().any(),
+        allocator,
+    );
     try uci_interface.run();
 }
