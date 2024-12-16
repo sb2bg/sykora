@@ -56,8 +56,8 @@ pub const Uci = struct {
                 try self.writeStdout("id author " ++ author);
                 try self.writeStdout("uciok");
             },
-            .debug => {
-                self.debug = true;
+            .debug => |value| {
+                self.debug = value;
             },
             .isready => {
                 try self.writeStdout("readyok");

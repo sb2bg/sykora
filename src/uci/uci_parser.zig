@@ -19,6 +19,17 @@ pub const UciParser = struct {
             .uci => {
                 return ToEngineCommand.uci;
             },
+            .debug => {
+                const option = parser.next() orelse return error.UnexpectedEOF;
+
+                if (std.mem.eql(u8, option, "on")) {
+                    return ToEngineCommand{ .debug = true };
+                } else if (std.mem.eql(u8, option, "off")) {
+                    return ToEngineCommand{ .debug = false };
+                } else {
+                    return error.UnknownCommand;
+                }
+            },
             .isready => {
                 return ToEngineCommand.isready;
             },
