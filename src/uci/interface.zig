@@ -93,7 +93,7 @@ pub const Uci = struct {
 
                 if (positionOptions.moves) |moves| {
                     for (moves) |algebraicMove| {
-                        const move = try self.board.algebraicToBitboard(algebraicMove);
+                        const move = try BitBoard.algebraicToBitboard(algebraicMove);
                         try self.board.makeMove(move);
                     }
                 }
