@@ -4,6 +4,7 @@ pub const UciError = error{
     CommandTooLong,
     Unimplemented,
     IOError,
+    OutOfMemory,
 };
 
 pub fn getErrorDescriptor(err: UciError) []const u8 {
