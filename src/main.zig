@@ -1,5 +1,6 @@
 const std = @import("std");
 const uci = @import("uci/interface.zig");
+const Uci = uci.Uci;
 const uciErr = @import("uci/uci_error.zig");
 const UciError = uciErr.UciError;
 
@@ -15,7 +16,7 @@ fn tryMain() UciError!void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var uci_interface = uci.Uci.init(
+    var uci_interface = try Uci.init(
         std.io.getStdIn().reader().any(),
         std.io.getStdOut().writer().any(),
         allocator,
