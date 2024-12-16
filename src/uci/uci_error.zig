@@ -14,5 +14,6 @@ pub fn getErrorDescriptor(err: UciError) []const u8 {
         UciError.CommandTooLong => "Command too long.",
         UciError.Unimplemented => "Unimplemented.",
         UciError.IOError => "IO error.",
+        UciError.OutOfMemory => "Out of memory.",
     };
 }
