@@ -12,14 +12,16 @@ pub const Uci = struct {
     uciParser: UciParser,
     searchThread: ?std.Thread,
     debug: bool,
+    options: std.StringHashMap([]const u8),
 
-    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter) Self {
+    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) Self {
         return Uci{
             .stdin = stdin,
             .stdout = stdout,
             .uciParser = UciParser{},
             .searchThread = null,
             .debug = false,
+            .options = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
@@ -61,6 +63,15 @@ pub const Uci = struct {
             },
             .isready => {
                 try self.writeStdout("readyok");
+            },
+            .setoption => |setOptionOptions| {
+                self.options.put(setOptionOptions.name, setOptionOptions.value) catch {
+                    return error.OutOfMemory;
+                };
+            },
+            .quit => {
+                // user wanted to quit, no need to return an error
+                std.process.exit(0);
             },
             else => {
                 return error.Unimplemented;
