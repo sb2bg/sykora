@@ -35,6 +35,7 @@ pub const UciParser = struct {
             },
             .setoption => {
                 const name = parser.next() orelse return error.UnexpectedEOF;
+                // FIXME: there may not be a value in the case of a button, which is perfectly valid.
                 const value = parser.next() orelse return error.UnexpectedEOF;
                 return ToEngineCommand{ .setoption = .{ .name = name, .value = value } };
             },
