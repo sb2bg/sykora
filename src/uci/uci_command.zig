@@ -61,7 +61,7 @@ pub const ToEngineCommand = union(ToEngine) {
     /// is needed. One string will be sent for each parameter and this will
     /// only be sent when the engine is waiting. The name and value of the
     /// option in <id> should not be case sensitive and can inlude spaces.
-    /// The substrings "value" and "name" should be avoided in \<id> and \<x>.
+    /// The substrings "value" and "name" should be avoided in <id> and <x>.
     setoption: SetOptionOptions,
     /// **register** [later | name | code]
     ///
