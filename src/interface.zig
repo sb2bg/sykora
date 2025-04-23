@@ -18,10 +18,12 @@ pub const Uci = struct {
     debug: bool,
     options: std.StringHashMap([]const u8),
     search_thread: ?std.Thread,
+    stop_search: std.atomic.Value(bool),
     board: Board,
     allocator: std.mem.Allocator,
 
     pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !Self {
+        const stop_search = std.atomic.Value(bool).init(false);
         const uci = Uci{
             .stdin = stdin,
             .stdout = stdout,
@@ -31,6 +33,7 @@ pub const Uci = struct {
             .options = std.StringHashMap([]const u8).init(allocator),
             .board = Board.startpos(),
             .allocator = allocator,
+            .stop_search = stop_search,
         };
 
         try uci.writeStdout("{s} version {s} by {s}", .{ name, version, author });
@@ -81,24 +84,25 @@ pub const Uci = struct {
                 self.board = Board.startpos();
 
                 if (self.search_thread) |thread| {
-                    // TODO: is this what we want?
+                    self.stop_search.store(true, .seq_cst);
                     thread.detach();
+                    self.search_thread = null;
                 }
             },
-            .position => |positionOptions| {
-                switch (positionOptions.value) {
+            .position => |pos_opts| {
+                switch (pos_opts.value) {
                     .startpos => {
                         self.board = Board.startpos();
                     },
                     .fen => {
-                        const parsedBoard = Board.fromFen(positionOptions.value.fen);
-                        // free the fen string since we don't need it anymore
-                        self.allocator.free(positionOptions.value.fen);
-                        self.board = try parsedBoard;
+                        defer self.allocator.free(pos_opts.value.fen);
+                        self.board = try Board.fromFen(pos_opts.value.fen);
                     },
                 }
 
-                if (positionOptions.moves) |moves| {
+                if (pos_opts.moves) |moves| {
+                    defer self.allocator.free(moves);
+
                     for (moves) |move| {
                         try self.board.makeMove(move);
                     }
@@ -106,6 +110,16 @@ pub const Uci = struct {
             },
             .display => {
                 try self.writeStdout("{}", .{self.board});
+                try self.writeStdout("fen {s}", .{try self.board.getFenString()});
+            },
+            .go => |_| {
+                return error.Unimplemented;
+            },
+            .stop => {
+                self.stop_search.store(true, .seq_cst);
+            },
+            .ponderhit => {
+                return error.Unimplemented;
             },
             .quit => {
                 // user wanted to quit, we return an error to break out of the loop
