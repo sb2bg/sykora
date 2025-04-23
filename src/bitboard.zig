@@ -1,8 +1,6 @@
 const std = @import("std");
 const UciError = @import("uci_error.zig").UciError;
 const pieceInfo = @import("piece.zig");
-const Color = pieceInfo.Color;
-const Type = pieceInfo.Type;
 const fen = @import("fen.zig");
 
 pub const Board = struct {
@@ -22,7 +20,7 @@ pub const Board = struct {
     }
 
     pub fn makeMove(self: *Self, move: []const u8) UciError!void {
-        if (move.len < 4) return error.InvalidArgument;
+        if (move.len != 4) return error.InvalidArgument;
 
         const from_file = std.ascii.toLower(move[0]);
         const from_rank = move[1];
@@ -40,6 +38,16 @@ pub const Board = struct {
 
         const color = self.getTurn();
         const piece_type = self.board.getPieceAt(from_index, color) orelse return error.InvalidMove;
+
+        // TODO: make sure the move is valid
+
+        if (piece_type == .pawn) {
+            if (self.board.en_passant_square) |en_passant_square| {
+                if (en_passant_square == to_index) {
+                    self.board.clearSquare(en_passant_square);
+                }
+            }
+        }
 
         self.board.clearSquare(from_index);
         self.board.setPieceAt(to_index, color, piece_type);
@@ -88,6 +96,94 @@ pub const Board = struct {
         }
 
         try writer.writeAll("    a   b   c   d   e   f   g   h\n");
+    }
+
+    pub fn getFenString(self: Self) UciError![]u8 {
+        return getFenStringGenericError(self) catch {
+            return error.IOError;
+        };
+    }
+
+    fn getFenStringGenericError(self: Self) ![]u8 {
+        var buffer: [100]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        const writer = stream.writer();
+
+        for (0..8) |rank| {
+            const actual_rank = 7 - rank;
+            var empty_count: u8 = 0;
+
+            for (0..8) |file| {
+                const index = actual_rank * 8 + file;
+                const white_piece = self.board.getPieceAt(@intCast(index), .white);
+                const black_piece = self.board.getPieceAt(@intCast(index), .black);
+
+                if (white_piece) |p| {
+                    if (empty_count > 0) {
+                        try writer.print("{}", .{empty_count});
+                        empty_count = 0;
+                    }
+                    try writer.writeByte(p.getName());
+                } else if (black_piece) |p| {
+                    if (empty_count > 0) {
+                        try writer.print("{}", .{empty_count});
+                        empty_count = 0;
+                    }
+                    try writer.writeByte(std.ascii.toLower(p.getName()));
+                } else {
+                    empty_count += 1;
+                }
+            }
+
+            if (empty_count > 0) {
+                try writer.print("{}", .{empty_count});
+            }
+
+            if (rank != 7) {
+                try writer.writeByte('/');
+            }
+        }
+
+        // Turn
+        const turn: u8 = if (self.board.white_to_move) 'w' else 'b';
+        try writer.writeByte(' ');
+        try writer.writeByte(turn);
+
+        // Castling rights
+        try writer.writeByte(' ');
+        var any_castle = false;
+        if (self.board.white_kingside_castle) {
+            try writer.writeByte('K');
+            any_castle = true;
+        }
+        if (self.board.white_queenside_castle) {
+            try writer.writeByte('Q');
+            any_castle = true;
+        }
+        if (self.board.black_kingside_castle) {
+            try writer.writeByte('k');
+            any_castle = true;
+        }
+        if (self.board.black_queenside_castle) {
+            try writer.writeByte('q');
+            any_castle = true;
+        }
+        if (!any_castle) try writer.writeByte('-');
+
+        // En passant
+        try writer.writeByte(' ');
+        if (self.board.en_passant_square) |sq| {
+            const file = sq % 8 + 'a';
+            const rank = sq / 8 + '1';
+            try writer.writeByte(file);
+            try writer.writeByte(rank);
+        } else {
+            try writer.writeByte('-');
+        }
+
+        // Halfmove and fullmove
+        try writer.print(" {} {}", .{ self.board.halfmove_clock, self.board.fullmove_number });
+        return buffer[0..stream.pos];
     }
 };
 
@@ -149,77 +245,5 @@ pub const BitBoard = struct {
         }
 
         return null;
-    }
-
-    fn getFenString(self: Self) ![]u8 {
-        var buffer: [100]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
-
-        for (0..8) |rank| {
-            const actual_rank = 7 - rank;
-            var empty_count: u8 = 0;
-
-            for (0..8) |file| {
-                const index = actual_rank * 8 + file;
-                const piece = self.getPieceAt(index);
-
-                if (piece) |p| {
-                    if (empty_count > 0) {
-                        try writer.print("{}", .{empty_count});
-                        empty_count = 0;
-                    }
-                    try writer.writeByte(p.getFenChar());
-                } else {
-                    empty_count += 1;
-                }
-            }
-
-            if (empty_count > 0) {
-                try writer.print("{}", .{empty_count});
-            }
-
-            if (rank != 7)
-                try writer.writeByte('/');
-        }
-
-        // Turn
-        try writer.print(" {}", .{if (self.white_to_move) 'w' else 'b'});
-
-        // Castling rights
-        try writer.writeByte(' ');
-        var any_castle = false;
-        if (self.white_kingside_castle) {
-            try writer.writeByte('K');
-            any_castle = true;
-        }
-        if (self.white_queenside_castle) {
-            try writer.writeByte('Q');
-            any_castle = true;
-        }
-        if (self.black_kingside_castle) {
-            try writer.writeByte('k');
-            any_castle = true;
-        }
-        if (self.black_queenside_castle) {
-            try writer.writeByte('q');
-            any_castle = true;
-        }
-        if (!any_castle) try writer.writeByte('-');
-
-        // En passant
-        try writer.writeByte(' ');
-        if (self.en_passant_square) |sq| {
-            const file = sq % 8 + 'a';
-            const rank = sq / 8 + '1';
-            try writer.writeByte(file);
-            try writer.writeByte(rank);
-        } else {
-            try writer.writeByte('-');
-        }
-
-        // Halfmove and fullmove
-        try writer.print(" {} {}", .{ self.halfmove_clock, self.fullmove_number });
-        return buffer[0..stream.pos];
     }
 };
