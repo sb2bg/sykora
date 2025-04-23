@@ -3,8 +3,8 @@ const UciParser = @import("uci_parser.zig").UciParser;
 const ToEngineCommand = @import("uci_command.zig").ToEngineCommand;
 const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
-const board = @import("../board/bitboard.zig");
-const BitBoard = board.BitBoard;
+const board = @import("bitboard.zig");
+const Board = board.Board;
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
@@ -12,24 +12,25 @@ const version = "0.1.0";
 
 pub const Uci = struct {
     const Self = @This();
-    const maxCommandLength = 1024;
     stdin: std.io.AnyReader,
     stdout: std.io.AnyWriter,
     uciParser: UciParser,
     debug: bool,
     options: std.StringHashMap([]const u8),
     searchThread: ?std.Thread,
-    board: BitBoard,
+    board: Board,
+    allocator: std.mem.Allocator,
 
     pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !Self {
         const uci = Uci{
             .stdin = stdin,
             .stdout = stdout,
-            .uciParser = UciParser{},
+            .uciParser = UciParser.init(allocator),
             .searchThread = null,
             .debug = false,
             .options = std.StringHashMap([]const u8).init(allocator),
-            .board = BitBoard{},
+            .board = Board.startpos(),
+            .allocator = allocator,
         };
 
         try uci.writeStdout("{s} version {s} by {s}", .{ name, version, author });
@@ -37,25 +38,29 @@ pub const Uci = struct {
     }
 
     pub fn run(self: *Self) UciError!void {
-        while (true) {
-            var buf: std.BoundedArray(u8, maxCommandLength) = .{};
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
 
-            self.stdin.streamUntilDelimiter(
-                buf.writer(),
-                '\n',
-                maxCommandLength,
-            ) catch {
-                return error.CommandTooLong;
+        while (true) {
+            self.stdin.streamUntilDelimiter(buf.writer(), '\n', null) catch {
+                return error.IOError;
             };
 
-            const command = self.uciParser.parseCommand(buf.buffer[0..buf.len]) catch |err| {
+            const command = self.uciParser.parseCommand(buf.items) catch |err| {
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
                 continue;
             };
 
             self.handleCommand(command) catch |err| {
+                if (err == UciError.Quit) {
+                    // short circuit the loop to exit
+                    return;
+                }
+
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
             };
+
+            buf.clearRetainingCapacity();
         }
     }
 
@@ -73,7 +78,7 @@ pub const Uci = struct {
                 try self.writeStdout("readyok", .{});
             },
             .ucinewgame => {
-                try self.board.reset();
+                self.board = Board.startpos();
 
                 if (self.searchThread != null) {
                     // TODO: is this what we want?
@@ -83,24 +88,28 @@ pub const Uci = struct {
             .position => |positionOptions| {
                 switch (positionOptions.value) {
                     .startpos => {
-                        try self.board.reset();
+                        self.board = Board.startpos();
                     },
                     .fen => {
-                        try self.writeInfoString("FEN not yet implemented.", .{});
-                        // TODO: implement
+                        const parsedBoard = Board.fromFen(positionOptions.value.fen);
+                        // free the fen string since we don't need it anymore
+                        self.allocator.free(positionOptions.value.fen);
+                        self.board = try parsedBoard;
                     },
                 }
 
                 if (positionOptions.moves) |moves| {
-                    for (moves) |algebraicMove| {
-                        const move = try BitBoard.algebraicToBitboard(algebraicMove);
+                    for (moves) |move| {
                         try self.board.makeMove(move);
                     }
                 }
             },
+            .display => {
+                try self.writeStdout("{}", .{self.board});
+            },
             .quit => {
-                // user wanted to quit, no need to return an error
-                std.process.exit(0);
+                // user wanted to quit, we return an error to break out of the loop
+                return error.Quit;
             },
             else => {
                 return error.Unimplemented;

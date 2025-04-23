@@ -6,8 +6,13 @@ const UciError = @import("uci_error.zig").UciError;
 
 pub const UciParser = struct {
     const Self = @This();
+    allocator: std.mem.Allocator,
 
-    pub fn parseCommand(_: Self, command: []const u8) UciError!ToEngineCommand {
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{ .allocator = allocator };
+    }
+
+    pub fn parseCommand(self: Self, command: []const u8) UciError!ToEngineCommand {
         var parser = std.mem.tokenizeAny(u8, command, " ");
         const uciCmd = parser.next() orelse return error.UnexpectedEOF;
 
@@ -71,9 +76,19 @@ pub const UciParser = struct {
                         .moves = null,
                     } };
                 } else if (std.mem.eql(u8, subCommand, "fen")) {
-                    const fen = parser.next() orelse return error.UnexpectedEOF;
+                    var fenParts = std.ArrayList([]const u8).init(self.allocator);
+                    defer fenParts.deinit();
+
+                    var curr = parser.next();
+                    while (curr != null and !std.mem.eql(u8, curr.?, "moves")) {
+                        try fenParts.append(curr.?);
+                        curr = parser.next();
+                    }
+
+                    const fenJoined = try std.mem.join(self.allocator, " ", fenParts.items);
+
                     return ToEngineCommand{ .position = .{
-                        .value = .{ .fen = fen },
+                        .value = .{ .fen = fenJoined },
                         .moves = null,
                     } };
                 } else {
@@ -81,7 +96,7 @@ pub const UciParser = struct {
                 }
             },
             // .go => {
-            //     return .{.go};
+            //     return ToEngineCommand{ .go = .{} };
             // },
             .stop => {
                 return ToEngineCommand.stop;
@@ -95,7 +110,19 @@ pub const UciParser = struct {
             .display => {
                 return ToEngineCommand.display;
             },
-            else => error.Unimplemented,
+            .perft => {
+                const depth = parser.next() orelse return error.UnexpectedEOF;
+
+                const passedDepth = std.fmt.parseInt(u64, depth, 10) catch {
+                    return error.InvalidArgument;
+                };
+
+                return ToEngineCommand{ .perft = passedDepth };
+            },
+            else => {
+                // TODO: remove this once all commands are implemented
+                return error.Unimplemented;
+            },
         };
     }
 };

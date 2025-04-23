@@ -13,6 +13,7 @@ pub const ToEngine = enum {
     ponderhit,
     quit,
     display,
+    perft,
 };
 
 /// These are all the commands the engine recieves from the interface, plus
@@ -100,6 +101,13 @@ pub const ToEngineCommand = union(ToEngine) {
     /// **Note:** this command is not part of the official UCI protocol and is a novelty,
     /// quality of life feature.
     display,
+    /// *perft* <depth>
+    ///
+    /// complete a perft on the current position to the specified depth.
+    ///
+    /// **Note:** this command is not part of the official UCI protocol and is a novelty,
+    /// quality of life feature.
+    perft: u64,
 };
 
 pub const SetOptionOptions = struct {
