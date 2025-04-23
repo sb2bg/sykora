@@ -12,6 +12,17 @@ pub const UciParser = struct {
         return Self{ .allocator = allocator };
     }
 
+    fn parseMoves(self: Self, parser: *std.mem.TokenIterator(u8, .any)) !?[][]const u8 {
+        var moves_list = std.ArrayList([]const u8).init(self.allocator);
+        var move = parser.next();
+        while (move) |m| {
+            try moves_list.append(m);
+            move = parser.next();
+        }
+
+        return moves_list.toOwnedSlice() catch null;
+    }
+
     pub fn parseCommand(self: Self, command: []const u8) UciError!ToEngineCommand {
         var parser = std.mem.tokenizeAny(u8, command, " ");
         const uciCmd = parser.next() orelse return error.UnexpectedEOF;
@@ -70,34 +81,46 @@ pub const UciParser = struct {
             .position => {
                 const subCommand = parser.next() orelse return error.UnexpectedEOF;
 
-                if (std.mem.eql(u8, subCommand, "startpos")) {
-                    return ToEngineCommand{ .position = .{
-                        .value = .startpos,
-                        .moves = null,
-                    } };
-                } else if (std.mem.eql(u8, subCommand, "fen")) {
-                    var fen_parts = std.ArrayList([]const u8).init(self.allocator);
-                    defer fen_parts.deinit();
+                const is_startpos = std.mem.eql(u8, subCommand, "startpos");
+                const is_fen = std.mem.eql(u8, subCommand, "fen");
 
-                    var curr = parser.next();
-                    while (curr != null and !std.mem.eql(u8, curr.?, "moves")) {
-                        try fen_parts.append(curr.?);
-                        curr = parser.next();
+                if (!is_startpos and !is_fen) return error.UnknownCommand;
+
+                var moves: ?[][]const u8 = null;
+
+                if (is_startpos) {
+                    const next_tok = parser.next();
+                    if (next_tok != null and std.mem.eql(u8, next_tok.?, "moves")) {
+                        moves = try self.parseMoves(&parser);
                     }
 
-                    const fen_joined = try std.mem.join(self.allocator, " ", fen_parts.items);
-
                     return ToEngineCommand{ .position = .{
-                        .value = .{ .fen = fen_joined },
-                        .moves = null,
+                        .value = .startpos,
+                        .moves = moves,
                     } };
-                } else {
-                    return error.UnknownCommand;
                 }
+
+                // "fen" case
+                var fen_parts = std.ArrayList([]const u8).init(self.allocator);
+                defer fen_parts.deinit();
+
+                var curr = parser.next();
+                while (curr != null and !std.mem.eql(u8, curr.?, "moves")) {
+                    try fen_parts.append(curr.?);
+                    curr = parser.next();
+                }
+
+                if (curr != null and std.mem.eql(u8, curr.?, "moves")) {
+                    moves = try self.parseMoves(&parser);
+                }
+
+                const fen_joined = try std.mem.join(self.allocator, " ", fen_parts.items);
+
+                return ToEngineCommand{ .position = .{
+                    .value = .{ .fen = fen_joined },
+                    .moves = moves,
+                } };
             },
-            // .go => {
-            //     return ToEngineCommand{ .go = .{} };
-            // },
             .stop => {
                 return ToEngineCommand.stop;
             },
