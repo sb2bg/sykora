@@ -132,16 +132,16 @@ pub const PositionOptions = struct {
 };
 
 pub const GoOptions = struct {
-    searchMoves: [][]const u8,
+    search_moves: [][]const u8,
     ponder: bool,
     wtime: u64,
     btime: u64,
     winc: u64,
     binc: u64,
-    movesToGo: u64,
+    moves_to_go: u64,
     depth: u64,
     nodes: u64,
     mate: u64,
-    moveTime: u64,
+    move_time: u64,
     infinite: bool,
 };

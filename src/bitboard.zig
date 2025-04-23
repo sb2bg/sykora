@@ -1,6 +1,8 @@
 const std = @import("std");
 const UciError = @import("uci_error.zig").UciError;
-const piece = @import("piece.zig");
+const pieceInfo = @import("piece.zig");
+const Color = pieceInfo.Color;
+const Type = pieceInfo.Type;
 const fen = @import("fen.zig");
 
 pub const Board = struct {
@@ -22,25 +24,25 @@ pub const Board = struct {
     pub fn makeMove(self: *Self, move: []const u8) UciError!void {
         if (move.len < 4) return error.InvalidArgument;
 
-        const fromFile = std.ascii.toLower(move[0]);
-        const fromRank = move[1];
-        const toFile = std.ascii.toLower(move[2]);
-        const toRank = move[3];
+        const from_file = std.ascii.toLower(move[0]);
+        const from_rank = move[1];
+        const to_file = std.ascii.toLower(move[2]);
+        const to_rank = move[3];
 
-        if (fromFile < 'a' or fromFile > 'h' or fromRank < '1' or fromRank > '8' or
-            toFile < 'a' or toFile > 'h' or toRank < '1' or toRank > '8')
+        if (from_file < 'a' or from_file > 'h' or from_rank < '1' or from_rank > '8' or
+            to_file < 'a' or to_file > 'h' or to_rank < '1' or to_rank > '8')
         {
             return error.InvalidArgument;
         }
 
-        const fromIndex = rankFileToIndex(fromRank, fromFile);
-        const toIndex = rankFileToIndex(toRank, toFile);
+        const from_index = rankFileToIndex(from_rank, from_file);
+        const to_index = rankFileToIndex(to_rank, to_file);
 
         const color = self.getTurn();
-        const piece_type = self.board.getPieceAt(fromIndex, color) orelse return error.InvalidMove;
+        const piece_type = self.board.getPieceAt(from_index, color) orelse return error.InvalidMove;
 
-        self.board.clearSquare(fromIndex);
-        self.board.setPieceAt(toIndex, color, piece_type);
+        self.board.clearSquare(from_index);
+        self.board.setPieceAt(to_index, color, piece_type);
 
         self.board.white_to_move = !self.board.white_to_move;
         self.board.fullmove_number += if (color == .black) 1 else 0;
@@ -50,8 +52,8 @@ pub const Board = struct {
         return 8 * (rank - '1') + (file - 'a');
     }
 
-    fn getTurn(self: Self) piece.Color {
-        return if (self.board.white_to_move) piece.Color.white else piece.Color.black;
+    fn getTurn(self: Self) pieceInfo.Color {
+        return if (self.board.white_to_move) pieceInfo.Color.white else pieceInfo.Color.black;
     }
 
     pub fn format(
@@ -92,15 +94,15 @@ pub const Board = struct {
 pub const BitBoard = struct {
     const Self = @This();
 
-    color_sets: [2]u64,
-    kind_sets: [6]u64,
+    color_sets: [2]u64 = undefined,
+    kind_sets: [6]u64 = undefined,
 
-    move: piece.Color = piece.Color.white,
+    move: pieceInfo.Color = pieceInfo.Color.white,
 
-    white_kingside_castle: bool = true,
-    white_queenside_castle: bool = true,
-    black_kingside_castle: bool = true,
-    black_queenside_castle: bool = true,
+    white_kingside_castle: bool = false,
+    white_queenside_castle: bool = false,
+    black_kingside_castle: bool = false,
+    black_queenside_castle: bool = false,
 
     en_passant_square: ?u8 = null,
     halfmove_clock: u8 = 0,
@@ -108,17 +110,14 @@ pub const BitBoard = struct {
     white_to_move: bool = true,
 
     pub fn init() Self {
-        return Self{
-            .color_sets = undefined,
-            .kind_sets = undefined,
-        };
+        return Self{};
     }
 
-    fn getColorBitboard(self: Self, color: piece.Color) u64 {
+    fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
         return self.color_sets[@intFromEnum(color)];
     }
 
-    fn getKindBitboard(self: Self, kind: piece.Type) u64 {
+    fn getKindBitboard(self: Self, kind: pieceInfo.Type) u64 {
         return self.kind_sets[@intFromEnum(kind)];
     }
 
@@ -133,13 +132,13 @@ pub const BitBoard = struct {
         }
     }
 
-    fn setPieceAt(self: *Self, index: u8, color: piece.Color, kind: piece.Type) void {
+    fn setPieceAt(self: *Self, index: u8, color: pieceInfo.Color, kind: pieceInfo.Type) void {
         const mask = @as(u64, 1) << @intCast(index);
         self.color_sets[@intFromEnum(color)] |= mask;
         self.kind_sets[@intFromEnum(kind)] |= mask;
     }
 
-    fn getPieceAt(self: Self, index: u8, color: piece.Color) ?piece.Type {
+    fn getPieceAt(self: Self, index: u8, color: pieceInfo.Color) ?pieceInfo.Type {
         const color_mask = @as(u64, 1) << @intCast(index);
         if ((self.color_sets[@intFromEnum(color)] & color_mask) == 0)
             return null;
@@ -150,5 +149,77 @@ pub const BitBoard = struct {
         }
 
         return null;
+    }
+
+    fn getFenString(self: Self) ![]u8 {
+        var buffer: [100]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        const writer = stream.writer();
+
+        for (0..8) |rank| {
+            const actual_rank = 7 - rank;
+            var empty_count: u8 = 0;
+
+            for (0..8) |file| {
+                const index = actual_rank * 8 + file;
+                const piece = self.getPieceAt(index);
+
+                if (piece) |p| {
+                    if (empty_count > 0) {
+                        try writer.print("{}", .{empty_count});
+                        empty_count = 0;
+                    }
+                    try writer.writeByte(p.getFenChar());
+                } else {
+                    empty_count += 1;
+                }
+            }
+
+            if (empty_count > 0) {
+                try writer.print("{}", .{empty_count});
+            }
+
+            if (rank != 7)
+                try writer.writeByte('/');
+        }
+
+        // Turn
+        try writer.print(" {}", .{if (self.white_to_move) 'w' else 'b'});
+
+        // Castling rights
+        try writer.writeByte(' ');
+        var any_castle = false;
+        if (self.white_kingside_castle) {
+            try writer.writeByte('K');
+            any_castle = true;
+        }
+        if (self.white_queenside_castle) {
+            try writer.writeByte('Q');
+            any_castle = true;
+        }
+        if (self.black_kingside_castle) {
+            try writer.writeByte('k');
+            any_castle = true;
+        }
+        if (self.black_queenside_castle) {
+            try writer.writeByte('q');
+            any_castle = true;
+        }
+        if (!any_castle) try writer.writeByte('-');
+
+        // En passant
+        try writer.writeByte(' ');
+        if (self.en_passant_square) |sq| {
+            const file = sq % 8 + 'a';
+            const rank = sq / 8 + '1';
+            try writer.writeByte(file);
+            try writer.writeByte(rank);
+        } else {
+            try writer.writeByte('-');
+        }
+
+        // Halfmove and fullmove
+        try writer.print(" {} {}", .{ self.halfmove_clock, self.fullmove_number });
+        return buffer[0..stream.pos];
     }
 };

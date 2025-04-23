@@ -76,19 +76,19 @@ pub const UciParser = struct {
                         .moves = null,
                     } };
                 } else if (std.mem.eql(u8, subCommand, "fen")) {
-                    var fenParts = std.ArrayList([]const u8).init(self.allocator);
-                    defer fenParts.deinit();
+                    var fen_parts = std.ArrayList([]const u8).init(self.allocator);
+                    defer fen_parts.deinit();
 
                     var curr = parser.next();
                     while (curr != null and !std.mem.eql(u8, curr.?, "moves")) {
-                        try fenParts.append(curr.?);
+                        try fen_parts.append(curr.?);
                         curr = parser.next();
                     }
 
-                    const fenJoined = try std.mem.join(self.allocator, " ", fenParts.items);
+                    const fen_joined = try std.mem.join(self.allocator, " ", fen_parts.items);
 
                     return ToEngineCommand{ .position = .{
-                        .value = .{ .fen = fenJoined },
+                        .value = .{ .fen = fen_joined },
                         .moves = null,
                     } };
                 } else {

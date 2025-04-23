@@ -14,10 +14,10 @@ pub const Uci = struct {
     const Self = @This();
     stdin: std.io.AnyReader,
     stdout: std.io.AnyWriter,
-    uciParser: UciParser,
+    uci_parser: UciParser,
     debug: bool,
     options: std.StringHashMap([]const u8),
-    searchThread: ?std.Thread,
+    search_thread: ?std.Thread,
     board: Board,
     allocator: std.mem.Allocator,
 
@@ -25,8 +25,8 @@ pub const Uci = struct {
         const uci = Uci{
             .stdin = stdin,
             .stdout = stdout,
-            .uciParser = UciParser.init(allocator),
-            .searchThread = null,
+            .uci_parser = UciParser.init(allocator),
+            .search_thread = null,
             .debug = false,
             .options = std.StringHashMap([]const u8).init(allocator),
             .board = Board.startpos(),
@@ -42,11 +42,13 @@ pub const Uci = struct {
         defer buf.deinit();
 
         while (true) {
+            defer buf.clearRetainingCapacity();
+
             self.stdin.streamUntilDelimiter(buf.writer(), '\n', null) catch {
                 return error.IOError;
             };
 
-            const command = self.uciParser.parseCommand(buf.items) catch |err| {
+            const command = self.uci_parser.parseCommand(buf.items) catch |err| {
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
                 continue;
             };
@@ -59,8 +61,6 @@ pub const Uci = struct {
 
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
             };
-
-            buf.clearRetainingCapacity();
         }
     }
 
@@ -80,9 +80,9 @@ pub const Uci = struct {
             .ucinewgame => {
                 self.board = Board.startpos();
 
-                if (self.searchThread != null) {
+                if (self.search_thread) |thread| {
                     // TODO: is this what we want?
-                    self.searchThread.?.detach();
+                    thread.detach();
                 }
             },
             .position => |positionOptions| {
