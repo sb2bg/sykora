@@ -62,7 +62,7 @@ pub const FenParser = struct {
                         'Q' => board.white_queenside_castle = true,
                         'k' => board.black_kingside_castle = true,
                         'q' => board.black_queenside_castle = true,
-                        else => return error.InvalidFen,
+                        else => {},
                     }
                 }
             }
