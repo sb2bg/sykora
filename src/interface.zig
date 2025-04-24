@@ -256,7 +256,7 @@ pub const Uci = struct {
 
         self.log_file = std.fs.cwd().openFile(value, .{ .mode = .read_write }) catch
             std.fs.cwd().createFile(value, .{}) catch return UciError.IOError;
+
+        self.log_file.?.seekFromEnd(0) catch return UciError.IOError;
     }
 };
-
-// setoption name Debug Log File value /Users/sullivanbognar/Coding/Zig/sykora/debug.log
