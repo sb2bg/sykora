@@ -20,6 +20,6 @@ fn tryMain() UciError!void {
         std.io.getStdOut().writer().any(),
         allocator,
     );
+    defer uci_interface.deinit();
     try uci_interface.run();
-    uci_interface.deinit();
 }

@@ -28,9 +28,11 @@ pub const Uci = struct {
     best_move: ?board.Move,
     log_file: ?std.fs.File,
 
-    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !Self {
+    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !*Self {
+        const uci_ptr = try allocator.create(Self);
         const stop_search = std.atomic.Value(bool).init(false);
-        var uci = Uci{
+
+        uci_ptr.* = Uci{
             .stdin = stdin,
             .stdout = stdout,
             .uci_parser = UciParser.init(allocator),
@@ -45,16 +47,16 @@ pub const Uci = struct {
         };
 
         // Add logging option
-        try uci.options.items.append(Option{
+        try uci_ptr.options.items.append(Option{
             .name = "Debug Log File",
             .type = .string,
             .default_value = "<empty>",
             .on_changed = handleLogFileChange,
-            .context = &uci,
+            .context = uci_ptr,
         });
 
-        try uci.writeStdout("{s} version {s} by {s}", .{ name, version, author });
-        return uci;
+        try uci_ptr.writeStdout("{s} version {s} by {s}", .{ name, version, author });
+        return uci_ptr;
     }
 
     pub fn deinit(self: *Self) void {
@@ -62,6 +64,7 @@ pub const Uci = struct {
             file.close();
         }
         self.options.deinit();
+        self.allocator.destroy(self);
     }
 
     pub fn run(self: *Self) UciError!void {
@@ -75,7 +78,7 @@ pub const Uci = struct {
             // Log input
             if (self.log_file) |file| {
                 const writer = file.writer();
-                writer.print("{s}\n", .{buf.items}) catch return UciError.IOError;
+                writer.print("> {s}\n", .{buf.items}) catch return UciError.IOError;
             }
 
             const command = self.uci_parser.parseCommand(buf.items) catch |err| {
@@ -237,26 +240,23 @@ pub const Uci = struct {
             return;
         }
 
-        // Log output
-        if (self.log_file) |file| {
-            const writer = file.writer();
-            writer.print("info string ", .{}) catch return UciError.IOError;
-            writer.print(fmt, args) catch return UciError.IOError;
-            writer.writeByte('\n') catch return UciError.IOError;
-        }
-
         self.stdout.print("info string ", .{}) catch return UciError.IOError;
         try self.writeStdout(fmt, args);
     }
 
-    fn handleLogFileChange(self: *Uci, value: []const u8) UciError!void {
+    fn handleLogFileChange(self: *Self, value: []const u8) !void {
+        if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
+            return;
+        }
+
         if (self.log_file) |file| {
             file.close();
             self.log_file = null;
         }
 
-        if (value.len > 0) {
-            self.log_file = std.fs.cwd().createFile(value, .{}) catch return UciError.IOError;
-        }
+        self.log_file = std.fs.cwd().openFile(value, .{ .mode = .read_write }) catch
+            std.fs.cwd().createFile(value, .{}) catch return UciError.IOError;
     }
 };
+
+// setoption name Debug Log File value /Users/sullivanbognar/Coding/Zig/sykora/debug.log
