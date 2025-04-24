@@ -89,6 +89,7 @@ pub const Board = struct {
 
         const color = self.getTurn();
         const piece_type = self.board.getPieceAt(from_index, color) orelse return error.InvalidMove;
+        const is_capture = self.board.getPieceAt(to_index, color) != null;
 
         // TODO: make sure the move is valid
 
@@ -105,6 +106,12 @@ pub const Board = struct {
 
         self.board.white_to_move = !self.board.white_to_move;
         self.board.fullmove_number += if (color == .black) 1 else 0;
+
+        if (piece_type == .pawn or is_capture) {
+            self.board.halfmove_clock = 0;
+        } else {
+            self.board.halfmove_clock += 1;
+        }
     }
 
     fn rankFileToIndex(rank: u8, file: u8) u8 {
