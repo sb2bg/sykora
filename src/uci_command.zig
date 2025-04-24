@@ -5,7 +5,6 @@ pub const ToEngine = enum {
     debug,
     isready,
     setoption,
-    register,
     ucinewgame,
     position,
     go,
@@ -64,12 +63,6 @@ pub const ToEngineCommand = union(ToEngine) {
     /// option in <id> should not be case sensitive and can inlude spaces.
     /// The substrings "value" and "name" should be avoided in <id> and <x>.
     setoption: SetOptionOptions,
-    /// **register** [later | name | code]
-    ///
-    /// this is the command to try to register an engine or to tell the engine
-    /// that registration will be done later. This command should always be
-    /// sent if the engine has sent "registration error" at program startup.
-    register: RegisterOptions,
     /// **ucinewgame**
     ///
     /// TODO
@@ -113,14 +106,6 @@ pub const ToEngineCommand = union(ToEngine) {
 pub const SetOptionOptions = struct {
     name: []const u8,
     value: ?[]const u8,
-};
-
-pub const RegisterOptions = union(enum) {
-    later,
-    now: struct {
-        name: []const u8,
-        code: []const u8,
-    },
 };
 
 pub const PositionOptions = struct {

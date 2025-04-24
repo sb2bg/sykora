@@ -50,30 +50,16 @@ pub const UciParser = struct {
                 return ToEngineCommand.isready;
             },
             .setoption => {
-                const name = parser.next() orelse return error.UnexpectedEOF;
+                var curr = parser.next() orelse return error.UnexpectedEOF;
+                var name = curr;
+                while (curr != null and !std.mem.eql(u8, curr.?, "value")) {
+                    name = curr;
+                    curr = parser.next();
+                }
+
                 // FIXME: there may not be a value in the case of a button, which is perfectly valid.
                 const value = parser.next() orelse return error.UnexpectedEOF;
                 return ToEngineCommand{ .setoption = .{ .name = name, .value = value } };
-            },
-            .register => {
-                const subCommand = parser.next() orelse return error.UnexpectedEOF;
-
-                if (std.mem.eql(u8, subCommand, "later")) {
-                    return ToEngineCommand{
-                        .register = .later,
-                    };
-                } else if (std.mem.eql(u8, subCommand, "now")) {
-                    const name = parser.next() orelse return error.UnexpectedEOF;
-                    const code = parser.next() orelse return error.UnexpectedEOF;
-                    return ToEngineCommand{ .register = .{
-                        .now = .{
-                            .name = name,
-                            .code = code,
-                        },
-                    } };
-                } else {
-                    return error.UnknownCommand;
-                }
             },
             .ucinewgame => {
                 return ToEngineCommand.ucinewgame;
