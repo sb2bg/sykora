@@ -6,6 +6,9 @@ const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
 const board = @import("bitboard.zig");
 const Board = board.Board;
+const options = @import("options.zig");
+const Options = options.Options;
+const Option = options.Option;
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
@@ -17,30 +20,56 @@ pub const Uci = struct {
     stdout: std.io.AnyWriter,
     uci_parser: UciParser,
     debug: bool,
-    options: std.StringHashMap([]const u8),
+    options: Options,
     stop_search: std.atomic.Value(bool),
     board: Board,
     allocator: std.mem.Allocator,
     search_thread: ?std.Thread,
     best_move: ?board.Move,
+    log_file: ?std.fs.File,
 
     pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !Self {
         const stop_search = std.atomic.Value(bool).init(false);
-        const uci = Uci{
+        var uci = Uci{
             .stdin = stdin,
             .stdout = stdout,
             .uci_parser = UciParser.init(allocator),
             .debug = false,
-            .options = std.StringHashMap([]const u8).init(allocator),
+            .options = Options.init(allocator),
             .board = Board.startpos(),
             .allocator = allocator,
             .stop_search = stop_search,
             .search_thread = null,
             .best_move = null,
+            .log_file = null,
         };
+
+        // Add logging option
+        try uci.options.items.append(Option{
+            .name = "Debug Log File",
+            .type = .string,
+            .default_value = null,
+            .on_changed = handleLogFileChange,
+            .context = &uci,
+        });
 
         try uci.writeStdout("{s} version {s} by {s}", .{ name, version, author });
         return uci;
+    }
+
+    pub fn deinit(self: *Self) void {
+        if (self.log_file) |file| {
+            file.close();
+        }
+        self.options.deinit();
+    }
+
+    fn writeToLog(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
+        if (self.log_file) |file| {
+            const writer = file.writer();
+            writer.print(fmt, args) catch return UciError.IOError;
+            writer.writeByte('\n') catch return UciError.IOError;
+        }
     }
 
     pub fn run(self: *Self) UciError!void {
@@ -49,10 +78,10 @@ pub const Uci = struct {
 
         while (true) {
             defer buf.clearRetainingCapacity();
+            self.stdin.streamUntilDelimiter(buf.writer(), '\n', null) catch return UciError.IOError;
 
-            self.stdin.streamUntilDelimiter(buf.writer(), '\n', null) catch {
-                return error.IOError;
-            };
+            // Log input
+            try self.writeToLog("> {s}", .{buf.items});
 
             const command = self.uci_parser.parseCommand(buf.items) catch |err| {
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
@@ -90,6 +119,7 @@ pub const Uci = struct {
             .uci => {
                 try self.writeStdout("id name {s}", .{name});
                 try self.writeStdout("id author {s}", .{author});
+                try self.options.printOptions(self.stdout);
                 try self.writeStdout("uciok", .{});
             },
             .debug => |value| {
@@ -131,9 +161,7 @@ pub const Uci = struct {
                 self.stop_search.store(false, .seq_cst);
                 self.best_move = null;
 
-                self.search_thread = std.Thread.spawn(.{}, Uci.search, .{ self, go_opts }) catch {
-                    return error.ThreadCreationFailed;
-                };
+                self.search_thread = std.Thread.spawn(.{}, Uci.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
             },
             .stop => {
                 try self.terminateSearch();
@@ -148,8 +176,18 @@ pub const Uci = struct {
                 return error.Unimplemented;
             },
             .setoption => |opts| {
-                try self.writeInfoString("{any}", .{opts});
-                return error.Unimplemented;
+                if (opts.value) |value| {
+                    try self.options.setOption(opts.name, value);
+                    try self.writeInfoString("option {s} set to {s}", .{ opts.name, value });
+                } else {
+                    if (self.options.getOption(opts.name)) |option| {
+                        if (option.type == .button) {
+                            // TODO: handle button press
+                            // not really sure what we are supposed to do here
+                        }
+                    }
+                    try self.writeInfoString("button {s} pressed", .{opts.name});
+                }
             },
             .perft => |depth| {
                 try self.writeInfoString("perft {d}", .{depth});
@@ -172,17 +210,20 @@ pub const Uci = struct {
 
         while (!self.stop_search.load(.seq_cst)) {}
 
+        self.best_move = board.Move.init(28, 36, null);
         try self.writeInfoString("search thread stopped", .{});
     }
 
     fn writeStdout(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
-        self.stdout.print(fmt, args) catch {
-            return error.IOError;
-        };
+        self.stdout.print(fmt, args) catch return UciError.IOError;
+        self.stdout.writeByte('\n') catch return UciError.IOError;
 
-        self.stdout.writeByte('\n') catch {
-            return error.IOError;
-        };
+        // Log output
+        if (self.log_file) |file| {
+            const writer = file.writer();
+            writer.print(fmt, args) catch return UciError.IOError;
+            writer.writeByte('\n') catch return UciError.IOError;
+        }
     }
 
     fn writeInfoString(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
@@ -190,10 +231,26 @@ pub const Uci = struct {
             return;
         }
 
-        self.stdout.print("info string ", .{}) catch {
-            return error.IOError;
-        };
+        // Log output
+        if (self.log_file) |file| {
+            const writer = file.writer();
+            writer.print("info string ", .{}) catch return UciError.IOError;
+            writer.print(fmt, args) catch return UciError.IOError;
+            writer.writeByte('\n') catch return UciError.IOError;
+        }
 
+        self.stdout.print("info string ", .{}) catch return UciError.IOError;
         try self.writeStdout(fmt, args);
+    }
+
+    fn handleLogFileChange(self: *Uci, value: []const u8) UciError!void {
+        if (self.log_file) |file| {
+            file.close();
+            self.log_file = null;
+        }
+
+        if (value.len > 0) {
+            self.log_file = std.fs.cwd().createFile(value, .{}) catch return UciError.IOError;
+        }
     }
 };
