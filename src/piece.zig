@@ -21,4 +21,16 @@ pub const Type = enum {
             .king => 'K',
         };
     }
+
+    pub fn fromChar(c: u8) ?Type {
+        return switch (c) {
+            'P', 'p' => .pawn,
+            'N', 'n' => .knight,
+            'B', 'b' => .bishop,
+            'R', 'r' => .rook,
+            'Q', 'q' => .queen,
+            'K', 'k' => .king,
+            else => null,
+        };
+    }
 };
