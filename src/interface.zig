@@ -48,7 +48,7 @@ pub const Uci = struct {
         try uci.options.items.append(Option{
             .name = "Debug Log File",
             .type = .string,
-            .default_value = null,
+            .default_value = "<empty>",
             .on_changed = handleLogFileChange,
             .context = &uci,
         });
@@ -153,7 +153,9 @@ pub const Uci = struct {
             },
             .display => {
                 try self.writeStdout("{}", .{self.board});
-                try self.writeStdout("fen {s}", .{try self.board.getFenString()});
+                const fen = try self.board.getFenString(self.allocator);
+                defer self.allocator.free(fen);
+                try self.writeStdout("fen {s}", .{fen});
             },
             .go => |go_opts| {
                 try self.writeInfoString("{any}", .{go_opts});
@@ -176,6 +178,8 @@ pub const Uci = struct {
                 return error.Unimplemented;
             },
             .setoption => |opts| {
+                defer self.allocator.free(opts.name);
+
                 if (opts.value) |value| {
                     try self.options.setOption(opts.name, value);
                     try self.writeInfoString("option {s} set to {s}", .{ opts.name, value });
@@ -196,10 +200,6 @@ pub const Uci = struct {
             .quit => {
                 // user wanted to quit, we return an error to break out of the loop
                 return error.Quit;
-            },
-            else => {
-                try self.writeInfoString("unsupported command", .{});
-                return error.UnsupportedCommand;
             },
         }
     }
