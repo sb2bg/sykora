@@ -21,4 +21,5 @@ fn tryMain() UciError!void {
         allocator,
     );
     try uci_interface.run();
+    uci_interface.deinit();
 }
