@@ -135,10 +135,7 @@ pub const UciParser = struct {
             },
             .perft => {
                 const depth = parser.next() orelse return error.UnexpectedEOF;
-
-                const parsed_depth = std.fmt.parseInt(u64, depth, 10) catch {
-                    return error.InvalidArgument;
-                };
+                const parsed_depth = std.fmt.parseInt(u64, depth, 10) catch return UciError.InvalidArgument;
 
                 return ToEngineCommand{ .perft = parsed_depth };
             },
