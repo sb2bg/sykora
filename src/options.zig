@@ -55,7 +55,7 @@ pub const Options = struct {
         self.items.append(option) catch return UciError.OutOfMemory;
     }
 
-    pub fn setOption(self: *Options, name: []const u8, value: []const u8) UciError!void {
+    pub fn setOption(self: *Options, name: []const u8, value: []const u8) UciError!bool {
         if (self.getOption(name)) |option| {
             switch (option.type) {
                 .check => {
@@ -66,7 +66,7 @@ pub const Options = struct {
                 .spin => {
                     if (option.min_value) |min| {
                         if (option.max_value) |max| {
-                            const val = std.fmt.parseInt(i32, value, 10) catch return;
+                            const val = std.fmt.parseInt(i32, value, 10) catch return error.InvalidArgument;
                             if (val >= min and val <= max) {
                                 option.current_value = value;
                             }
@@ -96,7 +96,11 @@ pub const Options = struct {
                     try callback(ctx, value);
                 }
             }
+
+            return true;
         }
+
+        return false;
     }
 
     pub fn printOptions(self: *Options, writer: anytype) UciError!void {
