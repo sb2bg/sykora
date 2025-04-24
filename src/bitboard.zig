@@ -3,6 +3,57 @@ const UciError = @import("uci_error.zig").UciError;
 const pieceInfo = @import("piece.zig");
 const fen = @import("fen.zig");
 
+pub const Move = struct {
+    const Self = @This();
+    from: u8,
+    to: u8,
+    promotion: ?pieceInfo.Type = null,
+
+    pub fn init(from: u8, to: u8, promotion: ?pieceInfo.Type) Self {
+        return Self{ .from = from, .to = to, .promotion = promotion };
+    }
+
+    pub fn fromString(str: []const u8) UciError!Self {
+        if (str.len < 4 or str.len > 5) return error.InvalidArgument;
+
+        const promotion_str = if (str.len == 5) std.ascii.toLower(str[4]) else null;
+        const from_file = std.ascii.toLower(str[0]);
+        const from_rank = str[1];
+        const to_file = std.ascii.toLower(str[2]);
+        const to_rank = str[3];
+
+        if (from_file < 'a' or from_file > 'h' or from_rank < '1' or from_rank > '8' or
+            to_file < 'a' or to_file > 'h' or to_rank < '1' or to_rank > '8')
+        {
+            return error.InvalidArgument;
+        }
+
+        const promotion = if (promotion_str) |p| pieceInfo.Type.fromChar(p) else null;
+        const from_index = Board.rankFileToIndex(from_rank, from_file);
+        const to_index = Board.rankFileToIndex(to_rank, to_file);
+
+        return Self.init(from_index, to_index, promotion);
+    }
+
+    pub fn format(
+        self: Self,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        const from_file = 'a' + (self.from % 8);
+        const from_rank = '1' + (self.from / 8);
+        const to_file = 'a' + (self.to % 8);
+        const to_rank = '1' + (self.to / 8);
+
+        try writer.print("{c}{c}{c}{c}", .{ from_file, from_rank, to_file, to_rank });
+
+        if (self.promotion) |p| {
+            try writer.print("{c}", .{std.ascii.toLower(p.getName())});
+        }
+    }
+};
+
 pub const Board = struct {
     const Self = @This();
     board: BitBoard,
