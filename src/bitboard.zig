@@ -156,14 +156,14 @@ pub const Board = struct {
         try writer.writeAll("    a   b   c   d   e   f   g   h\n");
     }
 
-    pub fn getFenString(self: Self) UciError![]u8 {
-        return getFenStringGenericError(self) catch UciError.IOError;
+    pub fn getFenString(self: Self, allocator: std.mem.Allocator) UciError![]u8 {
+        return getFenStringGenericError(self, allocator) catch UciError.IOError;
     }
 
-    fn getFenStringGenericError(self: Self) ![]u8 {
-        var buffer: [100]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
+    fn getFenStringGenericError(self: Self, allocator: std.mem.Allocator) ![]u8 {
+        var buffer = std.ArrayList(u8).init(allocator);
+        defer buffer.deinit();
+        const writer = buffer.writer();
 
         for (0..8) |rank| {
             const actual_rank = 7 - rank;
@@ -239,7 +239,7 @@ pub const Board = struct {
 
         // Halfmove and fullmove
         try writer.print(" {} {}", .{ self.board.halfmove_clock, self.board.fullmove_number });
-        return buffer[0..stream.pos];
+        return buffer.toOwnedSlice();
     }
 };
 
