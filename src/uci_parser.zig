@@ -136,15 +136,72 @@ pub const UciParser = struct {
             .perft => {
                 const depth = parser.next() orelse return error.UnexpectedEOF;
 
-                const passedDepth = std.fmt.parseInt(u64, depth, 10) catch {
+                const parsed_depth = std.fmt.parseInt(u64, depth, 10) catch {
                     return error.InvalidArgument;
                 };
 
-                return ToEngineCommand{ .perft = passedDepth };
+                return ToEngineCommand{ .perft = parsed_depth };
             },
-            else => {
-                // TODO: remove this once all commands are implemented
-                return error.Unimplemented;
+            .go => {
+                var go_params: cmd.GoOptions = .{};
+
+                while (parser.next()) |param| {
+                    if (std.mem.eql(u8, param, "searchmoves")) {
+                        var moves_list = std.ArrayList([]const u8).init(self.allocator);
+                        while (parser.peek()) |peeked| {
+                            if (std.mem.startsWith(u8, peeked, "ponder") or
+                                std.mem.startsWith(u8, peeked, "wtime") or
+                                std.mem.startsWith(u8, peeked, "btime") or
+                                std.mem.startsWith(u8, peeked, "winc") or
+                                std.mem.startsWith(u8, peeked, "binc") or
+                                std.mem.startsWith(u8, peeked, "movestogo") or
+                                std.mem.startsWith(u8, peeked, "depth") or
+                                std.mem.startsWith(u8, peeked, "nodes") or
+                                std.mem.startsWith(u8, peeked, "mate") or
+                                std.mem.startsWith(u8, peeked, "movetime") or
+                                std.mem.startsWith(u8, peeked, "infinite"))
+                            {
+                                break;
+                            }
+                            const move = parser.next() orelse break;
+                            try moves_list.append(move);
+                        }
+                        go_params.search_moves = moves_list.toOwnedSlice() catch &[_][]const u8{};
+                    } else if (std.mem.eql(u8, param, "ponder")) {
+                        go_params.ponder = true;
+                    } else if (std.mem.eql(u8, param, "wtime")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.wtime = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "btime")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.btime = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "winc")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.winc = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "binc")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.binc = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "movestogo")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.moves_to_go = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "depth")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.depth = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "nodes")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.nodes = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "mate")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.mate = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "movetime")) {
+                        const value = parser.next() orelse return error.UnexpectedEOF;
+                        go_params.move_time = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                    } else if (std.mem.eql(u8, param, "infinite")) {
+                        go_params.infinite = true;
+                    }
+                }
+
+                return ToEngineCommand{ .go = go_params };
             },
         };
     }
