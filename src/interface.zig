@@ -1,6 +1,7 @@
 const std = @import("std");
 const UciParser = @import("uci_parser.zig").UciParser;
-const ToEngineCommand = @import("uci_command.zig").ToEngineCommand;
+const uci_command = @import("uci_command.zig");
+const ToEngineCommand = uci_command.ToEngineCommand;
 const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
 const board = @import("bitboard.zig");
@@ -17,10 +18,11 @@ pub const Uci = struct {
     uci_parser: UciParser,
     debug: bool,
     options: std.StringHashMap([]const u8),
-    search_thread: ?std.Thread,
     stop_search: std.atomic.Value(bool),
     board: Board,
     allocator: std.mem.Allocator,
+    search_thread: ?std.Thread,
+    best_move: ?board.Move,
 
     pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !Self {
         const stop_search = std.atomic.Value(bool).init(false);
@@ -28,12 +30,13 @@ pub const Uci = struct {
             .stdin = stdin,
             .stdout = stdout,
             .uci_parser = UciParser.init(allocator),
-            .search_thread = null,
             .debug = false,
             .options = std.StringHashMap([]const u8).init(allocator),
             .board = Board.startpos(),
             .allocator = allocator,
             .stop_search = stop_search,
+            .search_thread = null,
+            .best_move = null,
         };
 
         try uci.writeStdout("{s} version {s} by {s}", .{ name, version, author });
@@ -58,12 +61,27 @@ pub const Uci = struct {
 
             self.handleCommand(command) catch |err| {
                 if (err == UciError.Quit) {
-                    // short circuit the loop to exit
+                    try self.terminateSearch();
                     return;
                 }
 
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
             };
+        }
+    }
+
+    fn terminateSearch(self: *Self) !void {
+        self.stop_search.store(true, .seq_cst);
+
+        if (self.search_thread) |thread| {
+            // time to see how long it takes to join the thread
+            const start = std.time.milliTimestamp();
+            thread.join(); // block until it finishes
+            self.search_thread = null;
+            const end = std.time.milliTimestamp();
+
+            const duration = end - start;
+            try self.writeInfoString("search thread joined in {d}ms", .{duration});
         }
     }
 
@@ -81,13 +99,8 @@ pub const Uci = struct {
                 try self.writeStdout("readyok", .{});
             },
             .ucinewgame => {
+                try self.terminateSearch();
                 self.board = Board.startpos();
-
-                if (self.search_thread) |thread| {
-                    self.stop_search.store(true, .seq_cst);
-                    thread.detach();
-                    self.search_thread = null;
-                }
             },
             .position => |pos_opts| {
                 switch (pos_opts.value) {
@@ -112,13 +125,34 @@ pub const Uci = struct {
                 try self.writeStdout("{}", .{self.board});
                 try self.writeStdout("fen {s}", .{try self.board.getFenString()});
             },
-            .go => |_| {
-                return error.Unimplemented;
+            .go => |go_opts| {
+                try self.writeInfoString("{any}", .{go_opts});
+                try self.writeInfoString("starting search thread", .{});
+                self.stop_search.store(false, .seq_cst);
+                self.best_move = null;
+
+                self.search_thread = std.Thread.spawn(.{}, Uci.search, .{ self, go_opts }) catch {
+                    return error.ThreadCreationFailed;
+                };
             },
             .stop => {
-                self.stop_search.store(true, .seq_cst);
+                try self.terminateSearch();
+
+                if (self.best_move) |move| {
+                    try self.writeStdout("bestmove {s}", .{move});
+                } else {
+                    try self.writeInfoString("failed to get best move", .{});
+                }
             },
             .ponderhit => {
+                return error.Unimplemented;
+            },
+            .setoption => |opts| {
+                try self.writeInfoString("{any}", .{opts});
+                return error.Unimplemented;
+            },
+            .perft => |depth| {
+                try self.writeInfoString("perft {d}", .{depth});
                 return error.Unimplemented;
             },
             .quit => {
@@ -126,9 +160,19 @@ pub const Uci = struct {
                 return error.Quit;
             },
             else => {
-                return error.Unimplemented;
+                try self.writeInfoString("unsupported command", .{});
+                return error.UnsupportedCommand;
             },
         }
+    }
+
+    fn search(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
+        try self.writeInfoString("search thread started", .{});
+        _ = go_opts;
+
+        while (!self.stop_search.load(.seq_cst)) {}
+
+        try self.writeInfoString("search thread stopped", .{});
     }
 
     fn writeStdout(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
