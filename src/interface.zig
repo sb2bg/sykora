@@ -64,14 +64,6 @@ pub const Uci = struct {
         self.options.deinit();
     }
 
-    fn writeToLog(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
-        if (self.log_file) |file| {
-            const writer = file.writer();
-            writer.print(fmt, args) catch return UciError.IOError;
-            writer.writeByte('\n') catch return UciError.IOError;
-        }
-    }
-
     pub fn run(self: *Self) UciError!void {
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
@@ -81,7 +73,10 @@ pub const Uci = struct {
             self.stdin.streamUntilDelimiter(buf.writer(), '\n', null) catch return UciError.IOError;
 
             // Log input
-            try self.writeToLog("> {s}", .{buf.items});
+            if (self.log_file) |file| {
+                const writer = file.writer();
+                writer.print("{s}\n", .{buf.items}) catch return UciError.IOError;
+            }
 
             const command = self.uci_parser.parseCommand(buf.items) catch |err| {
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
