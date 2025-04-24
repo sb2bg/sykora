@@ -87,18 +87,14 @@ pub const FenParser = struct {
         const halfmove_clock_option = parser.next();
 
         if (halfmove_clock_option) |halfmove_clock| {
-            board.halfmove_clock = std.fmt.parseInt(u8, halfmove_clock, 10) catch {
-                return error.InvalidFen;
-            };
+            board.halfmove_clock = std.fmt.parseInt(u8, halfmove_clock, 10) catch return UciError.InvalidFen;
         }
 
         // Parse fullmove number
         const fullmove_number_option = parser.next();
 
         if (fullmove_number_option) |fullmove_number| {
-            board.fullmove_number = std.fmt.parseInt(u16, fullmove_number, 10) catch {
-                return error.InvalidFen;
-            };
+            board.fullmove_number = std.fmt.parseInt(u16, fullmove_number, 10) catch return UciError.InvalidFen;
         }
 
         return board;
