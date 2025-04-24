@@ -174,20 +174,31 @@ pub const Uci = struct {
             },
             .setoption => |opts| {
                 defer self.allocator.free(opts.name);
+                const opt_name = opts.name;
 
                 if (opts.value) |value| {
-                    try self.options.setOption(opts.name, value);
-                    try self.writeInfoString("option {s} set to {s}", .{ opts.name, value });
-                } else {
-                    if (self.options.getOption(opts.name)) |option| {
-                        if (option.type == .button) {
-                            // TODO: handle button press
-                            // not really sure what we are supposed to do here
-                        }
+                    const success = try self.options.setOption(opt_name, value);
+
+                    if (success) {
+                        try self.writeInfoString("option {s} set to {s}", .{ opt_name, value });
+                    } else {
+                        try self.writeInfoString("option {s} does not exist", .{opt_name});
                     }
-                    try self.writeInfoString("button {s} pressed", .{opts.name});
+                } else {
+                    const option = self.options.getOption(opt_name) orelse {
+                        try self.writeInfoString("option {s} does not exist", .{opt_name});
+                        return;
+                    };
+
+                    if (option.type == .button) {
+                        try self.writeInfoString("button {s} pressed", .{opt_name});
+                        // TODO: handle button press
+                    } else {
+                        try self.writeInfoString("option {s} is not a button", .{opt_name});
+                    }
                 }
             },
+
             .perft => |depth| {
                 try self.writeInfoString("perft {d}", .{depth});
                 return error.Unimplemented;
