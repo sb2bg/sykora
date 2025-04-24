@@ -112,7 +112,7 @@ pub const ToEngineCommand = union(ToEngine) {
 
 pub const SetOptionOptions = struct {
     name: []const u8,
-    value: []const u8,
+    value: ?[]const u8,
 };
 
 pub const RegisterOptions = union(enum) {
