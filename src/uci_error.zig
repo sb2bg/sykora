@@ -6,9 +6,11 @@ pub const UciError = error{
     InvalidFen,
     InvalidMove,
     Unimplemented,
+    UnsupportedCommand,
     IOError,
     OutOfMemory,
     Quit,
+    ThreadCreationFailed,
 };
 
 pub fn getErrorDescriptor(err: UciError) []const u8 {
@@ -23,5 +25,7 @@ pub fn getErrorDescriptor(err: UciError) []const u8 {
         UciError.IOError => "IO error",
         UciError.OutOfMemory => "out of memory",
         UciError.Quit => "quit",
+        UciError.ThreadCreationFailed => "thread creation failed",
+        UciError.UnsupportedCommand => "unsupported command",
     };
 }
