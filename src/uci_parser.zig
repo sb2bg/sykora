@@ -50,14 +50,32 @@ pub const UciParser = struct {
                 return ToEngineCommand.isready;
             },
             .setoption => {
-                var curr = parser.next() orelse return error.UnexpectedEOF;
-                var name = curr;
+                if (parser.next()) |next| {
+                    if (!std.mem.eql(u8, next, "name")) {
+                        return error.InvalidArgument;
+                    }
+                } else return error.UnexpectedEOF;
+
+                var name_parts = std.ArrayList([]const u8).init(self.allocator);
+                defer name_parts.deinit();
+                var curr = parser.next();
                 while (curr != null and !std.mem.eql(u8, curr.?, "value")) {
-                    name = curr;
+                    try name_parts.append(curr.?);
                     curr = parser.next();
                 }
 
-                // FIXME: there may not be a value in the case of a button, which is perfectly valid.
+                const name = try std.mem.join(self.allocator, " ", name_parts.items);
+
+                if (curr == null) {
+                    // we are a button
+                    return ToEngineCommand{ .setoption = .{ .name = name, .value = null } };
+                }
+
+                if (!std.mem.eql(u8, curr.?, "value")) {
+                    return error.UnknownCommand;
+                }
+
+                // TODO: check if value can have spaces
                 const value = parser.next() orelse return error.UnexpectedEOF;
                 return ToEngineCommand{ .setoption = .{ .name = name, .value = value } };
             },
@@ -65,10 +83,9 @@ pub const UciParser = struct {
                 return ToEngineCommand.ucinewgame;
             },
             .position => {
-                const subCommand = parser.next() orelse return error.UnexpectedEOF;
-
-                const is_startpos = std.mem.eql(u8, subCommand, "startpos");
-                const is_fen = std.mem.eql(u8, subCommand, "fen");
+                const sub_command = parser.next() orelse return error.UnexpectedEOF;
+                const is_startpos = std.mem.eql(u8, sub_command, "startpos");
+                const is_fen = std.mem.eql(u8, sub_command, "fen");
 
                 if (!is_startpos and !is_fen) return error.UnknownCommand;
 
