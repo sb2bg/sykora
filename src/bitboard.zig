@@ -150,9 +150,7 @@ pub const Board = struct {
     }
 
     pub fn getFenString(self: Self) UciError![]u8 {
-        return getFenStringGenericError(self) catch {
-            return error.IOError;
-        };
+        return getFenStringGenericError(self) catch UciError.IOError;
     }
 
     fn getFenStringGenericError(self: Self) ![]u8 {
