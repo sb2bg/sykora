@@ -41,6 +41,12 @@ pub const Move = struct {
         _: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
+        if (self.from == 0 and self.to == 0 and self.promotion == null) {
+            // null move
+            try writer.writeAll("0000");
+            return;
+        }
+
         const from_file = 'a' + (self.from % 8);
         const from_rank = '1' + (self.from / 8);
         const to_file = 'a' + (self.to % 8);
@@ -114,11 +120,15 @@ pub const Board = struct {
         }
     }
 
-    fn rankFileToIndex(rank: u8, file: u8) u8 {
-        return 8 * (rank - '1') + (file - 'a');
+    inline fn rankFileToIndex(rank: u8, file: u8) u8 {
+        return rankFileToSquare(rank - '1', file - 'a');
     }
 
-    fn getTurn(self: Self) pieceInfo.Color {
+    inline fn rankFileToSquare(rank: u8, file: u8) u8 {
+        return rank * 8 + file;
+    }
+
+    inline fn getTurn(self: Self) pieceInfo.Color {
         return if (self.board.white_to_move) pieceInfo.Color.white else pieceInfo.Color.black;
     }
 
@@ -301,5 +311,13 @@ pub const BitBoard = struct {
         }
 
         return null;
+    }
+
+    inline fn occupied(self: Self) u64 {
+        return self.color_sets[0] | self.color_sets[1];
+    }
+
+    inline fn empty(self: Self) u64 {
+        return ~self.occupied();
     }
 };
