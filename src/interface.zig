@@ -25,7 +25,7 @@ pub const Uci = struct {
     board: Board,
     allocator: std.mem.Allocator,
     search_thread: ?std.Thread,
-    best_move: ?board.Move,
+    best_move: board.Move,
     log_file: ?std.fs.File,
 
     pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !*Self {
@@ -42,7 +42,7 @@ pub const Uci = struct {
             .allocator = allocator,
             .stop_search = stop_search,
             .search_thread = null,
-            .best_move = null,
+            .best_move = board.Move.init(0, 0, null), // null move
             .log_file = null,
         };
 
@@ -159,18 +159,12 @@ pub const Uci = struct {
                 try self.writeInfoString("{any}", .{go_opts});
                 try self.writeInfoString("starting search thread", .{});
                 self.stop_search.store(false, .seq_cst);
-                self.best_move = null;
+                self.best_move = board.Move.init(0, 0, null);
 
                 self.search_thread = std.Thread.spawn(.{}, Uci.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
             },
             .stop => {
                 try self.terminateSearch();
-
-                if (self.best_move) |move| {
-                    try self.writeStdout("bestmove {s}", .{move});
-                } else {
-                    try self.writeInfoString("failed to get best move", .{});
-                }
             },
             .ponderhit => {
                 return error.Unimplemented;
@@ -215,12 +209,58 @@ pub const Uci = struct {
 
     fn search(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
         try self.writeInfoString("search thread started", .{});
-        _ = go_opts;
 
-        while (!self.stop_search.load(.seq_cst)) {}
+        // const start_time = std.time.milliTimestamp();
+        var time_limit: ?u64 = null;
 
-        self.best_move = board.Move.init(28, 36, null);
+        if (go_opts.infinite) |infinite| {
+            if (infinite) {
+                time_limit = null;
+            }
+        } else if (go_opts.move_time) |move_time| {
+            time_limit = move_time;
+        } else if (go_opts.wtime) |wtime| {
+            time_limit = wtime / 100;
+        } else if (go_opts.btime) |btime| {
+            time_limit = btime / 100;
+        }
+
+        // const legal_moves = try self.board.generateLegalMoves();
+        // defer self.allocator.free(legal_moves);
+
+        // var best_eval: i32 = -9999;
+        // var best_move: ?board.Move = null;
+        // var nodes: usize = 0;
+
+        // for (legal_moves) |mv| {
+        //     if (self.stop_search.load(.seq_cst)) break;
+
+        //     // Dummy evaluation for demonstration
+        //     const score = 20 + mv.to; // replace with real eval
+        //     nodes += 1;
+
+        //     try self.writeStdout(
+        //         "info depth 1 seldepth 1 score cp {d} nodes {d} nps {d} time {d} pv {s}",
+        //         .{
+        //             score,
+        //             nodes,
+        //             nodes * 1000,
+        //             std.time.milliTimestamp() - start_time,
+        //             mv,
+        //         },
+        //     );
+
+        //     if (score > best_eval) {
+        //         best_eval = score;
+        //         best_move = mv;
+        //     }
+
+        //     std.time.sleep(10 * std.time.ns_per_ms); // simulate work
+        // }
+
+        // self.best_move = best_move orelse board.Move.init(28, 36, null);
         try self.writeInfoString("search thread stopped", .{});
+        try self.writeStdout("bestmove {s}", .{self.best_move});
     }
 
     fn writeStdout(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
