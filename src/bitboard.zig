@@ -110,7 +110,7 @@ pub const Board = struct {
         self.board.clearSquare(from_index);
         self.board.setPieceAt(to_index, color, piece_type);
 
-        self.board.white_to_move = !self.board.white_to_move;
+        self.board.move = if (self.board.whiteToMove()) pieceInfo.Color.black else pieceInfo.Color.white;
         self.board.fullmove_number += if (color == .black) 1 else 0;
 
         if (piece_type == .pawn or is_capture) {
@@ -129,7 +129,7 @@ pub const Board = struct {
     }
 
     inline fn getTurn(self: Self) pieceInfo.Color {
-        return if (self.board.white_to_move) pieceInfo.Color.white else pieceInfo.Color.black;
+        return self.board.move;
     }
 
     pub fn format(
@@ -211,7 +211,7 @@ pub const Board = struct {
         }
 
         // Turn
-        const turn: u8 = if (self.board.white_to_move) 'w' else 'b';
+        const turn: u8 = if (self.board.move == .white) 'w' else 'b';
         try writer.writeByte(' ');
         try writer.writeByte(turn);
 
@@ -269,7 +269,6 @@ pub const BitBoard = struct {
     en_passant_square: ?u8 = null,
     halfmove_clock: u8 = 0,
     fullmove_number: u16 = 1,
-    white_to_move: bool = true,
 
     pub fn init() Self {
         return Self{};
@@ -311,6 +310,10 @@ pub const BitBoard = struct {
         }
 
         return null;
+    }
+
+    fn whiteToMove(self: Self) bool {
+        return self.move == pieceInfo.Color.white;
     }
 
     inline fn occupied(self: Self) u64 {
