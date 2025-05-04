@@ -3,6 +3,7 @@ const uci = @import("interface.zig");
 const Uci = uci.Uci;
 const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
+
 pub fn main() void {
     tryMain() catch |err| {
         std.log.err("Encountered an unrecoverable error while running Sykora.\n", .{});
