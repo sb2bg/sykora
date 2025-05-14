@@ -195,7 +195,6 @@ pub const Uci = struct {
                     }
                 }
             },
-
             .perft => |depth| {
                 try self.writeInfoString("perft {d}", .{depth});
                 return error.Unimplemented;
