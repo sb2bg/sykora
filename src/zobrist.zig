@@ -110,7 +110,7 @@ pub const Random64 = [_]u64{
 pub const RandomPiece = Random64[0..768];
 pub const RandomCastle = Random64[768..772];
 pub const RandomEnPassant = Random64[772..780];
-pub const RandomTurn = Random64[780..781];
+pub const RandomTurn = Random64[780];
 
 pub const ZobristHasher = struct {
     const Self = @This();
@@ -123,7 +123,7 @@ pub const ZobristHasher = struct {
     pub fn hash(self: *Self, board: BitBoard) void {
         var hash_value: u64 = 0;
 
-        // Hash in piece positions
+        // piece positions
         for (0..64) |sq| {
             if (board.getPieceAt(@intCast(sq), .white)) |piece_type| {
                 hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .white) + sq];
@@ -132,13 +132,13 @@ pub const ZobristHasher = struct {
             }
         }
 
-        // Hash in castling rights
+        // castling rights
         if (board.white_kingside_castle) hash_value ^= RandomCastle[0];
         if (board.white_queenside_castle) hash_value ^= RandomCastle[1];
         if (board.black_kingside_castle) hash_value ^= RandomCastle[2];
         if (board.black_queenside_castle) hash_value ^= RandomCastle[3];
 
-        // Hash in en passant file if applicable
+        // en passant file, if applicable
         if (board.en_passant_square) |ep_sq| {
             const ep_file = ep_sq % 8;
             if (hasAdjacentPawn(board, ep_sq, board.move)) {
@@ -146,9 +146,9 @@ pub const ZobristHasher = struct {
             }
         }
 
-        // Hash in side to move
+        // side to move
         if (board.whiteToMove()) {
-            hash_value ^= RandomTurn[0];
+            hash_value ^= RandomTurn;
         }
 
         self.zobrist_hash = hash_value;
