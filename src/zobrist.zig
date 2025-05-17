@@ -126,13 +126,10 @@ pub const ZobristHasher = struct {
         // Hash in piece positions
         for (0..64) |sq| {
             if (board.getPieceAt(@intCast(sq), .white)) |piece_type| {
-                const idx: usize = @intFromEnum(piece_type);
-                const kind_index = 2 * idx + @intFromEnum(pieceInfo.Color.white);
-                hash_value ^= RandomPiece[@as(usize, 64) * kind_index + sq];
+                // index is 64*kind_of_piece+8*row+file;
+                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .white) + 8 * (sq / 8) + (sq % 8)];
             } else if (board.getPieceAt(@intCast(sq), .black)) |piece_type| {
-                const idx: usize = @intFromEnum(piece_type);
-                const kind_index = 2 * idx + @intFromEnum(pieceInfo.Color.black);
-                hash_value ^= RandomPiece[@as(usize, 64) * kind_index + sq];
+                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .black) + 8 * (sq / 8) + (sq % 8)];
             }
         }
 
@@ -156,6 +153,35 @@ pub const ZobristHasher = struct {
         }
 
         self.zobrist_hash = hash_value;
+    }
+
+    fn getPieceValue(piece_type: PieceType, color: Color) usize {
+        return switch (piece_type) {
+            .pawn => switch (color) {
+                .white => 1,
+                .black => 0,
+            },
+            .knight => switch (color) {
+                .white => 3,
+                .black => 2,
+            },
+            .bishop => switch (color) {
+                .white => 5,
+                .black => 4,
+            },
+            .rook => switch (color) {
+                .white => 7,
+                .black => 6,
+            },
+            .queen => switch (color) {
+                .white => 9,
+                .black => 8,
+            },
+            .king => switch (color) {
+                .white => 11,
+                .black => 10,
+            },
+        };
     }
 
     fn hasAdjacentPawn(board: BitBoard, ep_sq: u8, color: Color) bool {
