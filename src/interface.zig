@@ -9,7 +9,7 @@ const Board = board.Board;
 const options = @import("options.zig");
 const Options = options.Options;
 const Option = options.Option;
-const ZobristHasher = @import("hasher.zig").ZobristHasher;
+const ZobristHasher = @import("zobrist.zig").ZobristHasher;
 
 const name = "Sykora";
 const author = "Sullivan Bognar";

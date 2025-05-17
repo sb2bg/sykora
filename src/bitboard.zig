@@ -2,8 +2,8 @@ const std = @import("std");
 const UciError = @import("uci_error.zig").UciError;
 const pieceInfo = @import("piece.zig");
 const fen = @import("fen.zig");
-const hasher = @import("hasher.zig");
-const ZobristHasher = hasher.ZobristHasher;
+const zobrist = @import("zobrist.zig");
+const ZobristHasher = zobrist.ZobristHasher;
 
 pub const Move = struct {
     const Self = @This();
