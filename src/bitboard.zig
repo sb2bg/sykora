@@ -310,7 +310,7 @@ pub const BitBoard = struct {
         self.kind_sets[@intFromEnum(kind)] |= mask;
     }
 
-    fn getPieceAt(self: Self, index: u8, color: pieceInfo.Color) ?pieceInfo.Type {
+    pub fn getPieceAt(self: Self, index: u8, color: pieceInfo.Color) ?pieceInfo.Type {
         const color_mask = @as(u64, 1) << @intCast(index);
         if ((self.color_sets[@intFromEnum(color)] & color_mask) == 0)
             return null;
@@ -323,7 +323,7 @@ pub const BitBoard = struct {
         return null;
     }
 
-    fn whiteToMove(self: Self) bool {
+    pub fn whiteToMove(self: Self) bool {
         return self.move == pieceInfo.Color.white;
     }
 
