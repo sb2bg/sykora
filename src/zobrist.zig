@@ -126,10 +126,9 @@ pub const ZobristHasher = struct {
         // Hash in piece positions
         for (0..64) |sq| {
             if (board.getPieceAt(@intCast(sq), .white)) |piece_type| {
-                // index is 64*kind_of_piece+8*row+file;
-                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .white) + 8 * (sq / 8) + (sq % 8)];
+                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .white) + sq];
             } else if (board.getPieceAt(@intCast(sq), .black)) |piece_type| {
-                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .black) + 8 * (sq / 8) + (sq % 8)];
+                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .black) + sq];
             }
         }
 
