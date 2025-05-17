@@ -9,6 +9,7 @@ const Board = board.Board;
 const options = @import("options.zig");
 const Options = options.Options;
 const Option = options.Option;
+const ZobristHasher = @import("hasher.zig").ZobristHasher;
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
@@ -154,6 +155,7 @@ pub const Uci = struct {
                 const fen = try self.board.getFenString(self.allocator);
                 defer self.allocator.free(fen);
                 try self.writeStdout("fen {s}", .{fen});
+                try self.writeStdout("zobrist {d}", .{self.board.zobrist_hasher.zobrist_hash});
             },
             .go => |go_opts| {
                 try self.writeInfoString("{any}", .{go_opts});

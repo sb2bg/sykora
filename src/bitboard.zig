@@ -2,6 +2,8 @@ const std = @import("std");
 const UciError = @import("uci_error.zig").UciError;
 const pieceInfo = @import("piece.zig");
 const fen = @import("fen.zig");
+const hasher = @import("hasher.zig");
+const ZobristHasher = hasher.ZobristHasher;
 
 pub const Move = struct {
     const Self = @This();
@@ -63,9 +65,13 @@ pub const Move = struct {
 pub const Board = struct {
     const Self = @This();
     board: BitBoard,
+    zobrist_hasher: ZobristHasher = ZobristHasher.init(),
 
     pub fn init() Self {
-        return Self{ .board = .{} };
+        const board = BitBoard.init();
+        var self = Self{ .board = board };
+        self.zobrist_hasher.hash(self.board);
+        return self;
     }
 
     pub fn startpos() Self {
@@ -73,7 +79,10 @@ pub const Board = struct {
     }
 
     pub fn fromFen(fen_str: []const u8) UciError!Self {
-        return Self{ .board = try fen.FenParser.parse(fen_str) };
+        const board = try fen.FenParser.parse(fen_str);
+        var self = Self{ .board = board };
+        self.zobrist_hasher.hash(self.board);
+        return self;
     }
 
     pub fn makeMove(self: *Self, move: []const u8) UciError!void {
@@ -118,6 +127,8 @@ pub const Board = struct {
         } else {
             self.board.halfmove_clock += 1;
         }
+
+        self.zobrist_hasher.updateHash(from_index, piece_type, piece_type, color);
     }
 
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
