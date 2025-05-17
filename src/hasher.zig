@@ -121,8 +121,63 @@ pub const ZobristHasher = struct {
     }
 
     pub fn hash(self: *Self, board: BitBoard) void {
-        _ = board;
-        self.zobrist_hash = getPieceValue(.white, .king);
+        var hash_value: u64 = 0;
+
+        // Hash in piece positions
+        for (0..64) |sq| {
+            if (board.getPieceAt(@intCast(sq), .white)) |piece_type| {
+                const idx: usize = @intFromEnum(piece_type);
+                const kind_index = 2 * idx + @intFromEnum(pieceInfo.Color.white);
+                hash_value ^= RandomPiece[@as(usize, 64) * kind_index + sq];
+            } else if (board.getPieceAt(@intCast(sq), .black)) |piece_type| {
+                const idx: usize = @intFromEnum(piece_type);
+                const kind_index = 2 * idx + @intFromEnum(pieceInfo.Color.black);
+                hash_value ^= RandomPiece[@as(usize, 64) * kind_index + sq];
+            }
+        }
+
+        // Hash in castling rights
+        if (board.white_kingside_castle) hash_value ^= RandomCastle[0];
+        if (board.white_queenside_castle) hash_value ^= RandomCastle[1];
+        if (board.black_kingside_castle) hash_value ^= RandomCastle[2];
+        if (board.black_queenside_castle) hash_value ^= RandomCastle[3];
+
+        // Hash in en passant file if applicable
+        if (board.en_passant_square) |ep_sq| {
+            const ep_file = ep_sq % 8;
+            if (hasAdjacentPawn(board, ep_sq, board.move)) {
+                hash_value ^= RandomEnPassant[ep_file];
+            }
+        }
+
+        // Hash in side to move
+        if (board.whiteToMove()) {
+            hash_value ^= RandomTurn[0];
+        }
+
+        self.zobrist_hash = hash_value;
+    }
+
+    fn hasAdjacentPawn(board: BitBoard, ep_sq: u8, color: Color) bool {
+        const file = ep_sq % 8;
+
+        var result = false;
+
+        if (file > 0) {
+            const left = ep_sq - 1;
+            if (board.getPieceAt(left, color)) |pt| {
+                if (pt == .pawn) result = true;
+            }
+        }
+
+        if (file < 7) {
+            const right = ep_sq + 1;
+            if (board.getPieceAt(right, color)) |pt| {
+                if (pt == .pawn) result = true;
+            }
+        }
+
+        return result;
     }
 
     pub fn updateHash(
@@ -137,34 +192,5 @@ pub const ZobristHasher = struct {
         _ = piece_type;
         _ = new_piece_type;
         _ = color;
-    }
-
-    fn getPieceValue(color: Color, piece_type: PieceType) u8 {
-        return switch (piece_type) {
-            .pawn => switch (color) {
-                .black => 0,
-                .white => 1,
-            },
-            .knight => switch (color) {
-                .black => 2,
-                .white => 3,
-            },
-            .bishop => switch (color) {
-                .black => 4,
-                .white => 5,
-            },
-            .rook => switch (color) {
-                .black => 6,
-                .white => 7,
-            },
-            .queen => switch (color) {
-                .black => 8,
-                .white => 9,
-            },
-            .king => switch (color) {
-                .black => 10,
-                .white => 11,
-            },
-        };
     }
 };
