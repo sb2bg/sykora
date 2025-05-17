@@ -1,5 +1,7 @@
 # Sykora
 
+![Sykora Logo](https://github.com/sb2bg/sykora/blob/main/assets/logo.png)
+
 Sykora is a chess engine written in Zig that implements the Universal Chess Interface (UCI) protocol. It provides a robust and efficient implementation of chess game logic and UCI communication.
 
 ## Features
@@ -53,4 +55,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-[Add your license information here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
