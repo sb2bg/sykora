@@ -146,7 +146,7 @@ pub const Uci = struct {
                     defer self.allocator.free(moves);
 
                     for (moves) |move| {
-                        try self.board.makeMove(move);
+                        try self.board.makeStrMove(move);
                     }
                 }
             },

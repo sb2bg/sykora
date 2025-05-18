@@ -85,7 +85,7 @@ pub const Board = struct {
         return self;
     }
 
-    pub fn makeMove(self: *Self, move: []const u8) UciError!void {
+    pub fn makeStrMove(self: *Self, move: []const u8) UciError!void {
         if (move.len != 4) return error.InvalidArgument;
 
         const from_file = std.ascii.toLower(move[0]);
@@ -129,6 +129,12 @@ pub const Board = struct {
         }
 
         self.zobrist_hasher.updateHash(from_index, piece_type, piece_type, color);
+    }
+
+    pub fn makeMove(self: *Self, move: Move) UciError!void {
+        _ = move;
+        _ = self;
+        return error.Unimplemented;
     }
 
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
