@@ -106,6 +106,10 @@ pub const Board = struct {
         const piece_type = self.board.getPieceAt(from_index, color) orelse return error.InvalidMove;
         const is_capture = self.board.getPieceAt(to_index, color) != null;
 
+        const prev_castle = self.board.castle_rights;
+        const prev_ep = self.board.en_passant_square;
+        const captured = self.board.getPieceAt(to_index, if (color == .white) .black else .white);
+
         // TODO: make sure the move is valid
 
         if (piece_type == .pawn) {
@@ -128,7 +132,17 @@ pub const Board = struct {
             self.board.halfmove_clock += 1;
         }
 
-        self.zobrist_hasher.updateHash(from_index, piece_type, piece_type, color);
+        self.zobrist_hasher.updateHash(
+            from_index,
+            to_index, // destination
+            piece_type, // what moved
+            color, // its colour
+            captured, // maybe something was taken
+            prev_castle, // castle rights before move
+            self.board.castle_rights, // castle rights after move
+            prev_ep, // old en-passant square
+            self.board.en_passant_square, // new ep square
+        );
     }
 
     pub fn makeMove(self: *Self, move: Move) UciError!void {
@@ -235,19 +249,19 @@ pub const Board = struct {
         // Castling rights
         try writer.writeByte(' ');
         var any_castle = false;
-        if (self.board.white_kingside_castle) {
+        if (self.board.castle_rights.white_kingside) {
             try writer.writeByte('K');
             any_castle = true;
         }
-        if (self.board.white_queenside_castle) {
+        if (self.board.castle_rights.white_queenside) {
             try writer.writeByte('Q');
             any_castle = true;
         }
-        if (self.board.black_kingside_castle) {
+        if (self.board.castle_rights.black_kingside) {
             try writer.writeByte('k');
             any_castle = true;
         }
-        if (self.board.black_queenside_castle) {
+        if (self.board.castle_rights.black_queenside) {
             try writer.writeByte('q');
             any_castle = true;
         }
@@ -270,6 +284,13 @@ pub const Board = struct {
     }
 };
 
+pub const CastleRights = struct {
+    white_kingside: bool = false,
+    white_queenside: bool = false,
+    black_kingside: bool = false,
+    black_queenside: bool = false,
+};
+
 pub const BitBoard = struct {
     const Self = @This();
 
@@ -278,10 +299,7 @@ pub const BitBoard = struct {
 
     move: pieceInfo.Color = pieceInfo.Color.white,
 
-    white_kingside_castle: bool = false,
-    white_queenside_castle: bool = false,
-    black_kingside_castle: bool = false,
-    black_queenside_castle: bool = false,
+    castle_rights: CastleRights = CastleRights{},
 
     en_passant_square: ?u8 = null,
     halfmove_clock: u8 = 0,

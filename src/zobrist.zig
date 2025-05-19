@@ -5,7 +5,9 @@ const bitboard = @import("bitboard.zig");
 const PieceType = pieceInfo.Type;
 const Color = pieceInfo.Color;
 const BitBoard = bitboard.BitBoard;
+const CastleRights = bitboard.CastleRights;
 
+// Polyglot zobrist hash table for opening book compatibility
 pub const Random64 = [_]u64{
     0x9D39247E33776D41, 0x2AF7398005AAA5C7, 0x44DB015024623547, 0x9C15F73E62A76AE2, 0x75834465489C0C89, 0x3290AC3A203001BF, 0x0FBBAD1F61042279, 0xE83A908FF2FB60CA,
     0x0D7E765D58755C10, 0x1A083822CEAFE02D, 0x9605D5F0E25EC3B0, 0xD021FF5CD13A2ED5, 0x40BDF15D4A672E32, 0x011355146FD56395, 0x5DB4832046F3D9E5, 0x239F8B2D7FF719CC,
@@ -116,10 +118,17 @@ pub const ZobristHasher = struct {
     const Self = @This();
     zobrist_hash: u64,
 
+    /// Initialize a new ZobristHasher with a zero hash value
     pub fn init() Self {
         return Self{ .zobrist_hash = 0 };
     }
 
+    /// Compute the Zobrist hash for a given board position.
+    /// This considers piece positions, castling rights, en passant possibilities,
+    /// and the side to move.
+    ///
+    /// Parameters:
+    ///   - board: The BitBoard representing the current chess position
     pub fn hash(self: *Self, board: BitBoard) void {
         var hash_value: u64 = 0;
 
@@ -133,10 +142,10 @@ pub const ZobristHasher = struct {
         }
 
         // castling rights
-        if (board.white_kingside_castle) hash_value ^= RandomCastle[0];
-        if (board.white_queenside_castle) hash_value ^= RandomCastle[1];
-        if (board.black_kingside_castle) hash_value ^= RandomCastle[2];
-        if (board.black_queenside_castle) hash_value ^= RandomCastle[3];
+        if (board.castle_rights.white_kingside) hash_value ^= RandomCastle[0];
+        if (board.castle_rights.white_queenside) hash_value ^= RandomCastle[1];
+        if (board.castle_rights.black_kingside) hash_value ^= RandomCastle[2];
+        if (board.castle_rights.black_queenside) hash_value ^= RandomCastle[3];
 
         // en passant file, if applicable
         if (board.en_passant_square) |ep_sq| {
@@ -154,6 +163,14 @@ pub const ZobristHasher = struct {
         self.zobrist_hash = hash_value;
     }
 
+    /// Convert a piece type and color into an index value for the Zobrist hash table.
+    /// This is used to map each piece to its corresponding set of random numbers.
+    ///
+    /// Parameters:
+    ///   - piece_type: The type of chess piece (pawn, knight, etc.)
+    ///   - color: The color of the piece (white or black)
+    ///
+    /// Returns: An index into the RandomPiece array
     fn getPieceValue(piece_type: PieceType, color: Color) usize {
         return switch (piece_type) {
             .pawn => switch (color) {
@@ -183,6 +200,15 @@ pub const ZobristHasher = struct {
         };
     }
 
+    /// Check if there are any pawns of the given color adjacent to the specified square.
+    /// This is used for determining if an en passant capture is possible.
+    ///
+    /// Parameters:
+    ///   - board: The current board position
+    ///   - ep_sq: The en passant square to check
+    ///   - color: The color of the pawns to look for
+    ///
+    /// Returns: true if there are adjacent pawns that could make an en passant capture
     fn hasAdjacentPawn(board: BitBoard, ep_sq: u8, color: Color) bool {
         const file = ep_sq % 8;
 
@@ -205,17 +231,67 @@ pub const ZobristHasher = struct {
         return result;
     }
 
+    /// Incrementally update the Zobrist hash after a move is made.
+    /// This is more efficient than recomputing the entire hash, as it only updates
+    /// the parts of the hash that changed due to the move.
+    ///
+    /// Parameters:
+    ///   - from: The starting square of the move
+    ///   - to: The destination square of the move
+    ///   - moved_piece: The type of piece that was moved
+    ///   - color: The color of the piece that was moved
+    ///   - captured_piece: The type of piece that was captured (if any)
+    ///   - prev_castle: The castling rights before the move
+    ///   - new_castle: The castling rights after the move
+    ///   - prev_ep: The en passant square before the move (if any)
+    ///   - new_ep: The en passant square after the move (if any)
     pub fn updateHash(
         self: *Self,
-        from_sq: u8,
-        piece_type: PieceType,
-        new_piece_type: PieceType,
+        from: u8,
+        to: u8,
+        moved_piece: PieceType,
         color: Color,
+        captured_piece: ?PieceType,
+        prev_castle: CastleRights,
+        new_castle: CastleRights,
+        prev_ep: ?u8,
+        new_ep: ?u8,
     ) void {
-        _ = self;
-        _ = from_sq;
-        _ = piece_type;
-        _ = new_piece_type;
-        _ = color;
+        // side-to-move flag flips every turn
+        self.zobrist_hash ^= RandomTurn;
+
+        // XOR-out the piece on its origin square,
+        // XOR-in the same piece on its destination.
+        const moved_idx_from = 64 * getPieceValue(moved_piece, color) + from;
+        const moved_idx_to = 64 * getPieceValue(moved_piece, color) + to;
+
+        self.zobrist_hash ^= RandomPiece[moved_idx_from]; // gone
+        self.zobrist_hash ^= RandomPiece[moved_idx_to]; // arrived
+
+        // captured piece (if any)
+        if (captured_piece) |cp| {
+            const captured_color: Color = if (color == .white) .black else .white;
+            const captured_idx = 64 * getPieceValue(cp, captured_color) + to;
+            self.zobrist_hash ^= RandomPiece[captured_idx]; // removed
+        }
+
+        // for every castling flag that changed, XOR its constant
+        inline for (.{
+            prev_castle.white_kingside != new_castle.white_kingside,
+            prev_castle.white_queenside != new_castle.white_queenside,
+            prev_castle.black_kingside != new_castle.black_kingside,
+            prev_castle.black_queenside != new_castle.black_queenside,
+        }, 0..) |changed, idx| {
+            if (changed) self.zobrist_hash ^= RandomCastle[idx];
+        }
+
+        // en-passant file, if updated
+        if (prev_ep) |sq| {
+            self.zobrist_hash ^= RandomEnPassant[sq % 8]; // XOR-out old file
+        }
+
+        if (new_ep) |sq| {
+            self.zobrist_hash ^= RandomEnPassant[sq % 8]; // XOR-in new file
+        }
     }
 };
