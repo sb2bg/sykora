@@ -58,10 +58,10 @@ pub const FenParser = struct {
             if (castling[0] != '-') {
                 for (castling) |c| {
                     switch (c) {
-                        'K' => board.white_kingside_castle = true,
-                        'Q' => board.white_queenside_castle = true,
-                        'k' => board.black_kingside_castle = true,
-                        'q' => board.black_queenside_castle = true,
+                        'K' => board.castle_rights.white_kingside = true,
+                        'Q' => board.castle_rights.white_queenside = true,
+                        'k' => board.castle_rights.black_kingside = true,
+                        'q' => board.castle_rights.black_queenside = true,
                         else => {},
                     }
                 }
