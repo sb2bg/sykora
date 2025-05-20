@@ -347,6 +347,37 @@ pub const BitBoard = struct {
         return null;
     }
 
+    /// Check if there are any pawns of the given color adjacent to the specified square.
+    /// This is used for determining if an en passant capture is possible.
+    ///
+    /// Parameters:
+    ///   - board: The current board position
+    ///   - ep_sq: The en passant square to check
+    ///   - color: The color of the pawns to look for
+    ///
+    /// Returns: true if there are adjacent pawns that could make an en passant capture
+    pub fn hasAdjacentPawn(self: Self, ep_sq: u8, color: pieceInfo.Color) bool {
+        const file = ep_sq % 8;
+
+        var result = false;
+
+        if (file > 0) {
+            const left = ep_sq - 1;
+            if (self.getPieceAt(left, color)) |pt| {
+                if (pt == .pawn) result = true;
+            }
+        }
+
+        if (file < 7) {
+            const right = ep_sq + 1;
+            if (self.getPieceAt(right, color)) |pt| {
+                if (pt == .pawn) result = true;
+            }
+        }
+
+        return result;
+    }
+
     pub fn whiteToMove(self: Self) bool {
         return self.move == pieceInfo.Color.white;
     }

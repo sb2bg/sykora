@@ -150,7 +150,7 @@ pub const ZobristHasher = struct {
         // en passant file, if applicable
         if (board.en_passant_square) |ep_sq| {
             const ep_file = ep_sq % 8;
-            if (hasAdjacentPawn(board, ep_sq, board.move)) {
+            if (board.hasAdjacentPawn(ep_sq, board.move)) {
                 hash_value ^= RandomEnPassant[ep_file];
             }
         }
@@ -198,37 +198,6 @@ pub const ZobristHasher = struct {
                 .black => 10,
             },
         };
-    }
-
-    /// Check if there are any pawns of the given color adjacent to the specified square.
-    /// This is used for determining if an en passant capture is possible.
-    ///
-    /// Parameters:
-    ///   - board: The current board position
-    ///   - ep_sq: The en passant square to check
-    ///   - color: The color of the pawns to look for
-    ///
-    /// Returns: true if there are adjacent pawns that could make an en passant capture
-    fn hasAdjacentPawn(board: BitBoard, ep_sq: u8, color: Color) bool {
-        const file = ep_sq % 8;
-
-        var result = false;
-
-        if (file > 0) {
-            const left = ep_sq - 1;
-            if (board.getPieceAt(left, color)) |pt| {
-                if (pt == .pawn) result = true;
-            }
-        }
-
-        if (file < 7) {
-            const right = ep_sq + 1;
-            if (board.getPieceAt(right, color)) |pt| {
-                if (pt == .pawn) result = true;
-            }
-        }
-
-        return result;
     }
 
     /// Incrementally update the Zobrist hash after a move is made.
