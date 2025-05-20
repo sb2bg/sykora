@@ -134,14 +134,14 @@ pub const Board = struct {
 
         self.zobrist_hasher.updateHash(
             from_index,
-            to_index, // destination
-            piece_type, // what moved
-            color, // its colour
-            captured, // maybe something was taken
-            prev_castle, // castle rights before move
-            self.board.castle_rights, // castle rights after move
-            prev_ep, // old en-passant square
-            self.board.en_passant_square, // new ep square
+            to_index,
+            piece_type,
+            color,
+            captured,
+            prev_castle,
+            self.board.castle_rights,
+            prev_ep,
+            self.board.en_passant_square,
         );
     }
 
