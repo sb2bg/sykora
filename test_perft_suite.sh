@@ -31,7 +31,7 @@ echo ""
 
 # Position 3: Position with en passant
 echo "Position 3: En Passant position"
-echo "Expected: D1=9, D2=193, D3=1322"
+echo "Expected: D1=14, D2=191, D3=2812, D4=43238"
 {
     echo "uci"
     echo "isready"
@@ -43,23 +43,23 @@ echo ""
 
 # Position 4: Castling rights position
 echo "Position 4: Position testing castling"
-echo "Expected: D1=6, D2=264, D3=9467"
+echo "Expected: D1=6, D2=264, D3=9467, D4=422333"
 {
     echo "uci"
     echo "isready"
-    echo "position fen r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"
+    echo "position fen r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1"
     echo "perft 4"
     echo "quit"
 } | ./zig-out/bin/sykora 2>&1 | grep -E "^(Depth|[ ]*[0-9])"
 echo ""
 
-# Position 5: Promotions
-echo "Position 5: Promotion position"
-echo "Expected: D1=24, D2=496, D3=9483"
+# Position 5: Buggy Finder
+echo "Position 5: Finding tricky moves"
+echo "Expected: D1=44, D2=1486, D3=62379, D4=2103487"
 {
     echo "uci"
     echo "isready"
-    echo "position fen n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1"
+    echo "position fen rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8"
     echo "perft 4"
     echo "quit"
 } | ./zig-out/bin/sykora 2>&1 | grep -E "^(Depth|[ ]*[0-9])"
