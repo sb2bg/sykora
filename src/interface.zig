@@ -10,6 +10,9 @@ const options = @import("options.zig");
 const Options = options.Options;
 const Option = options.Option;
 const ZobristHasher = @import("zobrist.zig").ZobristHasher;
+const search_module = @import("search.zig");
+const SearchEngine = search_module.SearchEngine;
+const SearchOptions = search_module.SearchOptions;
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
@@ -260,70 +263,40 @@ pub const Uci = struct {
     fn search(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
         try self.writeInfoString("search thread started", .{});
 
-        const start_time = std.time.milliTimestamp();
-        var time_limit: ?u64 = null;
-
-        if (go_opts.infinite) |infinite| {
-            if (infinite) {
-                time_limit = null;
-            }
-        } else if (go_opts.move_time) |move_time| {
-            time_limit = move_time;
-        } else if (go_opts.wtime) |wtime| {
-            time_limit = wtime / 100;
-        } else if (go_opts.btime) |btime| {
-            time_limit = btime / 100;
-        }
-
-        const legal_moves = try self.board.generateLegalMoves(self.allocator);
-        defer self.allocator.free(legal_moves);
-
-        if (legal_moves.len == 0) {
-            try self.writeInfoString("no legal moves available", .{});
-            self.best_move = board.Move.init(0, 0, null);
-            try self.writeStdout("bestmove {s}", .{self.best_move});
-            return;
-        }
-
-        var best_eval: i32 = -9999;
-        var best_move: ?board.Move = null;
-        var nodes: usize = 0;
-
-        for (legal_moves) |mv| {
-            if (self.stop_search.load(.seq_cst)) break;
-
-            // Dummy evaluation for demonstration - just prefer captures and central squares
-            const score: i32 = 20 + @as(i32, @intCast(mv.to));
-            nodes += 1;
-
-            try self.writeStdout(
-                "info depth 1 seldepth 1 score cp {d} nodes {d} nps {d} time {d} pv {s}",
-                .{
-                    score,
-                    nodes,
-                    if (std.time.milliTimestamp() - start_time > 0)
-                        nodes * 1000 / @as(usize, @intCast(std.time.milliTimestamp() - start_time))
-                    else
-                        nodes * 1000,
-                    std.time.milliTimestamp() - start_time,
-                    mv,
-                },
-            );
-
-            if (score > best_eval) {
-                best_eval = score;
-                best_move = mv;
-            }
-
-            // Check time limit
-            if (time_limit) |limit| {
-                if (std.time.milliTimestamp() - start_time > limit) break;
-            }
-
-            std.time.sleep(5 * std.time.ns_per_ms); // simulate work
-        }
-
-        self.best_move = best_move orelse legal_moves[0];
+        // Create search engine
+        var search_engine = SearchEngine.init(&self.board, self.allocator, &self.stop_search);
+        
+        // Convert UCI go options to search options
+        const search_opts = SearchOptions{
+            .infinite = go_opts.infinite orelse false,
+            .move_time = go_opts.move_time,
+            .wtime = go_opts.wtime,
+            .btime = go_opts.btime,
+            .depth = go_opts.depth,
+        };
+        
+        // Run the search
+        const result = try search_engine.search(search_opts);
+        
+        // Output the result
+        self.best_move = result.best_move;
+        
+        // Output final info line
+        const nps = if (result.time_ms > 0) 
+            (result.nodes * 1000) / @as(usize, @intCast(result.time_ms))
+        else 
+            result.nodes * 1000;
+            
+        try self.writeStdout(
+            "info depth 1 score cp {d} nodes {d} nps {d} time {d}",
+            .{
+                result.score,
+                result.nodes,
+                nps,
+                result.time_ms,
+            },
+        );
+        
         try self.writeInfoString("search thread stopped", .{});
         try self.writeStdout("bestmove {s}", .{self.best_move});
     }
