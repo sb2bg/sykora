@@ -142,6 +142,12 @@ pub const UciParser = struct {
 
                 return ToEngineCommand{ .perft = parsed_depth };
             },
+            .divide => {
+                const depth = parser.next() orelse return error.UnexpectedEOF;
+                const parsed_depth = std.fmt.parseInt(u64, depth, 10) catch return UciError.InvalidArgument;
+
+                return ToEngineCommand{ .divide = parsed_depth };
+            },
             .go => {
                 var go_params: cmd.GoOptions = .{};
 

@@ -231,10 +231,17 @@ pub const Uci = struct {
                     });
                 }
 
+                const total_time = std.time.milliTimestamp() - start_time;
+
+                try self.writeStdout("", .{});
+                try self.writeStdout("Total time: {d}ms", .{total_time});
+            },
+            .divide => |depth| {
                 try self.writeStdout("", .{});
                 try self.writeStdout("Perft divide at depth {d}:", .{depth});
                 try self.writeStdout("", .{});
 
+                const start_time = std.time.milliTimestamp();
                 const total_nodes = try self.board.perftDivide(@intCast(depth), self.allocator, self.stdout);
                 const total_time = std.time.milliTimestamp() - start_time;
                 const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
