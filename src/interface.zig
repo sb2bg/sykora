@@ -286,13 +286,13 @@ pub const Uci = struct {
     }
 
     fn handleLogFileChange(self: *Self, value: []const u8) !void {
-        if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
-            return;
-        }
-
         if (self.log_file) |file| {
             file.close();
             self.log_file = null;
+        }
+
+        if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
+            return;
         }
 
         self.log_file = std.fs.cwd().openFile(value, .{ .mode = .read_write }) catch
