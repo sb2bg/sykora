@@ -202,16 +202,33 @@ pub const Uci = struct {
                 try self.writeStdout("Running perft to depth {d}...", .{depth});
                 try self.writeStdout("", .{});
 
+                // Print header
+                try self.writeStdout("Depth | Nodes      | Captures   | E.p. | Castles | Promotions | Checks | Discovery | Double | Checkmates | Time(ms)", .{});
+                try self.writeStdout("------|------------|------------|------|---------|------------|--------|-----------|--------|------------|----------", .{});
+
                 const start_time = std.time.milliTimestamp();
 
                 // Run perft for each depth up to target depth
                 var d: u32 = 1;
                 while (d <= depth) : (d += 1) {
                     const depth_start = std.time.milliTimestamp();
-                    const nodes = try self.board.perft(@intCast(d), self.allocator);
+                    var stats = board.Board.PerftStats{};
+                    try self.board.perftWithStats(@intCast(d), self.allocator, &stats);
                     const depth_time = std.time.milliTimestamp() - depth_start;
-                    const nps = if (depth_time > 0) (nodes * 1000) / @as(u64, @intCast(depth_time)) else nodes * 1000;
-                    try self.writeStdout("Depth {d}: {d} nodes in {d}ms ({d} nps)", .{ d, nodes, depth_time, nps });
+
+                    try self.writeStdout("{d: >5} | {d: >10} | {d: >10} | {d: >4} | {d: >7} | {d: >10} | {d: >6} | {d: >9} | {d: >6} | {d: >10} | {d: >8}", .{
+                        d,
+                        stats.nodes,
+                        stats.captures,
+                        stats.en_passant,
+                        stats.castles,
+                        stats.promotions,
+                        stats.checks,
+                        stats.discovery_checks,
+                        stats.double_checks,
+                        stats.checkmates,
+                        depth_time,
+                    });
                 }
 
                 try self.writeStdout("", .{});

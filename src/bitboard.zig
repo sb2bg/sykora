@@ -169,19 +169,124 @@ pub const Board = struct {
         return moves.toOwnedSlice();
     }
 
+    pub const PerftStats = struct {
+        nodes: u64 = 0,
+        captures: u64 = 0,
+        en_passant: u64 = 0,
+        castles: u64 = 0,
+        promotions: u64 = 0,
+        checks: u64 = 0,
+        discovery_checks: u64 = 0,
+        double_checks: u64 = 0,
+        checkmates: u64 = 0,
+
+        pub fn add(self: *PerftStats, other: PerftStats) void {
+            self.nodes += other.nodes;
+            self.captures += other.captures;
+            self.en_passant += other.en_passant;
+            self.castles += other.castles;
+            self.promotions += other.promotions;
+            self.checks += other.checks;
+            self.discovery_checks += other.discovery_checks;
+            self.double_checks += other.double_checks;
+            self.checkmates += other.checkmates;
+        }
+    };
+
     /// Perft - Performance test for move generation
     /// Returns the number of leaf nodes at the given depth
     pub fn perft(self: *Self, depth: u32, allocator: std.mem.Allocator) UciError!u64 {
-        if (depth == 0) return 1;
+        var stats = PerftStats{};
+        try self.perftWithStats(depth, allocator, &stats);
+        return stats.nodes;
+    }
+
+    /// Perft with detailed statistics
+    pub fn perftWithStats(self: *Self, depth: u32, allocator: std.mem.Allocator, stats: *PerftStats) UciError!void {
+        if (depth == 0) {
+            stats.nodes = 1;
+            return;
+        }
 
         const moves = try self.generateLegalMoves(allocator);
         defer allocator.free(moves);
 
         if (depth == 1) {
-            return moves.len;
+            // At depth 1, count move types
+            for (moves) |move| {
+                stats.nodes += 1;
+
+                // Save state
+                const old_board = self.board;
+                const old_hash = self.zobrist_hasher.zobrist_hash;
+                const moving_color = self.board.move;
+
+                // Make move
+                self.applyMoveUnchecked(move);
+
+                // Check move properties
+                const opponent_color = if (moving_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+                // Check if it's a capture
+                const piece_at_dest = old_board.getPieceAt(move.to, opponent_color);
+                if (piece_at_dest != null) {
+                    stats.captures += 1;
+                }
+
+                // Check if it's en passant
+                const piece_type = old_board.getPieceAt(move.from, moving_color);
+                if (piece_type == .pawn and old_board.en_passant_square == move.to) {
+                    stats.en_passant += 1;
+                }
+
+                // Check if it's a castle
+                if (piece_type == .king) {
+                    const from_file = move.from % 8;
+                    const to_file = move.to % 8;
+                    if (from_file == 4 and (to_file == 6 or to_file == 2)) {
+                        stats.castles += 1;
+                    }
+                }
+
+                // Check if it's a promotion
+                if (move.promotion != null) {
+                    stats.promotions += 1;
+                }
+
+                // Check if opponent is in check after this move
+                const opponent_in_check = self.isInCheck(opponent_color);
+                if (opponent_in_check) {
+                    // Count the number of pieces giving check
+                    const checking_pieces = self.countCheckingPieces(opponent_color);
+
+                    if (checking_pieces >= 2) {
+                        stats.double_checks += 1;
+                    } else if (checking_pieces == 1) {
+                        // Check if it's a discovery check
+                        const direct_check = self.isDirectCheck(move, moving_color, opponent_color);
+                        if (!direct_check) {
+                            stats.discovery_checks += 1;
+                        }
+                    }
+
+                    stats.checks += 1;
+
+                    // Check if it's checkmate
+                    const opponent_moves = try self.generateLegalMoves(allocator);
+                    defer allocator.free(opponent_moves);
+                    if (opponent_moves.len == 0) {
+                        stats.checkmates += 1;
+                    }
+                }
+
+                // Restore state
+                self.board = old_board;
+                self.zobrist_hasher.zobrist_hash = old_hash;
+            }
+            return;
         }
 
-        var nodes: u64 = 0;
+        // Recursive case
         for (moves) |move| {
             // Save state
             const old_board = self.board;
@@ -191,14 +296,91 @@ pub const Board = struct {
             self.applyMoveUnchecked(move);
 
             // Recurse
-            nodes += try self.perft(depth - 1, allocator);
+            var child_stats = PerftStats{};
+            try self.perftWithStats(depth - 1, allocator, &child_stats);
+            stats.add(child_stats);
 
             // Restore state
             self.board = old_board;
             self.zobrist_hasher.zobrist_hash = old_hash;
         }
+    }
 
-        return nodes;
+    /// Count how many pieces are giving check to the king of the specified color
+    fn countCheckingPieces(self: *Self, king_color: pieceInfo.Color) u32 {
+        const king_bb = self.board.getColorBitboard(king_color) & self.board.getKindBitboard(.king);
+        if (king_bb == 0) return 0;
+
+        const king_square: u6 = @intCast(@ctz(king_bb));
+        const attacker_color = if (king_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+        const attacker_bb = self.board.getColorBitboard(attacker_color);
+        const occupied = self.board.occupied();
+
+        var count: u32 = 0;
+
+        // Check pawns
+        const pawn_attacks = self.getPawnAttacks(king_square, king_color);
+        if ((pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn)) != 0) {
+            count += @popCount(pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn));
+        }
+
+        // Check knights
+        const knight_attacks = self.getKnightAttacks(king_square);
+        if ((knight_attacks & attacker_bb & self.board.getKindBitboard(.knight)) != 0) {
+            count += @popCount(knight_attacks & attacker_bb & self.board.getKindBitboard(.knight));
+        }
+
+        // Check bishops/queens (diagonal)
+        const bishop_attacks = self.getBishopAttacks(king_square, occupied);
+        if ((bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen))) != 0) {
+            count += @popCount(bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen)));
+        }
+
+        // Check rooks/queens (straight)
+        const rook_attacks = self.getRookAttacks(king_square, occupied);
+        if ((rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen))) != 0) {
+            count += @popCount(rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen)));
+        }
+
+        return count;
+    }
+
+    /// Check if a move gives direct check (the piece that moved is giving check)
+    fn isDirectCheck(self: *Self, move: Move, moving_color: pieceInfo.Color, opponent_color: pieceInfo.Color) bool {
+        const king_bb = self.board.getColorBitboard(opponent_color) & self.board.getKindBitboard(.king);
+        if (king_bb == 0) return false;
+
+        const king_square: u6 = @intCast(@ctz(king_bb));
+        const piece_type = self.board.getPieceAt(move.to, moving_color) orelse return false;
+        const occupied = self.board.occupied();
+        const move_to: u6 = @intCast(move.to);
+
+        const result = switch (piece_type) {
+            .pawn => blk: {
+                const pawn_attacks = self.getPawnAttacks(king_square, opponent_color);
+                break :blk (pawn_attacks & (@as(u64, 1) << move_to)) != 0;
+            },
+            .knight => blk: {
+                const knight_attacks = self.getKnightAttacks(king_square);
+                break :blk (knight_attacks & (@as(u64, 1) << move_to)) != 0;
+            },
+            .bishop => blk: {
+                const bishop_attacks = self.getBishopAttacks(king_square, occupied);
+                break :blk (bishop_attacks & (@as(u64, 1) << move_to)) != 0;
+            },
+            .rook => blk: {
+                const rook_attacks = self.getRookAttacks(king_square, occupied);
+                break :blk (rook_attacks & (@as(u64, 1) << move_to)) != 0;
+            },
+            .queen => blk: {
+                const bishop_attacks = self.getBishopAttacks(king_square, occupied);
+                const rook_attacks = self.getRookAttacks(king_square, occupied);
+                const queen_attacks = bishop_attacks | rook_attacks;
+                break :blk (queen_attacks & (@as(u64, 1) << move_to)) != 0;
+            },
+            .king => false, // Kings don't give check
+        };
+        return result;
     }
 
     /// Perft divide - Shows the number of nodes for each root move
