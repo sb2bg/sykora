@@ -110,12 +110,13 @@ pub const Board = struct {
         const prev_ep = self.board.en_passant_square;
         const captured = self.board.getPieceAt(to_index, if (color == .white) .black else .white);
 
-        // TODO: make sure the move is valid
-
+        // Handle en passant capture - must clear the captured pawn's square
         if (piece_type == .pawn) {
             if (self.board.en_passant_square) |en_passant_square| {
                 if (en_passant_square == to_index) {
-                    self.board.clearSquare(en_passant_square);
+                    // Clear the captured pawn (which is one rank behind the en passant square)
+                    const captured_pawn_square = if (color == .white) to_index - 8 else to_index + 8;
+                    self.board.clearSquare(captured_pawn_square);
                 }
             }
         }
@@ -123,8 +124,53 @@ pub const Board = struct {
         self.board.clearSquare(from_index);
         self.board.setPieceAt(to_index, color, piece_type);
 
+        // Update en passant square for double pawn pushes
+        self.board.en_passant_square = null;
+        if (piece_type == .pawn) {
+            const pawn_from_rank = from_index / 8;
+            const pawn_to_rank = to_index / 8;
+            // Check if it's a double pawn push
+            if (@as(i16, @intCast(pawn_to_rank)) - @as(i16, @intCast(pawn_from_rank)) == 2) {
+                // White double push (e.g., e2-e4), en passant square is e3
+                self.board.en_passant_square = from_index + 8;
+            } else if (@as(i16, @intCast(pawn_to_rank)) - @as(i16, @intCast(pawn_from_rank)) == -2) {
+                // Black double push (e.g., e7-e5), en passant square is e6
+                self.board.en_passant_square = from_index - 8;
+            }
+        }
+
         self.board.move = if (self.board.whiteToMove()) pieceInfo.Color.black else pieceInfo.Color.white;
         self.board.fullmove_number += if (color == .black) 1 else 0;
+
+        // Update castling rights
+        if (piece_type == .king) {
+            if (color == .white) {
+                self.board.castle_rights.white_kingside = false;
+                self.board.castle_rights.white_queenside = false;
+            } else {
+                self.board.castle_rights.black_kingside = false;
+                self.board.castle_rights.black_queenside = false;
+            }
+        } else if (piece_type == .rook) {
+            if (color == .white) {
+                if (from_index == 0) self.board.castle_rights.white_queenside = false;
+                if (from_index == 7) self.board.castle_rights.white_kingside = false;
+            } else {
+                if (from_index == 56) self.board.castle_rights.black_queenside = false;
+                if (from_index == 63) self.board.castle_rights.black_kingside = false;
+            }
+        }
+        // If a rook is captured, remove castling rights
+        if (captured == .rook) {
+            const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+            if (opponent == .white) {
+                if (to_index == 0) self.board.castle_rights.white_queenside = false;
+                if (to_index == 7) self.board.castle_rights.white_kingside = false;
+            } else {
+                if (to_index == 56) self.board.castle_rights.black_queenside = false;
+                if (to_index == 63) self.board.castle_rights.black_kingside = false;
+            }
+        }
 
         if (piece_type == .pawn or is_capture) {
             self.board.halfmove_clock = 0;
@@ -227,16 +273,19 @@ pub const Board = struct {
                 // Check move properties
                 const opponent_color = if (moving_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
-                // Check if it's a capture
-                const piece_at_dest = old_board.getPieceAt(move.to, opponent_color);
-                if (piece_at_dest != null) {
-                    stats.captures += 1;
-                }
+                // Check piece type before checking move properties
+                const piece_type = old_board.getPieceAt(move.from, moving_color);
 
                 // Check if it's en passant
-                const piece_type = old_board.getPieceAt(move.from, moving_color);
-                if (piece_type == .pawn and old_board.en_passant_square == move.to) {
+                const is_en_passant = piece_type == .pawn and old_board.en_passant_square == move.to;
+                if (is_en_passant) {
                     stats.en_passant += 1;
+                }
+
+                // Check if it's a capture (including en passant)
+                const piece_at_dest = old_board.getPieceAt(move.to, opponent_color);
+                if (piece_at_dest != null or is_en_passant) {
+                    stats.captures += 1;
                 }
 
                 // Check if it's a castle
