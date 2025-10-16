@@ -151,6 +151,636 @@ pub const Board = struct {
         return error.Unimplemented;
     }
 
+    /// Generate all legal moves for the current position
+    pub fn generateLegalMoves(self: *Self, allocator: std.mem.Allocator) ![]Move {
+        var moves = std.ArrayList(Move).init(allocator);
+        errdefer moves.deinit();
+
+        const pseudo_legal = try self.generatePseudoLegalMoves(allocator);
+        defer allocator.free(pseudo_legal);
+
+        // Filter out moves that leave the king in check
+        for (pseudo_legal) |move| {
+            if (try self.isLegalMove(move)) {
+                try moves.append(move);
+            }
+        }
+
+        return moves.toOwnedSlice();
+    }
+
+    /// Perft - Performance test for move generation
+    /// Returns the number of leaf nodes at the given depth
+    pub fn perft(self: *Self, depth: u32, allocator: std.mem.Allocator) UciError!u64 {
+        if (depth == 0) return 1;
+
+        const moves = try self.generateLegalMoves(allocator);
+        defer allocator.free(moves);
+
+        if (depth == 1) {
+            return moves.len;
+        }
+
+        var nodes: u64 = 0;
+        for (moves) |move| {
+            // Save state
+            const old_board = self.board;
+            const old_hash = self.zobrist_hasher.zobrist_hash;
+
+            // Make move
+            self.applyMoveUnchecked(move);
+
+            // Recurse
+            nodes += try self.perft(depth - 1, allocator);
+
+            // Restore state
+            self.board = old_board;
+            self.zobrist_hasher.zobrist_hash = old_hash;
+        }
+
+        return nodes;
+    }
+
+    /// Perft divide - Shows the number of nodes for each root move
+    pub fn perftDivide(self: *Self, depth: u32, allocator: std.mem.Allocator, writer: anytype) UciError!u64 {
+        const moves = try self.generateLegalMoves(allocator);
+        defer allocator.free(moves);
+
+        var total_nodes: u64 = 0;
+
+        for (moves) |move| {
+            // Save state
+            const old_board = self.board;
+            const old_hash = self.zobrist_hasher.zobrist_hash;
+
+            // Make move
+            self.applyMoveUnchecked(move);
+
+            // Count nodes
+            const nodes = if (depth <= 1) 1 else try self.perft(depth - 1, allocator);
+            total_nodes += nodes;
+
+            // Print result
+            writer.print("{s}: {d}\n", .{ move, nodes }) catch return UciError.IOError;
+
+            // Restore state
+            self.board = old_board;
+            self.zobrist_hasher.zobrist_hash = old_hash;
+        }
+
+        writer.print("\nTotal nodes: {d}\n", .{total_nodes}) catch return UciError.IOError;
+        return total_nodes;
+    }
+
+    /// Check if a move is legal (doesn't leave own king in check)
+    fn isLegalMove(self: *Self, move: Move) !bool {
+        const color = self.board.move;
+
+        // Make a copy of the board state
+        const old_board = self.board;
+        const old_hash = self.zobrist_hasher.zobrist_hash;
+
+        // Try to make the move
+        self.applyMoveUnchecked(move);
+
+        // Check if our king is in check after the move
+        const in_check = self.isInCheck(color);
+
+        // Restore board state
+        self.board = old_board;
+        self.zobrist_hasher.zobrist_hash = old_hash;
+
+        return !in_check;
+    }
+
+    /// Check if the given color's king is currently in check
+    fn isInCheck(self: *Self, color: pieceInfo.Color) bool {
+        const king_bb = self.board.getColorBitboard(color) & self.board.getKindBitboard(.king);
+        if (king_bb == 0) return false;
+
+        const king_square: u6 = @intCast(@ctz(king_bb));
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+        return self.isSquareAttackedBy(king_square, opponent_color);
+    }
+
+    /// Check if a square is attacked by any piece of the given color
+    fn isSquareAttackedBy(self: *Self, square: u6, attacker_color: pieceInfo.Color) bool {
+        const attacker_bb = self.board.getColorBitboard(attacker_color);
+
+        // Check pawn attacks
+        const pawn_attacks = self.getPawnAttacks(square, if (attacker_color == .white) .black else .white);
+        if ((pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn)) != 0) {
+            return true;
+        }
+
+        // Check knight attacks
+        const knight_attacks = self.getKnightAttacks(square);
+        if ((knight_attacks & attacker_bb & self.board.getKindBitboard(.knight)) != 0) {
+            return true;
+        }
+
+        // Check king attacks
+        const king_attacks = self.getKingAttacks(square);
+        if ((king_attacks & attacker_bb & self.board.getKindBitboard(.king)) != 0) {
+            return true;
+        }
+
+        // Check sliding pieces (bishop, rook, queen)
+        const occupied = self.board.occupied();
+
+        const bishop_attacks = self.getBishopAttacks(square, occupied);
+        if ((bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen))) != 0) {
+            return true;
+        }
+
+        const rook_attacks = self.getRookAttacks(square, occupied);
+        if ((rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen))) != 0) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Apply a move without checking legality (used for legal move testing)
+    fn applyMoveUnchecked(self: *Self, move: Move) void {
+        const color = self.board.move;
+        const piece_type = self.board.getPieceAt(move.from, color) orelse return;
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+        // Handle captures - must clear the destination square first
+        self.board.clearSquare(move.to);
+
+        // Handle en passant capture
+        if (piece_type == .pawn and self.board.en_passant_square == move.to) {
+            const ep_capture_square = if (color == .white) move.to - 8 else move.to + 8;
+            self.board.clearSquare(ep_capture_square);
+        }
+
+        // Handle castling
+        if (piece_type == .king) {
+            const from_file = move.from % 8;
+            const to_file = move.to % 8;
+
+            // Kingside castling
+            if (from_file == 4 and to_file == 6) {
+                const rook_from = move.from + 3;
+                const rook_to = move.from + 1;
+                self.board.clearSquare(rook_from);
+                self.board.setPieceAt(rook_to, color, .rook);
+            }
+            // Queenside castling
+            else if (from_file == 4 and to_file == 2) {
+                const rook_from = move.from - 4;
+                const rook_to = move.from - 1;
+                self.board.clearSquare(rook_from);
+                self.board.setPieceAt(rook_to, color, .rook);
+            }
+        }
+
+        // Move the piece
+        self.board.clearSquare(move.from);
+        const final_piece = if (move.promotion) |promo| promo else piece_type;
+        self.board.setPieceAt(move.to, color, final_piece);
+
+        // Update en passant square
+        self.board.en_passant_square = null;
+        if (piece_type == .pawn) {
+            const from_rank = move.from / 8;
+            const to_rank = move.to / 8;
+            if (@as(i16, to_rank) - @as(i16, from_rank) == 2 or @as(i16, to_rank) - @as(i16, from_rank) == -2) {
+                self.board.en_passant_square = if (color == .white) move.from + 8 else move.from - 8;
+            }
+        }
+
+        // Update castling rights
+        if (piece_type == .king) {
+            if (color == .white) {
+                self.board.castle_rights.white_kingside = false;
+                self.board.castle_rights.white_queenside = false;
+            } else {
+                self.board.castle_rights.black_kingside = false;
+                self.board.castle_rights.black_queenside = false;
+            }
+        } else if (piece_type == .rook) {
+            if (color == .white) {
+                if (move.from == 0) self.board.castle_rights.white_queenside = false;
+                if (move.from == 7) self.board.castle_rights.white_kingside = false;
+            } else {
+                if (move.from == 56) self.board.castle_rights.black_queenside = false;
+                if (move.from == 63) self.board.castle_rights.black_kingside = false;
+            }
+        }
+
+        // Switch turn
+        self.board.move = opponent_color;
+    }
+
+    /// Generate all pseudo-legal moves (may leave king in check)
+    fn generatePseudoLegalMoves(self: *Self, allocator: std.mem.Allocator) ![]Move {
+        var moves = std.ArrayList(Move).init(allocator);
+        errdefer moves.deinit();
+
+        const color = self.board.move;
+        const our_pieces = self.board.getColorBitboard(color);
+        const opponent_pieces = self.board.getColorBitboard(if (color == .white) .black else .white);
+        const occupied = self.board.occupied();
+
+        // Generate pawn moves
+        try self.generatePawnMoves(&moves, color, our_pieces, opponent_pieces, occupied);
+
+        // Generate knight moves
+        try self.generateKnightMoves(&moves, color, our_pieces);
+
+        // Generate bishop moves
+        try self.generateBishopMoves(&moves, color, our_pieces, occupied);
+
+        // Generate rook moves
+        try self.generateRookMoves(&moves, color, our_pieces, occupied);
+
+        // Generate queen moves
+        try self.generateQueenMoves(&moves, color, our_pieces, occupied);
+
+        // Generate king moves
+        try self.generateKingMoves(&moves, color, our_pieces, opponent_pieces, occupied);
+
+        return moves.toOwnedSlice();
+    }
+
+    fn generatePawnMoves(self: *Self, moves: *std.ArrayList(Move), color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64, occupied: u64) !void {
+        const pawns = our_pieces & self.board.getKindBitboard(.pawn);
+        const direction: i8 = if (color == .white) 8 else -8;
+        const start_rank: u8 = if (color == .white) 1 else 6;
+        const promo_rank: u8 = if (color == .white) 7 else 0;
+
+        var pawn_bb = pawns;
+        while (pawn_bb != 0) {
+            const from: u6 = @intCast(@ctz(pawn_bb));
+            const from_u8: u8 = from;
+            pawn_bb &= pawn_bb - 1; // Clear least significant bit
+
+            const rank = from / 8;
+            const file = from % 8;
+
+            // Single push
+            const to_single: i16 = @as(i16, from_u8) + direction;
+            if (to_single >= 0 and to_single < 64) {
+                const to_sq: u8 = @intCast(to_single);
+                if ((occupied & (@as(u64, 1) << @intCast(to_sq))) == 0) {
+                    if (to_sq / 8 == promo_rank) {
+                        // Promotions
+                        try moves.append(Move.init(from_u8, to_sq, .queen));
+                        try moves.append(Move.init(from_u8, to_sq, .rook));
+                        try moves.append(Move.init(from_u8, to_sq, .bishop));
+                        try moves.append(Move.init(from_u8, to_sq, .knight));
+                    } else {
+                        try moves.append(Move.init(from_u8, to_sq, null));
+                    }
+
+                    // Double push
+                    if (rank == start_rank) {
+                        const to_double: i16 = @as(i16, from_u8) + direction * 2;
+                        if (to_double >= 0 and to_double < 64) {
+                            const to_sq_double: u8 = @intCast(to_double);
+                            if ((occupied & (@as(u64, 1) << @intCast(to_sq_double))) == 0) {
+                                try moves.append(Move.init(from_u8, to_sq_double, null));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Captures
+            const capture_offsets = [_]i8{ -1, 1 };
+            for (capture_offsets) |file_offset| {
+                const new_file: i8 = @as(i8, @intCast(file)) + file_offset;
+                if (new_file >= 0 and new_file < 8) {
+                    const to: i16 = @as(i16, from_u8) + direction + file_offset;
+                    if (to >= 0 and to < 64) {
+                        const to_sq: u8 = @intCast(to);
+                        const to_bb = @as(u64, 1) << @intCast(to_sq);
+
+                        // Regular capture
+                        if ((opponent_pieces & to_bb) != 0) {
+                            if (to_sq / 8 == promo_rank) {
+                                try moves.append(Move.init(from_u8, to_sq, .queen));
+                                try moves.append(Move.init(from_u8, to_sq, .rook));
+                                try moves.append(Move.init(from_u8, to_sq, .bishop));
+                                try moves.append(Move.init(from_u8, to_sq, .knight));
+                            } else {
+                                try moves.append(Move.init(from_u8, to_sq, null));
+                            }
+                        }
+                        // En passant capture
+                        else if (self.board.en_passant_square) |ep_sq| {
+                            if (ep_sq == to_sq) {
+                                try moves.append(Move.init(from_u8, to_sq, null));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn generateKnightMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64) !void {
+        const knights = our_pieces & self.board.getKindBitboard(.knight);
+        var knight_bb = knights;
+
+        while (knight_bb != 0) {
+            const from: u6 = @intCast(@ctz(knight_bb));
+            knight_bb &= knight_bb - 1;
+
+            const attacks = self.getKnightAttacks(from);
+            var attack_bb = attacks & ~our_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                try moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateBishopMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
+        const bishops = our_pieces & self.board.getKindBitboard(.bishop);
+        var bishop_bb = bishops;
+
+        while (bishop_bb != 0) {
+            const from: u6 = @intCast(@ctz(bishop_bb));
+            bishop_bb &= bishop_bb - 1;
+
+            const attacks = self.getBishopAttacks(from, occupied);
+            var attack_bb = attacks & ~our_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                try moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateRookMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
+        const rooks = our_pieces & self.board.getKindBitboard(.rook);
+        var rook_bb = rooks;
+
+        while (rook_bb != 0) {
+            const from: u6 = @intCast(@ctz(rook_bb));
+            rook_bb &= rook_bb - 1;
+
+            const attacks = self.getRookAttacks(from, occupied);
+            var attack_bb = attacks & ~our_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                try moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateQueenMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
+        const queens = our_pieces & self.board.getKindBitboard(.queen);
+        var queen_bb = queens;
+
+        while (queen_bb != 0) {
+            const from: u6 = @intCast(@ctz(queen_bb));
+            queen_bb &= queen_bb - 1;
+
+            const bishop_attacks = self.getBishopAttacks(from, occupied);
+            const rook_attacks = self.getRookAttacks(from, occupied);
+            const attacks = bishop_attacks | rook_attacks;
+            var attack_bb = attacks & ~our_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                try moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateKingMoves(self: *Self, moves: *std.ArrayList(Move), color: pieceInfo.Color, our_pieces: u64, _: u64, occupied: u64) !void {
+        const kings = our_pieces & self.board.getKindBitboard(.king);
+        if (kings == 0) return;
+
+        const from: u6 = @intCast(@ctz(kings));
+
+        // Regular king moves
+        const attacks = self.getKingAttacks(from);
+        var attack_bb = attacks & ~our_pieces;
+
+        while (attack_bb != 0) {
+            const to: u6 = @intCast(@ctz(attack_bb));
+            attack_bb &= attack_bb - 1;
+            try moves.append(Move.init(from, to, null));
+        }
+
+        // Castling
+        if (color == .white) {
+            // White kingside
+            if (self.board.castle_rights.white_kingside) {
+                if ((occupied & ((@as(u64, 1) << 5) | (@as(u64, 1) << 6))) == 0) {
+                    if (!self.isSquareAttackedBy(4, .black) and
+                        !self.isSquareAttackedBy(5, .black) and
+                        !self.isSquareAttackedBy(6, .black))
+                    {
+                        try moves.append(Move.init(4, 6, null));
+                    }
+                }
+            }
+            // White queenside
+            if (self.board.castle_rights.white_queenside) {
+                if ((occupied & ((@as(u64, 1) << 1) | (@as(u64, 1) << 2) | (@as(u64, 1) << 3))) == 0) {
+                    if (!self.isSquareAttackedBy(4, .black) and
+                        !self.isSquareAttackedBy(3, .black) and
+                        !self.isSquareAttackedBy(2, .black))
+                    {
+                        try moves.append(Move.init(4, 2, null));
+                    }
+                }
+            }
+        } else {
+            // Black kingside
+            if (self.board.castle_rights.black_kingside) {
+                if ((occupied & ((@as(u64, 1) << 61) | (@as(u64, 1) << 62))) == 0) {
+                    if (!self.isSquareAttackedBy(60, .white) and
+                        !self.isSquareAttackedBy(61, .white) and
+                        !self.isSquareAttackedBy(62, .white))
+                    {
+                        try moves.append(Move.init(60, 62, null));
+                    }
+                }
+            }
+            // Black queenside
+            if (self.board.castle_rights.black_queenside) {
+                if ((occupied & ((@as(u64, 1) << 57) | (@as(u64, 1) << 58) | (@as(u64, 1) << 59))) == 0) {
+                    if (!self.isSquareAttackedBy(60, .white) and
+                        !self.isSquareAttackedBy(59, .white) and
+                        !self.isSquareAttackedBy(58, .white))
+                    {
+                        try moves.append(Move.init(60, 58, null));
+                    }
+                }
+            }
+        }
+    }
+
+    // Attack pattern generators
+    fn getKnightAttacks(self: *Self, square: u6) u64 {
+        _ = self;
+        const sq: u64 = @as(u64, 1) << square;
+        const file = square % 8;
+
+        var attacks: u64 = 0;
+
+        // All 8 possible knight moves
+        if (file > 0 and square < 56) attacks |= sq << 15; // Up 2, left 1
+        if (file < 7 and square < 56) attacks |= sq << 17; // Up 2, right 1
+        if (file > 1 and square < 48) attacks |= sq << 6; // Up 1, left 2
+        if (file < 6 and square < 48) attacks |= sq << 10; // Up 1, right 2
+        if (file > 0 and square >= 16) attacks |= sq >> 17; // Down 2, left 1
+        if (file < 7 and square >= 16) attacks |= sq >> 15; // Down 2, right 1
+        if (file > 1 and square >= 8) attacks |= sq >> 10; // Down 1, left 2
+        if (file < 6 and square >= 8) attacks |= sq >> 6; // Down 1, right 2
+
+        return attacks;
+    }
+
+    fn getKingAttacks(self: *Self, square: u6) u64 {
+        _ = self;
+        const sq: u64 = @as(u64, 1) << square;
+        const file = square % 8;
+
+        var attacks: u64 = 0;
+
+        if (square < 56) attacks |= sq << 8; // Up
+        if (square >= 8) attacks |= sq >> 8; // Down
+        if (file > 0) attacks |= sq >> 1; // Left
+        if (file < 7) attacks |= sq << 1; // Right
+        if (file > 0 and square < 56) attacks |= sq << 7; // Up-left
+        if (file < 7 and square < 56) attacks |= sq << 9; // Up-right
+        if (file > 0 and square >= 8) attacks |= sq >> 9; // Down-left
+        if (file < 7 and square >= 8) attacks |= sq >> 7; // Down-right
+
+        return attacks;
+    }
+
+    fn getPawnAttacks(self: *Self, square: u6, pawn_color: pieceInfo.Color) u64 {
+        _ = self;
+        const sq: u64 = @as(u64, 1) << square;
+        const file = square % 8;
+
+        var attacks: u64 = 0;
+
+        if (pawn_color == .white) {
+            if (file > 0 and square < 56) attacks |= sq << 7; // Up-left
+            if (file < 7 and square < 56) attacks |= sq << 9; // Up-right
+        } else {
+            if (file > 0 and square >= 8) attacks |= sq >> 9; // Down-left
+            if (file < 7 and square >= 8) attacks |= sq >> 7; // Down-right
+        }
+
+        return attacks;
+    }
+
+    fn getRookAttacks(self: *Self, square: u6, occupied: u64) u64 {
+        _ = self;
+        var attacks: u64 = 0;
+        const file: i8 = @intCast(square % 8);
+        const rank: i8 = @intCast(square / 8);
+
+        // North
+        var r: i8 = rank + 1;
+        while (r < 8) : (r += 1) {
+            const sq: u6 = @intCast(r * 8 + file);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        // South
+        r = rank - 1;
+        while (r >= 0) : (r -= 1) {
+            const sq: u6 = @intCast(r * 8 + file);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        // East
+        var f: i8 = file + 1;
+        while (f < 8) : (f += 1) {
+            const sq: u6 = @intCast(rank * 8 + f);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        // West
+        f = file - 1;
+        while (f >= 0) : (f -= 1) {
+            const sq: u6 = @intCast(rank * 8 + f);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        return attacks;
+    }
+    fn getBishopAttacks(self: *Self, square: u6, occupied: u64) u64 {
+        _ = self;
+        var attacks: u64 = 0;
+        const file: i8 = @intCast(square % 8);
+        const rank: i8 = @intCast(square / 8);
+
+        // North-East
+        var r: i8 = rank + 1;
+        var f: i8 = file + 1;
+        while (r < 8 and f < 8) : ({
+            r += 1;
+            f += 1;
+        }) {
+            const sq: u6 = @intCast(r * 8 + f);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        // North-West
+        r = rank + 1;
+        f = file - 1;
+        while (r < 8 and f >= 0) : ({
+            r += 1;
+            f -= 1;
+        }) {
+            const sq: u6 = @intCast(r * 8 + f);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        // South-East
+        r = rank - 1;
+        f = file + 1;
+        while (r >= 0 and f < 8) : ({
+            r -= 1;
+            f += 1;
+        }) {
+            const sq: u6 = @intCast(r * 8 + f);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        // South-West
+        r = rank - 1;
+        f = file - 1;
+        while (r >= 0 and f >= 0) : ({
+            r -= 1;
+            f -= 1;
+        }) {
+            const sq: u6 = @intCast(r * 8 + f);
+            attacks |= @as(u64, 1) << sq;
+            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+        }
+
+        return attacks;
+    }
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
         return rankFileToSquare(rank - '1', file - 'a');
     }
