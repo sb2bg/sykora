@@ -198,8 +198,33 @@ pub const Uci = struct {
                 }
             },
             .perft => |depth| {
-                try self.writeInfoString("perft {d}", .{depth});
-                return error.Unimplemented;
+                try self.writeStdout("", .{});
+                try self.writeStdout("Running perft to depth {d}...", .{depth});
+                try self.writeStdout("", .{});
+
+                const start_time = std.time.milliTimestamp();
+
+                // Run perft for each depth up to target depth
+                var d: u32 = 1;
+                while (d <= depth) : (d += 1) {
+                    const depth_start = std.time.milliTimestamp();
+                    const nodes = try self.board.perft(@intCast(d), self.allocator);
+                    const depth_time = std.time.milliTimestamp() - depth_start;
+                    const nps = if (depth_time > 0) (nodes * 1000) / @as(u64, @intCast(depth_time)) else nodes * 1000;
+                    try self.writeStdout("Depth {d}: {d} nodes in {d}ms ({d} nps)", .{ d, nodes, depth_time, nps });
+                }
+
+                try self.writeStdout("", .{});
+                try self.writeStdout("Perft divide at depth {d}:", .{depth});
+                try self.writeStdout("", .{});
+
+                const total_nodes = try self.board.perftDivide(@intCast(depth), self.allocator, self.stdout);
+                const total_time = std.time.milliTimestamp() - start_time;
+                const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
+
+                try self.writeStdout("", .{});
+                try self.writeStdout("Total time: {d}ms", .{total_time});
+                try self.writeStdout("Nodes per second: {d}", .{total_nps});
             },
             .quit => {
                 // user wanted to quit, we return an error to break out of the loop
