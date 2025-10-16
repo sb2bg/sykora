@@ -236,7 +236,7 @@ pub const Uci = struct {
     fn search(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
         try self.writeInfoString("search thread started", .{});
 
-        // const start_time = std.time.milliTimestamp();
+        const start_time = std.time.milliTimestamp();
         var time_limit: ?u64 = null;
 
         if (go_opts.infinite) |infinite| {
@@ -251,40 +251,55 @@ pub const Uci = struct {
             time_limit = btime / 100;
         }
 
-        // const legal_moves = try self.board.generateLegalMoves();
-        // defer self.allocator.free(legal_moves);
+        const legal_moves = try self.board.generateLegalMoves(self.allocator);
+        defer self.allocator.free(legal_moves);
 
-        // var best_eval: i32 = -9999;
-        // var best_move: ?board.Move = null;
-        // var nodes: usize = 0;
+        if (legal_moves.len == 0) {
+            try self.writeInfoString("no legal moves available", .{});
+            self.best_move = board.Move.init(0, 0, null);
+            try self.writeStdout("bestmove {s}", .{self.best_move});
+            return;
+        }
 
-        // for (legal_moves) |mv| {
-        //     if (self.stop_search.load(.seq_cst)) break;
+        var best_eval: i32 = -9999;
+        var best_move: ?board.Move = null;
+        var nodes: usize = 0;
 
-        //     // Dummy evaluation for demonstration
-        //     const score = 20 + mv.to; // replace with real eval
-        //     nodes += 1;
+        for (legal_moves) |mv| {
+            if (self.stop_search.load(.seq_cst)) break;
 
-        //     try self.writeStdout(
-        //         "info depth 1 seldepth 1 score cp {d} nodes {d} nps {d} time {d} pv {s}",
-        //         .{
-        //             score,
-        //             nodes,
-        //             nodes * 1000,
-        //             std.time.milliTimestamp() - start_time,
-        //             mv,
-        //         },
-        //     );
+            // Dummy evaluation for demonstration - just prefer captures and central squares
+            const score: i32 = 20 + @as(i32, @intCast(mv.to));
+            nodes += 1;
 
-        //     if (score > best_eval) {
-        //         best_eval = score;
-        //         best_move = mv;
-        //     }
+            try self.writeStdout(
+                "info depth 1 seldepth 1 score cp {d} nodes {d} nps {d} time {d} pv {s}",
+                .{
+                    score,
+                    nodes,
+                    if (std.time.milliTimestamp() - start_time > 0)
+                        nodes * 1000 / @as(usize, @intCast(std.time.milliTimestamp() - start_time))
+                    else
+                        nodes * 1000,
+                    std.time.milliTimestamp() - start_time,
+                    mv,
+                },
+            );
 
-        //     std.time.sleep(10 * std.time.ns_per_ms); // simulate work
-        // }
+            if (score > best_eval) {
+                best_eval = score;
+                best_move = mv;
+            }
 
-        // self.best_move = best_move orelse board.Move.init(28, 36, null);
+            // Check time limit
+            if (time_limit) |limit| {
+                if (std.time.milliTimestamp() - start_time > limit) break;
+            }
+
+            std.time.sleep(5 * std.time.ns_per_ms); // simulate work
+        }
+
+        self.best_move = best_move orelse legal_moves[0];
         try self.writeInfoString("search thread stopped", .{});
         try self.writeStdout("bestmove {s}", .{self.best_move});
     }
