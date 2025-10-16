@@ -22,12 +22,12 @@ pub const SearchResult = struct {
 
 pub const SearchEngine = struct {
     const Self = @This();
-    
+
     board: *Board,
     allocator: std.mem.Allocator,
     stop_search: *std.atomic.Value(bool),
     info_callback: ?*const fn ([]const u8) void,
-    
+
     pub fn init(
         board_ptr: *Board,
         allocator: std.mem.Allocator,
@@ -40,18 +40,18 @@ pub const SearchEngine = struct {
             .info_callback = null,
         };
     }
-    
+
     /// Run a search and return the best move
     pub fn search(self: *Self, options: SearchOptions) !SearchResult {
         const start_time = std.time.milliTimestamp();
-        
+
         // Calculate time limit
         const time_limit = self.calculateTimeLimit(options);
-        
+
         // Generate legal moves
         const legal_moves = try self.board.generateLegalMoves(self.allocator);
         defer self.allocator.free(legal_moves);
-        
+
         if (legal_moves.len == 0) {
             return SearchResult{
                 .best_move = Move.init(0, 0, null),
@@ -60,26 +60,26 @@ pub const SearchEngine = struct {
                 .time_ms = 0,
             };
         }
-        
+
         var best_eval: i32 = -9999;
         var best_move: Move = legal_moves[0];
         var nodes: usize = 0;
-        
+
         // Simple search: evaluate each move
         for (legal_moves) |mv| {
             // Check if search was stopped
             if (self.stop_search.load(.seq_cst)) {
                 break;
             }
-            
+
             const score = self.evaluateMove(mv);
             nodes += 1;
-            
+
             if (score > best_eval) {
                 best_eval = score;
                 best_move = mv;
             }
-            
+
             // Check time limit
             if (time_limit) |limit| {
                 const elapsed = std.time.milliTimestamp() - start_time;
@@ -87,13 +87,13 @@ pub const SearchEngine = struct {
                     break;
                 }
             }
-            
+
             // Simulate some thinking time (can be removed later)
             std.time.sleep(5 * std.time.ns_per_ms);
         }
-        
+
         const elapsed = std.time.milliTimestamp() - start_time;
-        
+
         return SearchResult{
             .best_move = best_move,
             .score = best_eval,
@@ -101,10 +101,10 @@ pub const SearchEngine = struct {
             .time_ms = elapsed,
         };
     }
-    
+
     fn calculateTimeLimit(self: *Self, options: SearchOptions) ?u64 {
         _ = self;
-        
+
         if (options.infinite) {
             return null;
         } else if (options.move_time) |move_time| {
@@ -114,16 +114,16 @@ pub const SearchEngine = struct {
         } else if (options.btime) |btime| {
             return btime / 100;
         }
-        
+
         return null;
     }
-    
+
     /// Evaluate a single move (static evaluation)
     fn evaluateMove(self: *Self, move: Move) i32 {
         var score: i32 = 0;
         const color = self.board.board.move;
         const opponent = if (color == .white) piece.Color.black else piece.Color.white;
-        
+
         // Check if it's a capture
         const captured_piece = self.board.board.getPieceAt(move.to, opponent);
         if (captured_piece) |piece_type| {
@@ -137,7 +137,7 @@ pub const SearchEngine = struct {
                 .king => 0, // Can't actually capture the king
             };
         }
-        
+
         // Reward central squares (d4, e4, d5, e5)
         const to_file = move.to % 8;
         const to_rank = move.to / 8;
@@ -145,14 +145,14 @@ pub const SearchEngine = struct {
         if (is_center) {
             score += 30;
         }
-        
+
         // Reward moving pieces off the back rank (development)
         const from_rank = move.from / 8;
         const back_rank: u8 = if (color == .white) 0 else 7;
         if (from_rank == back_rank and to_rank != back_rank) {
             score += 20;
         }
-        
+
         // Small bonus for pawn advances
         const moving_piece = self.board.board.getPieceAt(move.from, color);
         if (moving_piece) |p| {
@@ -164,7 +164,7 @@ pub const SearchEngine = struct {
                 }
             }
         }
-        
+
         // Bonus for promotions
         if (move.promotion) |promo| {
             score += switch (promo) {
@@ -175,7 +175,7 @@ pub const SearchEngine = struct {
                 else => 0,
             };
         }
-        
+
         return score;
     }
 };

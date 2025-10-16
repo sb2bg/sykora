@@ -265,7 +265,7 @@ pub const Uci = struct {
 
         // Create search engine
         var search_engine = SearchEngine.init(&self.board, self.allocator, &self.stop_search);
-        
+
         // Convert UCI go options to search options
         const search_opts = SearchOptions{
             .infinite = go_opts.infinite orelse false,
@@ -274,19 +274,19 @@ pub const Uci = struct {
             .btime = go_opts.btime,
             .depth = go_opts.depth,
         };
-        
+
         // Run the search
         const result = try search_engine.search(search_opts);
-        
+
         // Output the result
         self.best_move = result.best_move;
-        
+
         // Output final info line
-        const nps = if (result.time_ms > 0) 
+        const nps = if (result.time_ms > 0)
             (result.nodes * 1000) / @as(usize, @intCast(result.time_ms))
-        else 
+        else
             result.nodes * 1000;
-            
+
         try self.writeStdout(
             "info depth 1 score cp {d} nodes {d} nps {d} time {d}",
             .{
@@ -296,7 +296,7 @@ pub const Uci = struct {
                 result.time_ms,
             },
         );
-        
+
         try self.writeInfoString("search thread stopped", .{});
         try self.writeStdout("bestmove {s}", .{self.best_move});
     }
