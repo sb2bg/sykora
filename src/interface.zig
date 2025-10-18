@@ -200,58 +200,64 @@ pub const Uci = struct {
                     }
                 }
             },
-            .perft => |depth| {
-                try self.writeStdout("", .{});
-                try self.writeStdout("Running perft to depth {d}...", .{depth});
-                try self.writeStdout("", .{});
+            .perft => |perft_opts| {
+                switch (perft_opts.mode) {
+                    .stats => {
+                        // Perft with detailed statistics
+                        try self.writeStdout("", .{});
+                        try self.writeStdout("Running perft to depth {d}...", .{perft_opts.depth});
+                        try self.writeStdout("", .{});
 
-                // Print header
-                try self.writeStdout("Depth | Nodes      | Captures   | E.p. | Castles | Promotions | Checks | Discovery | Double | Checkmates | Time(ms)", .{});
-                try self.writeStdout("------|------------|------------|------|---------|------------|--------|-----------|--------|------------|----------", .{});
+                        // Print header
+                        try self.writeStdout("Depth | Nodes      | Captures   | E.p. | Castles | Promotions | Checks | Discovery | Double | Checkmates | Time(ms)", .{});
+                        try self.writeStdout("------|------------|------------|------|---------|------------|--------|-----------|--------|------------|----------", .{});
 
-                const start_time = std.time.milliTimestamp();
+                        const start_time = std.time.milliTimestamp();
 
-                // Run perft for each depth up to target depth
-                var d: u32 = 1;
-                while (d <= depth) : (d += 1) {
-                    const depth_start = std.time.milliTimestamp();
-                    var stats = board.Board.PerftStats{};
-                    try self.board.perftWithStats(@intCast(d), self.allocator, &stats);
-                    const depth_time = std.time.milliTimestamp() - depth_start;
+                        // Run perft for each depth up to target depth
+                        var d: u32 = 1;
+                        while (d <= perft_opts.depth) : (d += 1) {
+                            const depth_start = std.time.milliTimestamp();
+                            var stats = board.Board.PerftStats{};
+                            try self.board.perftWithStats(@intCast(d), self.allocator, &stats);
+                            const depth_time = std.time.milliTimestamp() - depth_start;
 
-                    try self.writeStdout("{d: >5} | {d: >10} | {d: >10} | {d: >4} | {d: >7} | {d: >10} | {d: >6} | {d: >9} | {d: >6} | {d: >10} | {d: >8}", .{
-                        d,
-                        stats.nodes,
-                        stats.captures,
-                        stats.en_passant,
-                        stats.castles,
-                        stats.promotions,
-                        stats.checks,
-                        stats.discovery_checks,
-                        stats.double_checks,
-                        stats.checkmates,
-                        depth_time,
-                    });
+                            try self.writeStdout("{d: >5} | {d: >10} | {d: >10} | {d: >4} | {d: >7} | {d: >10} | {d: >6} | {d: >9} | {d: >6} | {d: >10} | {d: >8}", .{
+                                d,
+                                stats.nodes,
+                                stats.captures,
+                                stats.en_passant,
+                                stats.castles,
+                                stats.promotions,
+                                stats.checks,
+                                stats.discovery_checks,
+                                stats.double_checks,
+                                stats.checkmates,
+                                depth_time,
+                            });
+                        }
+
+                        const total_time = std.time.milliTimestamp() - start_time;
+
+                        try self.writeStdout("", .{});
+                        try self.writeStdout("Total time: {d}ms", .{total_time});
+                    },
+                    .divide => {
+                        // Perft divide - show per-move breakdown
+                        try self.writeStdout("", .{});
+                        try self.writeStdout("Perft divide at depth {d}:", .{perft_opts.depth});
+                        try self.writeStdout("", .{});
+
+                        const start_time = std.time.milliTimestamp();
+                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), self.allocator, self.stdout);
+                        const total_time = std.time.milliTimestamp() - start_time;
+                        const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
+
+                        try self.writeStdout("", .{});
+                        try self.writeStdout("Total time: {d}ms", .{total_time});
+                        try self.writeStdout("Nodes per second: {d}", .{total_nps});
+                    },
                 }
-
-                const total_time = std.time.milliTimestamp() - start_time;
-
-                try self.writeStdout("", .{});
-                try self.writeStdout("Total time: {d}ms", .{total_time});
-            },
-            .divide => |depth| {
-                try self.writeStdout("", .{});
-                try self.writeStdout("Perft divide at depth {d}:", .{depth});
-                try self.writeStdout("", .{});
-
-                const start_time = std.time.milliTimestamp();
-                const total_nodes = try self.board.perftDivide(@intCast(depth), self.allocator, self.stdout);
-                const total_time = std.time.milliTimestamp() - start_time;
-                const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
-
-                try self.writeStdout("", .{});
-                try self.writeStdout("Total time: {d}ms", .{total_time});
-                try self.writeStdout("Nodes per second: {d}", .{total_nps});
             },
             .quit => {
                 // user wanted to quit, we return an error to break out of the loop

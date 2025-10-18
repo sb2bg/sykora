@@ -13,7 +13,6 @@ pub const ToEngine = enum {
     quit,
     display,
     perft,
-    divide,
 };
 
 /// These are all the commands the engine recieves from the interface, plus
@@ -95,22 +94,26 @@ pub const ToEngineCommand = union(ToEngine) {
     /// **Note:** this command is not part of the official UCI protocol and is a novelty,
     /// quality of life feature.
     display,
-    /// **perft** <depth>
+    /// **perft** <depth> [divide | stats]
     ///
-    /// complete a perft on the current position to the specified depth.
-    /// Shows detailed statistics for each depth level.
-    ///
-    /// **Note:** this command is not part of the official UCI protocol and is a novelty,
-    /// quality of life feature.
-    perft: u64,
-    /// **divide** <depth>
-    ///
-    /// complete a perft divide on the current position at the specified depth.
-    /// Shows the number of nodes for each root move.
+    /// Run perft (performance test) on the current position to the specified depth.
+    /// - (no argument): Fast perft, only shows total node count (fastest)
+    /// - `divide`: Shows the number of nodes for each root move
+    /// - `stats`: Shows detailed statistics (captures, checks, promotions, etc.) for each depth (slowest)
     ///
     /// **Note:** this command is not part of the official UCI protocol and is a novelty,
     /// quality of life feature.
-    divide: u64,
+    perft: PerftOptions,
+};
+
+pub const PerftMode = enum {
+    stats, // Show detailed statistics
+    divide, // Show per-move breakdown
+};
+
+pub const PerftOptions = struct {
+    depth: u64,
+    mode: PerftMode = .divide,
 };
 
 pub const SetOptionOptions = struct {

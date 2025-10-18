@@ -140,13 +140,18 @@ pub const UciParser = struct {
                 const depth = parser.next() orelse return error.UnexpectedEOF;
                 const parsed_depth = std.fmt.parseInt(u64, depth, 10) catch return UciError.InvalidArgument;
 
-                return ToEngineCommand{ .perft = parsed_depth };
-            },
-            .divide => {
-                const depth = parser.next() orelse return error.UnexpectedEOF;
-                const parsed_depth = std.fmt.parseInt(u64, depth, 10) catch return UciError.InvalidArgument;
+                // Check for optional mode argument
+                const mode: cmd.PerftMode = if (parser.next()) |mode_str| blk: {
+                    if (std.mem.eql(u8, mode_str, "stats")) {
+                        break :blk .stats;
+                    } else if (std.mem.eql(u8, mode_str, "divide")) {
+                        break :blk .divide;
+                    } else {
+                        return error.InvalidArgument;
+                    }
+                } else .divide;
 
-                return ToEngineCommand{ .divide = parsed_depth };
+                return ToEngineCommand{ .perft = .{ .depth = parsed_depth, .mode = mode } };
             },
             .go => {
                 var go_params: cmd.GoOptions = .{};

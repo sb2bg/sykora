@@ -254,7 +254,7 @@ pub const Board = struct {
         defer allocator.free(pseudo_legal);
 
         const color = self.board.move;
-        
+
         // Filter out moves that leave the king in check
         // Optimize by saving/restoring state only once per move
         for (pseudo_legal) |move| {
@@ -584,8 +584,6 @@ pub const Board = struct {
         return total_nodes;
     }
 
-
-
     /// Check if the given color's king is currently in check
     inline fn isInCheck(self: *Self, color: pieceInfo.Color) bool {
         const king_bb = self.board.getColorBitboard(color) & self.board.getKindBitboard(.king);
@@ -768,7 +766,7 @@ pub const Board = struct {
                         try moves.append(Move.init(from, to_sq, .bishop));
                     } else {
                         try moves.append(Move.init(from, to_sq, null));
-                        
+
                         // Double push
                         if (rank == start_rank) {
                             const to_double: i16 = @as(i16, from) + direction * 2;
@@ -804,7 +802,7 @@ pub const Board = struct {
                     }
                 }
             }
-            
+
             if (file < 7) {
                 const to: i16 = @as(i16, from) + direction + 1;
                 if (to >= 0 and to < 64) {
@@ -927,7 +925,7 @@ pub const Board = struct {
         // Castling - only add if not currently in check and path is clear
         // Check attacks will be verified during move legality testing
         const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-        
+
         if (color == .white) {
             // White kingside
             if (self.board.castle_rights.white_kingside) {
