@@ -53,6 +53,30 @@ fn initKingAttacks() [64]u64 {
     return attacks;
 }
 
+pub const MAX_MOVES = 256;
+
+pub const MoveList = struct {
+    moves: [MAX_MOVES]Move = undefined,
+    count: usize = 0,
+
+    pub fn init() MoveList {
+        return MoveList{};
+    }
+
+    pub fn append(self: *MoveList, move: Move) void {
+        self.moves[self.count] = move;
+        self.count += 1;
+    }
+
+    pub fn slice(self: *MoveList) []const Move {
+        return self.moves[0..self.count];
+    }
+
+    pub fn sliceMut(self: *MoveList) []Move {
+        return self.moves[0..self.count];
+    }
+};
+
 pub const Move = struct {
     const Self = @This();
     from: u8,
@@ -248,18 +272,15 @@ pub const Board = struct {
     }
 
     /// Generate all legal moves for the current position
-    pub fn generateLegalMoves(self: *Self, allocator: std.mem.Allocator) ![]Move {
-        var moves = std.ArrayList(Move).init(allocator);
-        errdefer moves.deinit();
-
-        const pseudo_legal = try self.generatePseudoLegalMoves(allocator);
-        defer allocator.free(pseudo_legal);
+    pub fn generateLegalMoves(self: *Self, moves: *MoveList) !void {
+        var pseudo_legal = MoveList.init();
+        try self.generatePseudoLegalMoves(&pseudo_legal);
 
         const color = self.board.move;
 
         // Filter out moves that leave the king in check
         // Optimize by saving/restoring state only once per move
-        for (pseudo_legal) |move| {
+        for (pseudo_legal.slice()) |move| {
             // Save state
             const old_board = self.board;
             const old_hash = self.zobrist_hasher.zobrist_hash;
@@ -275,11 +296,9 @@ pub const Board = struct {
             self.zobrist_hasher.zobrist_hash = old_hash;
 
             if (legal) {
-                try moves.append(move);
+                moves.append(move);
             }
         }
-
-        return moves.toOwnedSlice();
     }
 
     pub const PerftStats = struct {
@@ -308,20 +327,20 @@ pub const Board = struct {
 
     /// Perft - Performance test for move generation (fast version without stats)
     /// Returns the number of leaf nodes at the given depth
-    pub fn perft(self: *Self, depth: u32, allocator: std.mem.Allocator) UciError!u64 {
+    pub fn perft(self: *Self, depth: u32) UciError!u64 {
         if (depth == 0) {
             return 1;
         }
 
         // Generate pseudo-legal moves once
-        const pseudo_legal = try self.generatePseudoLegalMoves(allocator);
-        defer allocator.free(pseudo_legal);
+        var pseudo_legal = MoveList.init();
+        try self.generatePseudoLegalMoves(&pseudo_legal);
 
         var nodes: u64 = 0;
         const color = self.board.move;
 
         // Test each pseudo-legal move for legality
-        for (pseudo_legal) |move| {
+        for (pseudo_legal.slice()) |move| {
             // Save state
             const old_board = self.board;
             const old_hash = self.zobrist_hasher.zobrist_hash;
@@ -343,7 +362,7 @@ pub const Board = struct {
                 nodes += 1;
             } else {
                 // Recurse
-                nodes += try self.perft(depth - 1, allocator);
+                nodes += try self.perft(depth - 1);
             }
 
             // Restore state
@@ -355,22 +374,22 @@ pub const Board = struct {
     }
 
     /// Perft with detailed statistics
-    pub fn perftWithStats(self: *Self, depth: u32, allocator: std.mem.Allocator, stats: *PerftStats) UciError!void {
+    pub fn perftWithStats(self: *Self, depth: u32, stats: *PerftStats) UciError!void {
         if (depth == 0) {
             stats.nodes = 1;
             return;
         }
 
         // Generate pseudo-legal moves once
-        const pseudo_legal = try self.generatePseudoLegalMoves(allocator);
-        defer allocator.free(pseudo_legal);
+        var pseudo_legal = MoveList.init();
+        try self.generatePseudoLegalMoves(&pseudo_legal);
 
         const moving_color = self.board.move;
         const opponent_color = if (moving_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
         if (depth == 1) {
             // At depth 1, count move types for legal moves only
-            for (pseudo_legal) |move| {
+            for (pseudo_legal.slice()) |move| {
                 // Save state
                 const old_board = self.board;
                 const old_hash = self.zobrist_hasher.zobrist_hash;
@@ -437,7 +456,7 @@ pub const Board = struct {
                     stats.checks += 1;
 
                     // Check if it's checkmate - use fast perft to count legal moves
-                    const opponent_legal = try self.perft(1, allocator);
+                    const opponent_legal = try self.perft(1);
                     if (opponent_legal == 0) {
                         stats.checkmates += 1;
                     }
@@ -451,7 +470,7 @@ pub const Board = struct {
         }
 
         // Recursive case
-        for (pseudo_legal) |move| {
+        for (pseudo_legal.slice()) |move| {
             // Save state
             const old_board = self.board;
             const old_hash = self.zobrist_hasher.zobrist_hash;
@@ -469,7 +488,7 @@ pub const Board = struct {
 
             // Recurse
             var child_stats = PerftStats{};
-            try self.perftWithStats(depth - 1, allocator, &child_stats);
+            try self.perftWithStats(depth - 1, &child_stats);
             stats.add(child_stats);
 
             // Restore state
@@ -556,13 +575,13 @@ pub const Board = struct {
     }
 
     /// Perft divide - Shows the number of nodes for each root move
-    pub fn perftDivide(self: *Self, depth: u32, allocator: std.mem.Allocator, writer: anytype) UciError!u64 {
-        const moves = try self.generateLegalMoves(allocator);
-        defer allocator.free(moves);
+    pub fn perftDivide(self: *Self, depth: u32, writer: anytype) UciError!u64 {
+        var moves = MoveList.init();
+        try self.generateLegalMoves(&moves);
 
         var total_nodes: u64 = 0;
 
-        for (moves) |move| {
+        for (moves.slice()) |move| {
             // Save state
             const old_board = self.board;
             const old_hash = self.zobrist_hasher.zobrist_hash;
@@ -571,7 +590,7 @@ pub const Board = struct {
             self.applyMoveUnchecked(move);
 
             // Count nodes
-            const nodes = if (depth <= 1) 1 else try self.perft(depth - 1, allocator);
+            const nodes = if (depth <= 1) 1 else try self.perft(depth - 1);
             total_nodes += nodes;
 
             // Print result
@@ -725,37 +744,32 @@ pub const Board = struct {
     }
 
     /// Generate all pseudo-legal moves (may leave king in check)
-    fn generatePseudoLegalMoves(self: *Self, allocator: std.mem.Allocator) ![]Move {
-        var moves = std.ArrayList(Move).init(allocator);
-        errdefer moves.deinit();
-
+    fn generatePseudoLegalMoves(self: *Self, moves: *MoveList) !void {
         const color = self.board.move;
         const our_pieces = self.board.getColorBitboard(color);
         const opponent_pieces = self.board.getColorBitboard(if (color == .white) .black else .white);
         const occupied = self.board.occupied();
 
         // Generate pawn moves
-        try self.generatePawnMoves(&moves, color, our_pieces, opponent_pieces, occupied);
+        try self.generatePawnMoves(moves, color, our_pieces, opponent_pieces, occupied);
 
         // Generate knight moves
-        try self.generateKnightMoves(&moves, color, our_pieces);
+        try self.generateKnightMoves(moves, color, our_pieces);
 
         // Generate bishop moves
-        try self.generateBishopMoves(&moves, color, our_pieces, occupied);
+        try self.generateBishopMoves(moves, color, our_pieces, occupied);
 
         // Generate rook moves
-        try self.generateRookMoves(&moves, color, our_pieces, occupied);
+        try self.generateRookMoves(moves, color, our_pieces, occupied);
 
         // Generate queen moves
-        try self.generateQueenMoves(&moves, color, our_pieces, occupied);
+        try self.generateQueenMoves(moves, color, our_pieces, occupied);
 
         // Generate king moves
-        try self.generateKingMoves(&moves, color, our_pieces, opponent_pieces, occupied);
-
-        return moves.toOwnedSlice();
+        try self.generateKingMoves(moves, color, our_pieces, opponent_pieces, occupied);
     }
 
-    fn generatePawnMoves(self: *Self, moves: *std.ArrayList(Move), color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64, occupied: u64) !void {
+    fn generatePawnMoves(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64, occupied: u64) !void {
         const pawns = our_pieces & self.board.getKindBitboard(.pawn);
         const direction: i8 = if (color == .white) 8 else -8;
         const start_rank: u8 = if (color == .white) 1 else 6;
@@ -777,19 +791,19 @@ pub const Board = struct {
                     const to_rank = to_sq / 8;
                     if (to_rank == promo_rank) {
                         // Promotions - order: queen, knight, rook, bishop (MVV-LVA order)
-                        try moves.append(Move.init(from, to_sq, .queen));
-                        try moves.append(Move.init(from, to_sq, .knight));
-                        try moves.append(Move.init(from, to_sq, .rook));
-                        try moves.append(Move.init(from, to_sq, .bishop));
+                        moves.append(Move.init(from, to_sq, .queen));
+                        moves.append(Move.init(from, to_sq, .knight));
+                        moves.append(Move.init(from, to_sq, .rook));
+                        moves.append(Move.init(from, to_sq, .bishop));
                     } else {
-                        try moves.append(Move.init(from, to_sq, null));
+                        moves.append(Move.init(from, to_sq, null));
 
                         // Double push
                         if (rank == start_rank) {
                             const to_double: i16 = @as(i16, from) + direction * 2;
                             const to_sq_double: u6 = @intCast(to_double);
                             if ((occupied & (@as(u64, 1) << to_sq_double)) == 0) {
-                                try moves.append(Move.init(from, to_sq_double, null));
+                                moves.append(Move.init(from, to_sq_double, null));
                             }
                         }
                     }
@@ -805,16 +819,16 @@ pub const Board = struct {
 
                     if ((opponent_pieces & to_bb) != 0) {
                         if (to_sq / 8 == promo_rank) {
-                            try moves.append(Move.init(from, to_sq, .queen));
-                            try moves.append(Move.init(from, to_sq, .knight));
-                            try moves.append(Move.init(from, to_sq, .rook));
-                            try moves.append(Move.init(from, to_sq, .bishop));
+                            moves.append(Move.init(from, to_sq, .queen));
+                            moves.append(Move.init(from, to_sq, .knight));
+                            moves.append(Move.init(from, to_sq, .rook));
+                            moves.append(Move.init(from, to_sq, .bishop));
                         } else {
-                            try moves.append(Move.init(from, to_sq, null));
+                            moves.append(Move.init(from, to_sq, null));
                         }
                     } else if (self.board.en_passant_square) |ep_sq| {
                         if (ep_sq == to_sq) {
-                            try moves.append(Move.init(from, to_sq, null));
+                            moves.append(Move.init(from, to_sq, null));
                         }
                     }
                 }
@@ -828,16 +842,16 @@ pub const Board = struct {
 
                     if ((opponent_pieces & to_bb) != 0) {
                         if (to_sq / 8 == promo_rank) {
-                            try moves.append(Move.init(from, to_sq, .queen));
-                            try moves.append(Move.init(from, to_sq, .knight));
-                            try moves.append(Move.init(from, to_sq, .rook));
-                            try moves.append(Move.init(from, to_sq, .bishop));
+                            moves.append(Move.init(from, to_sq, .queen));
+                            moves.append(Move.init(from, to_sq, .knight));
+                            moves.append(Move.init(from, to_sq, .rook));
+                            moves.append(Move.init(from, to_sq, .bishop));
                         } else {
-                            try moves.append(Move.init(from, to_sq, null));
+                            moves.append(Move.init(from, to_sq, null));
                         }
                     } else if (self.board.en_passant_square) |ep_sq| {
                         if (ep_sq == to_sq) {
-                            try moves.append(Move.init(from, to_sq, null));
+                            moves.append(Move.init(from, to_sq, null));
                         }
                     }
                 }
@@ -845,7 +859,7 @@ pub const Board = struct {
         }
     }
 
-    fn generateKnightMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64) !void {
+    fn generateKnightMoves(self: *Self, moves: *MoveList, _: pieceInfo.Color, our_pieces: u64) !void {
         const knights = our_pieces & self.board.getKindBitboard(.knight);
         var knight_bb = knights;
 
@@ -859,12 +873,12 @@ pub const Board = struct {
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
                 attack_bb &= attack_bb - 1;
-                try moves.append(Move.init(from, to, null));
+                moves.append(Move.init(from, to, null));
             }
         }
     }
 
-    fn generateBishopMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
+    fn generateBishopMoves(self: *Self, moves: *MoveList, _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
         const bishops = our_pieces & self.board.getKindBitboard(.bishop);
         var bishop_bb = bishops;
 
@@ -878,12 +892,12 @@ pub const Board = struct {
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
                 attack_bb &= attack_bb - 1;
-                try moves.append(Move.init(from, to, null));
+                moves.append(Move.init(from, to, null));
             }
         }
     }
 
-    fn generateRookMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
+    fn generateRookMoves(self: *Self, moves: *MoveList, _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
         const rooks = our_pieces & self.board.getKindBitboard(.rook);
         var rook_bb = rooks;
 
@@ -897,12 +911,12 @@ pub const Board = struct {
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
                 attack_bb &= attack_bb - 1;
-                try moves.append(Move.init(from, to, null));
+                moves.append(Move.init(from, to, null));
             }
         }
     }
 
-    fn generateQueenMoves(self: *Self, moves: *std.ArrayList(Move), _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
+    fn generateQueenMoves(self: *Self, moves: *MoveList, _: pieceInfo.Color, our_pieces: u64, occupied: u64) !void {
         const queens = our_pieces & self.board.getKindBitboard(.queen);
         var queen_bb = queens;
 
@@ -918,12 +932,12 @@ pub const Board = struct {
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
                 attack_bb &= attack_bb - 1;
-                try moves.append(Move.init(from, to, null));
+                moves.append(Move.init(from, to, null));
             }
         }
     }
 
-    fn generateKingMoves(self: *Self, moves: *std.ArrayList(Move), color: pieceInfo.Color, our_pieces: u64, _: u64, occupied: u64) !void {
+    fn generateKingMoves(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, _: u64, occupied: u64) !void {
         const kings = our_pieces & self.board.getKindBitboard(.king);
         if (kings == 0) return;
 
@@ -936,7 +950,7 @@ pub const Board = struct {
         while (attack_bb != 0) {
             const to: u6 = @intCast(@ctz(attack_bb));
             attack_bb &= attack_bb - 1;
-            try moves.append(Move.init(from, to, null));
+            moves.append(Move.init(from, to, null));
         }
 
         // Castling - only add if not currently in check and path is clear
@@ -950,7 +964,7 @@ pub const Board = struct {
                     !self.isSquareAttackedBy(4, opponent) and
                     !self.isSquareAttackedBy(5, opponent))
                 {
-                    try moves.append(Move.init(4, 6, null));
+                    moves.append(Move.init(4, 6, null));
                 }
             }
             // White queenside
@@ -959,7 +973,7 @@ pub const Board = struct {
                     !self.isSquareAttackedBy(4, opponent) and
                     !self.isSquareAttackedBy(3, opponent))
                 {
-                    try moves.append(Move.init(4, 2, null));
+                    moves.append(Move.init(4, 2, null));
                 }
             }
         } else {
@@ -969,7 +983,7 @@ pub const Board = struct {
                     !self.isSquareAttackedBy(60, opponent) and
                     !self.isSquareAttackedBy(61, opponent))
                 {
-                    try moves.append(Move.init(60, 62, null));
+                    moves.append(Move.init(60, 62, null));
                 }
             }
             // Black queenside
@@ -978,7 +992,7 @@ pub const Board = struct {
                     !self.isSquareAttackedBy(60, opponent) and
                     !self.isSquareAttackedBy(59, opponent))
                 {
-                    try moves.append(Move.init(60, 58, null));
+                    moves.append(Move.init(60, 58, null));
                 }
             }
         }

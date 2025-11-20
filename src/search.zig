@@ -49,10 +49,10 @@ pub const SearchEngine = struct {
         const time_limit = self.calculateTimeLimit(options);
 
         // Generate legal moves
-        const legal_moves = try self.board.generateLegalMoves(self.allocator);
-        defer self.allocator.free(legal_moves);
+        var legal_moves = board.MoveList.init();
+        try self.board.generateLegalMoves(&legal_moves);
 
-        if (legal_moves.len == 0) {
+        if (legal_moves.count == 0) {
             return SearchResult{
                 .best_move = Move.init(0, 0, null),
                 .score = 0,
@@ -62,11 +62,11 @@ pub const SearchEngine = struct {
         }
 
         var best_eval: i32 = -9999;
-        var best_move: Move = legal_moves[0];
+        var best_move: Move = legal_moves.moves[0];
         var nodes: usize = 0;
 
         // Simple search: evaluate each move
-        for (legal_moves) |mv| {
+        for (legal_moves.slice()) |mv| {
             // Check if search was stopped
             if (self.stop_search.load(.seq_cst)) {
                 break;

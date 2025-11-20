@@ -219,7 +219,7 @@ pub const Uci = struct {
                         while (d <= perft_opts.depth) : (d += 1) {
                             const depth_start = std.time.milliTimestamp();
                             var stats = board.Board.PerftStats{};
-                            try self.board.perftWithStats(@intCast(d), self.allocator, &stats);
+                            try self.board.perftWithStats(@intCast(d), &stats);
                             const depth_time = std.time.milliTimestamp() - depth_start;
 
                             try self.writeStdout("{d: >5} | {d: >10} | {d: >10} | {d: >4} | {d: >7} | {d: >10} | {d: >6} | {d: >9} | {d: >6} | {d: >10} | {d: >8}", .{
@@ -249,7 +249,7 @@ pub const Uci = struct {
                         try self.writeStdout("", .{});
 
                         const start_time = std.time.milliTimestamp();
-                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), self.allocator, self.stdout);
+                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), self.stdout);
                         const total_time = std.time.milliTimestamp() - start_time;
                         const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
 
