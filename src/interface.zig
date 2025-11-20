@@ -64,6 +64,13 @@ pub const Uci = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Ensure search thread is terminated before cleanup
+        self.stop_search.store(true, .seq_cst);
+        if (self.search_thread) |thread| {
+            thread.join();
+            self.search_thread = null;
+        }
+
         if (self.log_file) |file| {
             file.close();
         }
