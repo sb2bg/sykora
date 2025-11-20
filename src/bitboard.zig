@@ -170,6 +170,7 @@ pub const Board = struct {
             }
         }
 
+        self.board.clearSquare(to_index);
         self.board.clearSquare(from_index);
         self.board.setPieceAt(to_index, color, piece_type);
 
@@ -640,6 +641,8 @@ pub const Board = struct {
         const piece_type = self.board.getPieceAt(move.from, color) orelse return;
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
+        const captured_piece = self.board.getPieceAt(move.to, opponent_color);
+
         // Handle captures - must clear the destination square first
         self.board.clearSquare(move.to);
 
@@ -701,6 +704,19 @@ pub const Board = struct {
             } else {
                 if (move.from == 56) self.board.castle_rights.black_queenside = false;
                 if (move.from == 63) self.board.castle_rights.black_kingside = false;
+            }
+        }
+
+        // If a rook is captured, remove castling rights
+        if (captured_piece) |captured| {
+            if (captured == .rook) {
+                if (opponent_color == .white) {
+                    if (move.to == 0) self.board.castle_rights.white_queenside = false;
+                    if (move.to == 7) self.board.castle_rights.white_kingside = false;
+                } else {
+                    if (move.to == 56) self.board.castle_rights.black_queenside = false;
+                    if (move.to == 63) self.board.castle_rights.black_kingside = false;
+                }
             }
         }
 
@@ -931,7 +947,8 @@ pub const Board = struct {
             // White kingside
             if (self.board.castle_rights.white_kingside) {
                 if ((occupied & ((@as(u64, 1) << 5) | (@as(u64, 1) << 6))) == 0 and
-                    !self.isSquareAttackedBy(4, opponent))
+                    !self.isSquareAttackedBy(4, opponent) and
+                    !self.isSquareAttackedBy(5, opponent))
                 {
                     try moves.append(Move.init(4, 6, null));
                 }
@@ -939,7 +956,8 @@ pub const Board = struct {
             // White queenside
             if (self.board.castle_rights.white_queenside) {
                 if ((occupied & ((@as(u64, 1) << 1) | (@as(u64, 1) << 2) | (@as(u64, 1) << 3))) == 0 and
-                    !self.isSquareAttackedBy(4, opponent))
+                    !self.isSquareAttackedBy(4, opponent) and
+                    !self.isSquareAttackedBy(3, opponent))
                 {
                     try moves.append(Move.init(4, 2, null));
                 }
@@ -948,7 +966,8 @@ pub const Board = struct {
             // Black kingside
             if (self.board.castle_rights.black_kingside) {
                 if ((occupied & ((@as(u64, 1) << 61) | (@as(u64, 1) << 62))) == 0 and
-                    !self.isSquareAttackedBy(60, opponent))
+                    !self.isSquareAttackedBy(60, opponent) and
+                    !self.isSquareAttackedBy(61, opponent))
                 {
                     try moves.append(Move.init(60, 62, null));
                 }
@@ -956,7 +975,8 @@ pub const Board = struct {
             // Black queenside
             if (self.board.castle_rights.black_queenside) {
                 if ((occupied & ((@as(u64, 1) << 57) | (@as(u64, 1) << 58) | (@as(u64, 1) << 59))) == 0 and
-                    !self.isSquareAttackedBy(60, opponent))
+                    !self.isSquareAttackedBy(60, opponent) and
+                    !self.isSquareAttackedBy(59, opponent))
                 {
                     try moves.append(Move.init(60, 58, null));
                 }
