@@ -282,6 +282,8 @@ pub const Uci = struct {
             .move_time = go_opts.move_time,
             .wtime = go_opts.wtime,
             .btime = go_opts.btime,
+            .winc = go_opts.winc,
+            .binc = go_opts.binc,
             .depth = go_opts.depth,
         };
 

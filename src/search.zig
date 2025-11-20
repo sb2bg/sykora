@@ -12,6 +12,8 @@ pub const SearchOptions = struct {
     move_time: ?u64 = null,
     wtime: ?u64 = null,
     btime: ?u64 = null,
+    winc: ?u64 = null,
+    binc: ?u64 = null,
     depth: ?u64 = null,
 };
 
@@ -335,20 +337,55 @@ pub const SearchEngine = struct {
     }
 
     fn calculateTimeLimit(self: *Self, options: SearchOptions) ?u64 {
-        _ = self;
-
         if (options.infinite) {
             return null;
         } else if (options.move_time) |move_time| {
             return move_time;
-        } else if (options.wtime) |wtime| {
-            // Use a fraction of remaining time
-            return wtime / 30;
-        } else if (options.btime) |btime| {
-            return btime / 30;
         }
 
-        return null;
+        // Determine which color we are and get our time/increment
+        const our_time: ?u64 = if (self.board.board.side_to_move == piece.Color.white)
+            options.wtime
+        else
+            options.btime;
+
+        const our_increment: u64 = if (self.board.board.side_to_move == piece.Color.white)
+            options.winc orelse 0
+        else
+            options.binc orelse 0;
+
+        if (our_time == null) {
+            return null;
+        }
+
+        const time_remaining = our_time.?;
+
+        // Calculate moves played and estimate moves remaining
+        const moves_played = self.board.board.fullmove_number;
+        const estimated_moves_remaining = @max(20, 40 - @min(moves_played, 40));
+
+        // Base time allocation: divide remaining time by estimated moves
+        // Use a slightly larger divisor for safety margin
+        const divisor = estimated_moves_remaining + 5;
+        const base_time = time_remaining / divisor;
+
+        // Add most of the increment since we get it back after the move
+        const time_budget = base_time + (our_increment * 9 / 10);
+
+        // Apply min/max bounds
+        const min_time: u64 = 100; // Minimum 100ms
+        var max_time = @min(time_remaining / 5, 30000); // Max 20% of remaining or 30s
+
+        // If low on time, be more conservative
+        if (time_remaining < 10000) {
+            max_time = @min(time_remaining * 15 / 100, max_time);
+        } else if (time_remaining < 5000) {
+            max_time = @min(time_remaining / 10, max_time);
+        }
+
+        const time_for_move = @max(min_time, @min(time_budget, max_time));
+
+        return time_for_move;
     }
 
     /// Alpha-beta search (negamax variant)
