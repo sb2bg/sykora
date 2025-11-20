@@ -9,6 +9,18 @@ const ZobristHasher = zobrist.ZobristHasher;
 const KNIGHT_ATTACKS = initKnightAttacks();
 const KING_ATTACKS = initKingAttacks();
 
+// Magic bitboard constants for rook attacks
+const ROOK_MAGICS = initRookMagics();
+const ROOK_MASKS = initRookMasks();
+const ROOK_SHIFTS = initRookShifts();
+const ROOK_ATTACKS = initRookAttacks();
+
+// Magic bitboard constants for bishop attacks
+const BISHOP_MAGICS = initBishopMagics();
+const BISHOP_MASKS = initBishopMasks();
+const BISHOP_SHIFTS = initBishopShifts();
+const BISHOP_ATTACKS = initBishopAttacks();
+
 fn initKnightAttacks() [64]u64 {
     @setEvalBranchQuota(10000);
     var attacks: [64]u64 = undefined;
@@ -51,6 +63,306 @@ fn initKingAttacks() [64]u64 {
         attacks[square] = result;
     }
     return attacks;
+}
+
+// Magic bitboard initialization functions
+
+fn initRookMagics() [64]u64 {
+    // These are pre-computed magic numbers for rook attacks
+    // Found through trial and error or algorithms like Fancy Magic Bitboards
+    return [64]u64{
+        0xa8002c000108020,  0x6c00049b0002001,  0x100200010090040,  0x2480041000800801, 0x280028004000800,  0x900410008040022,  0x280020001001080,  0x2880002041000080,
+        0xa000800080400034, 0x4808020004000,    0x2290802004801000, 0x411000d00100020,  0x402800800040080,  0xb000401004208,    0x2409000100040200, 0x1002100004082,
+        0x22878001e24000,   0x1090810021004010, 0x801030040200012,  0x500808008001000,  0xa08018014000880,  0x8000808004000200, 0x201008080010200,  0x801020000441091,
+        0x800080204005,     0x1040200040100048, 0x120200402082,     0xd14880480100080,  0x12040280080080,   0x100040080020080,  0x9020010080800400, 0x813241200148449,
+        0x491604001800080,  0x100401000402001,  0x4820010021001040, 0x400402202000812,  0x209009005000802,  0x810800601800400,  0x4301083214000150, 0x204026458e001401,
+        0x40204000808000,   0x8001008040010020, 0x8410820820420010, 0x1003001000090020, 0x804040008008080,  0x12000810020004,   0x1000100200040208, 0x430000a044020001,
+        0x280009023410300,  0xe0100040002240,   0x200100401700,     0x2244100408008080, 0x8000400801980,    0x2000810040200,    0x8010100228810400, 0x2000009044210200,
+        0x4080008040102101, 0x40002080411d01,   0x2005524060000901, 0x502001008400422,  0x489a000810200402, 0x1004400080a13,    0x4000011008020084, 0x26002114058042,
+    };
+}
+
+fn initRookMasks() [64]u64 {
+    @setEvalBranchQuota(20000);
+    var masks: [64]u64 = undefined;
+    for (0..64) |square| {
+        const rank: u8 = @intCast(square / 8);
+        const file: u8 = @intCast(square % 8);
+        var mask: u64 = 0;
+
+        // North
+        var r: u8 = rank + 1;
+        while (r < 7) : (r += 1) {
+            mask |= @as(u64, 1) << @intCast(r * 8 + file);
+        }
+
+        // South
+        r = rank;
+        while (r > 0) {
+            r -= 1;
+            if (r == 0) break;
+            mask |= @as(u64, 1) << @intCast(r * 8 + file);
+        }
+
+        // East
+        var f: u8 = file + 1;
+        while (f < 7) : (f += 1) {
+            mask |= @as(u64, 1) << @intCast(rank * 8 + f);
+        }
+
+        // West
+        f = file;
+        while (f > 0) {
+            f -= 1;
+            if (f == 0) break;
+            mask |= @as(u64, 1) << @intCast(rank * 8 + f);
+        }
+
+        masks[square] = mask;
+    }
+    return masks;
+}
+
+fn initRookShifts() [64]u8 {
+    @setEvalBranchQuota(10000);
+    var shifts: [64]u8 = undefined;
+    for (0..64) |square| {
+        const bits = @popCount(ROOK_MASKS[square]);
+        shifts[square] = @intCast(64 - bits);
+    }
+    return shifts;
+}
+
+fn initBishopMagics() [64]u64 {
+    // Pre-computed magic numbers for bishop attacks
+    return [64]u64{
+        0x40040844404084,   0x2004208a004208,   0x10190041080202,   0x108060845042010,  0x581104180800210,  0x2112080446200010, 0x1080820820060210, 0x3c0808410220200,
+        0x4050404440404,    0x21001420088,      0x24d0080801082102, 0x1020a0a020400,    0x40308200402,      0x4011002100800,    0x401484104104005,  0x801010402020200,
+        0x400210c3880100,   0x404022024108200,  0x810018200204102,  0x4002801a02003,    0x85040820080400,   0x810102c808880400, 0xe900410884800,    0x8002020480840102,
+        0x220200865090201,  0x2010100a02021202, 0x152048408022401,  0x20080002081110,   0x4001001021004000, 0x800040400a011002, 0xe4004081011002,   0x1c004001012080,
+        0x8004200962a00220, 0x8422100208500202, 0x2000402200300c08, 0x8646020080080080, 0x80020a0200100808, 0x2010004880111000, 0x623000a080011400, 0x42008c0340209202,
+        0x209188240001000,  0x400408a884001800, 0x110400a6080400,   0x1840060a44020800, 0x90080104000041,   0x201011000808101,  0x1a2208080504f080, 0x8012020600211212,
+        0x500861011240000,  0x180806108200800,  0x4000020e01040044, 0x300000261044000a, 0x802241102020002,  0x20906061210001,   0x5a84841004010310, 0x4010801011c04,
+        0xa010109502200,    0x4a02012000,       0x500201010098b028, 0x8040002811040900, 0x28000010020204,   0x6000020202d0240,  0x8918844842082200, 0x4010011029020020,
+    };
+}
+
+fn initBishopMasks() [64]u64 {
+    @setEvalBranchQuota(20000);
+    var masks: [64]u64 = undefined;
+    for (0..64) |square| {
+        const rank: i8 = @intCast(square / 8);
+        const file: i8 = @intCast(square % 8);
+        var mask: u64 = 0;
+
+        // North-East
+        var r: i8 = rank + 1;
+        var f: i8 = file + 1;
+        while (r < 7 and f < 7) : ({
+            r += 1;
+            f += 1;
+        }) {
+            mask |= @as(u64, 1) << @intCast(r * 8 + f);
+        }
+
+        // North-West
+        r = rank + 1;
+        f = file - 1;
+        while (r < 7 and f > 0) : ({
+            r += 1;
+            f -= 1;
+        }) {
+            mask |= @as(u64, 1) << @intCast(r * 8 + f);
+        }
+
+        // South-East
+        r = rank - 1;
+        f = file + 1;
+        while (r > 0 and f < 7) : ({
+            r -= 1;
+            f += 1;
+        }) {
+            mask |= @as(u64, 1) << @intCast(r * 8 + f);
+        }
+
+        // South-West
+        r = rank - 1;
+        f = file - 1;
+        while (r > 0 and f > 0) : ({
+            r -= 1;
+            f -= 1;
+        }) {
+            mask |= @as(u64, 1) << @intCast(r * 8 + f);
+        }
+
+        masks[square] = mask;
+    }
+    return masks;
+}
+
+fn initBishopShifts() [64]u8 {
+    @setEvalBranchQuota(10000);
+    var shifts: [64]u8 = undefined;
+    for (0..64) |square| {
+        const bits = @popCount(BISHOP_MASKS[square]);
+        shifts[square] = @intCast(64 - bits);
+    }
+    return shifts;
+}
+
+// Helper function to compute rook attacks for a given square and occupancy
+fn computeRookAttacks(square: u6, occupied: u64) u64 {
+    var attacks: u64 = 0;
+    const file: i8 = @intCast(square % 8);
+    const rank: i8 = @intCast(square / 8);
+
+    // North
+    var r: i8 = rank + 1;
+    while (r < 8) : (r += 1) {
+        const sq: u6 = @intCast(r * 8 + file);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    // South
+    r = rank - 1;
+    while (r >= 0) : (r -= 1) {
+        const sq: u6 = @intCast(r * 8 + file);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    // East
+    var f: i8 = file + 1;
+    while (f < 8) : (f += 1) {
+        const sq: u6 = @intCast(rank * 8 + f);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    // West
+    f = file - 1;
+    while (f >= 0) : (f -= 1) {
+        const sq: u6 = @intCast(rank * 8 + f);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    return attacks;
+}
+
+// Helper function to compute bishop attacks for a given square and occupancy
+fn computeBishopAttacks(square: u6, occupied: u64) u64 {
+    var attacks: u64 = 0;
+    const file: i8 = @intCast(square % 8);
+    const rank: i8 = @intCast(square / 8);
+
+    // North-East
+    var r: i8 = rank + 1;
+    var f: i8 = file + 1;
+    while (r < 8 and f < 8) : ({
+        r += 1;
+        f += 1;
+    }) {
+        const sq: u6 = @intCast(r * 8 + f);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    // North-West
+    r = rank + 1;
+    f = file - 1;
+    while (r < 8 and f >= 0) : ({
+        r += 1;
+        f -= 1;
+    }) {
+        const sq: u6 = @intCast(r * 8 + f);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    // South-East
+    r = rank - 1;
+    f = file + 1;
+    while (r >= 0 and f < 8) : ({
+        r -= 1;
+        f += 1;
+    }) {
+        const sq: u6 = @intCast(r * 8 + f);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    // South-West
+    r = rank - 1;
+    f = file - 1;
+    while (r >= 0 and f >= 0) : ({
+        r -= 1;
+        f -= 1;
+    }) {
+        const sq: u6 = @intCast(r * 8 + f);
+        attacks |= @as(u64, 1) << sq;
+        if ((occupied & (@as(u64, 1) << sq)) != 0) break;
+    }
+
+    return attacks;
+}
+
+fn initRookAttacks() [64][4096]u64 {
+    @setEvalBranchQuota(1000000);
+    var attacks: [64][4096]u64 = undefined;
+
+    for (0..64) |square| {
+        const sq: u6 = @intCast(square);
+        const mask = ROOK_MASKS[square];
+        const bits = @popCount(mask);
+        const permutations: usize = @as(usize, 1) << @intCast(bits);
+
+        for (0..permutations) |i| {
+            const occupied = indexToOccupancy(i, bits, mask);
+            const magic_index = (occupied *% ROOK_MAGICS[square]) >> @intCast(ROOK_SHIFTS[square]);
+            attacks[square][magic_index] = computeRookAttacks(sq, occupied);
+        }
+    }
+
+    return attacks;
+}
+
+fn initBishopAttacks() [64][512]u64 {
+    @setEvalBranchQuota(1000000);
+    var attacks: [64][512]u64 = undefined;
+
+    for (0..64) |square| {
+        const sq: u6 = @intCast(square);
+        const mask = BISHOP_MASKS[square];
+        const bits = @popCount(mask);
+        const permutations: usize = @as(usize, 1) << @intCast(bits);
+
+        for (0..permutations) |i| {
+            const occupied = indexToOccupancy(i, bits, mask);
+            const magic_index = (occupied *% BISHOP_MAGICS[square]) >> @intCast(BISHOP_SHIFTS[square]);
+            attacks[square][magic_index] = computeBishopAttacks(sq, occupied);
+        }
+    }
+
+    return attacks;
+}
+
+// Convert an index to an occupancy bitboard for magic bitboard initialization
+fn indexToOccupancy(index: usize, bits: u8, mask: u64) u64 {
+    var occupancy: u64 = 0;
+    var temp_mask = mask;
+
+    for (0..bits) |i| {
+        const bit_index = @ctz(temp_mask);
+        temp_mask &= temp_mask - 1; // Clear the least significant bit
+
+        if ((index & (@as(usize, 1) << @intCast(i))) != 0) {
+            occupancy |= @as(u64, 1) << @intCast(bit_index);
+        }
+    }
+
+    return occupancy;
 }
 
 pub const MAX_MOVES = 256;
@@ -771,89 +1083,206 @@ pub const Board = struct {
 
     fn generatePawnMoves(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64, occupied: u64) !void {
         const pawns = our_pieces & self.board.getKindBitboard(.pawn);
-        const direction: i8 = if (color == .white) 8 else -8;
-        const start_rank: u8 = if (color == .white) 1 else 6;
-        const promo_rank: u8 = if (color == .white) 7 else 0;
+        const empty = ~occupied;
 
-        var pawn_bb = pawns;
-        while (pawn_bb != 0) {
-            const from: u6 = @intCast(@ctz(pawn_bb));
-            pawn_bb &= pawn_bb - 1; // Clear least significant bit
+        if (color == .white) {
+            // White pawns move up the board (towards rank 8)
+            const promo_rank_mask: u64 = 0xFF00000000000000; // Rank 8
+            const start_rank_mask: u64 = 0x000000000000FF00; // Rank 2
 
-            const rank = from / 8;
-            const file = from % 8;
+            // Single pushes
+            const push_one = (pawns << 8) & empty;
+            const push_one_no_promo = push_one & ~promo_rank_mask;
+            const push_one_promo = push_one & promo_rank_mask;
 
-            // Single push
-            const to_single: i16 = @as(i16, from) + direction;
-            if (to_single >= 0 and to_single < 64) {
-                const to_sq: u6 = @intCast(to_single);
-                if ((occupied & (@as(u64, 1) << to_sq)) == 0) {
-                    const to_rank = to_sq / 8;
-                    if (to_rank == promo_rank) {
-                        // Promotions - order: queen, knight, rook, bishop (MVV-LVA order)
-                        moves.append(Move.init(from, to_sq, .queen));
-                        moves.append(Move.init(from, to_sq, .knight));
-                        moves.append(Move.init(from, to_sq, .rook));
-                        moves.append(Move.init(from, to_sq, .bishop));
-                    } else {
-                        moves.append(Move.init(from, to_sq, null));
-
-                        // Double push
-                        if (rank == start_rank) {
-                            const to_double: i16 = @as(i16, from) + direction * 2;
-                            const to_sq_double: u6 = @intCast(to_double);
-                            if ((occupied & (@as(u64, 1) << to_sq_double)) == 0) {
-                                moves.append(Move.init(from, to_sq_double, null));
-                            }
-                        }
-                    }
-                }
+            // Generate single push moves (non-promotion)
+            var bb = push_one_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 8, to, null));
             }
 
-            // Captures - left and right
-            if (file > 0) {
-                const to: i16 = @as(i16, from) + direction - 1;
-                if (to >= 0 and to < 64) {
-                    const to_sq: u6 = @intCast(to);
-                    const to_bb = @as(u64, 1) << to_sq;
-
-                    if ((opponent_pieces & to_bb) != 0) {
-                        if (to_sq / 8 == promo_rank) {
-                            moves.append(Move.init(from, to_sq, .queen));
-                            moves.append(Move.init(from, to_sq, .knight));
-                            moves.append(Move.init(from, to_sq, .rook));
-                            moves.append(Move.init(from, to_sq, .bishop));
-                        } else {
-                            moves.append(Move.init(from, to_sq, null));
-                        }
-                    } else if (self.board.en_passant_square) |ep_sq| {
-                        if (ep_sq == to_sq) {
-                            moves.append(Move.init(from, to_sq, null));
-                        }
-                    }
-                }
+            // Generate promotion moves from single pushes
+            bb = push_one_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to - 8;
+                moves.append(Move.init(from, to, .queen));
+                moves.append(Move.init(from, to, .knight));
+                moves.append(Move.init(from, to, .rook));
+                moves.append(Move.init(from, to, .bishop));
             }
 
-            if (file < 7) {
-                const to: i16 = @as(i16, from) + direction + 1;
-                if (to >= 0 and to < 64) {
-                    const to_sq: u6 = @intCast(to);
-                    const to_bb = @as(u64, 1) << to_sq;
+            // Double pushes (only from rank 2)
+            const push_two = ((push_one & start_rank_mask) << 8) & empty;
+            bb = push_two;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 16, to, null));
+            }
 
-                    if ((opponent_pieces & to_bb) != 0) {
-                        if (to_sq / 8 == promo_rank) {
-                            moves.append(Move.init(from, to_sq, .queen));
-                            moves.append(Move.init(from, to_sq, .knight));
-                            moves.append(Move.init(from, to_sq, .rook));
-                            moves.append(Move.init(from, to_sq, .bishop));
-                        } else {
-                            moves.append(Move.init(from, to_sq, null));
-                        }
-                    } else if (self.board.en_passant_square) |ep_sq| {
-                        if (ep_sq == to_sq) {
-                            moves.append(Move.init(from, to_sq, null));
-                        }
-                    }
+            // Left captures (not A-file)
+            const not_a_file: u64 = 0xFEFEFEFEFEFEFEFE;
+            const left_captures = ((pawns & not_a_file) << 7) & opponent_pieces;
+            const left_captures_no_promo = left_captures & ~promo_rank_mask;
+            const left_captures_promo = left_captures & promo_rank_mask;
+
+            bb = left_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 7, to, null));
+            }
+
+            bb = left_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to - 7;
+                moves.append(Move.init(from, to, .queen));
+                moves.append(Move.init(from, to, .knight));
+                moves.append(Move.init(from, to, .rook));
+                moves.append(Move.init(from, to, .bishop));
+            }
+
+            // Right captures (not H-file)
+            const not_h_file: u64 = 0x7F7F7F7F7F7F7F7F;
+            const right_captures = ((pawns & not_h_file) << 9) & opponent_pieces;
+            const right_captures_no_promo = right_captures & ~promo_rank_mask;
+            const right_captures_promo = right_captures & promo_rank_mask;
+
+            bb = right_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 9, to, null));
+            }
+
+            bb = right_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to - 9;
+                moves.append(Move.init(from, to, .queen));
+                moves.append(Move.init(from, to, .knight));
+                moves.append(Move.init(from, to, .rook));
+                moves.append(Move.init(from, to, .bishop));
+            }
+
+            // En passant
+            if (self.board.en_passant_square) |ep_sq| {
+                const ep_bb: u64 = @as(u64, 1) << @intCast(ep_sq);
+                const ep_left = ((pawns & not_a_file) << 7) & ep_bb;
+                const ep_right = ((pawns & not_h_file) << 9) & ep_bb;
+
+                if (ep_left != 0) {
+                    moves.append(Move.init(ep_sq - 7, ep_sq, null));
+                }
+                if (ep_right != 0) {
+                    moves.append(Move.init(ep_sq - 9, ep_sq, null));
+                }
+            }
+        } else {
+            // Black pawns move down the board (towards rank 1)
+            const promo_rank_mask: u64 = 0x00000000000000FF; // Rank 1
+            const start_rank_mask: u64 = 0x00FF000000000000; // Rank 7
+
+            // Single pushes
+            const push_one = (pawns >> 8) & empty;
+            const push_one_no_promo = push_one & ~promo_rank_mask;
+            const push_one_promo = push_one & promo_rank_mask;
+
+            // Generate single push moves (non-promotion)
+            var bb = push_one_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 8, to, null));
+            }
+
+            // Generate promotion moves from single pushes
+            bb = push_one_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to + 8;
+                moves.append(Move.init(from, to, .queen));
+                moves.append(Move.init(from, to, .knight));
+                moves.append(Move.init(from, to, .rook));
+                moves.append(Move.init(from, to, .bishop));
+            }
+
+            // Double pushes (only from rank 7)
+            const push_two = ((push_one & start_rank_mask) >> 8) & empty;
+            bb = push_two;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 16, to, null));
+            }
+
+            // Left captures (not H-file for black, moving down-left)
+            const not_h_file: u64 = 0x7F7F7F7F7F7F7F7F;
+            const left_captures = ((pawns & not_h_file) >> 7) & opponent_pieces;
+            const left_captures_no_promo = left_captures & ~promo_rank_mask;
+            const left_captures_promo = left_captures & promo_rank_mask;
+
+            bb = left_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 7, to, null));
+            }
+
+            bb = left_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to + 7;
+                moves.append(Move.init(from, to, .queen));
+                moves.append(Move.init(from, to, .knight));
+                moves.append(Move.init(from, to, .rook));
+                moves.append(Move.init(from, to, .bishop));
+            }
+
+            // Right captures (not A-file for black, moving down-right)
+            const not_a_file: u64 = 0xFEFEFEFEFEFEFEFE;
+            const right_captures = ((pawns & not_a_file) >> 9) & opponent_pieces;
+            const right_captures_no_promo = right_captures & ~promo_rank_mask;
+            const right_captures_promo = right_captures & promo_rank_mask;
+
+            bb = right_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 9, to, null));
+            }
+
+            bb = right_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to + 9;
+                moves.append(Move.init(from, to, .queen));
+                moves.append(Move.init(from, to, .knight));
+                moves.append(Move.init(from, to, .rook));
+                moves.append(Move.init(from, to, .bishop));
+            }
+
+            // En passant
+            if (self.board.en_passant_square) |ep_sq| {
+                const ep_bb: u64 = @as(u64, 1) << @intCast(ep_sq);
+                const ep_left = ((pawns & not_h_file) >> 7) & ep_bb;
+                const ep_right = ((pawns & not_a_file) >> 9) & ep_bb;
+
+                if (ep_left != 0) {
+                    moves.append(Move.init(ep_sq + 7, ep_sq, null));
+                }
+                if (ep_right != 0) {
+                    moves.append(Move.init(ep_sq + 9, ep_sq, null));
                 }
             }
         }
@@ -1027,101 +1456,19 @@ pub const Board = struct {
         return attacks;
     }
 
-    fn getRookAttacks(self: *Self, square: u6, occupied: u64) u64 {
+    inline fn getRookAttacks(self: *Self, square: u6, occupied: u64) u64 {
         _ = self;
-        var attacks: u64 = 0;
-        const file: i8 = @intCast(square % 8);
-        const rank: i8 = @intCast(square / 8);
-
-        // North
-        var r: i8 = rank + 1;
-        while (r < 8) : (r += 1) {
-            const sq: u6 = @intCast(r * 8 + file);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        // South
-        r = rank - 1;
-        while (r >= 0) : (r -= 1) {
-            const sq: u6 = @intCast(r * 8 + file);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        // East
-        var f: i8 = file + 1;
-        while (f < 8) : (f += 1) {
-            const sq: u6 = @intCast(rank * 8 + f);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        // West
-        f = file - 1;
-        while (f >= 0) : (f -= 1) {
-            const sq: u6 = @intCast(rank * 8 + f);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        return attacks;
+        const mask = ROOK_MASKS[square];
+        const masked_occupied = occupied & mask;
+        const index = (masked_occupied *% ROOK_MAGICS[square]) >> @intCast(ROOK_SHIFTS[square]);
+        return ROOK_ATTACKS[square][index];
     }
-    fn getBishopAttacks(self: *Self, square: u6, occupied: u64) u64 {
+    inline fn getBishopAttacks(self: *Self, square: u6, occupied: u64) u64 {
         _ = self;
-        var attacks: u64 = 0;
-        const file: i8 = @intCast(square % 8);
-        const rank: i8 = @intCast(square / 8);
-
-        // North-East
-        var r: i8 = rank + 1;
-        var f: i8 = file + 1;
-        while (r < 8 and f < 8) : ({
-            r += 1;
-            f += 1;
-        }) {
-            const sq: u6 = @intCast(r * 8 + f);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        // North-West
-        r = rank + 1;
-        f = file - 1;
-        while (r < 8 and f >= 0) : ({
-            r += 1;
-            f -= 1;
-        }) {
-            const sq: u6 = @intCast(r * 8 + f);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        // South-East
-        r = rank - 1;
-        f = file + 1;
-        while (r >= 0 and f < 8) : ({
-            r -= 1;
-            f += 1;
-        }) {
-            const sq: u6 = @intCast(r * 8 + f);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        // South-West
-        r = rank - 1;
-        f = file - 1;
-        while (r >= 0 and f >= 0) : ({
-            r -= 1;
-            f -= 1;
-        }) {
-            const sq: u6 = @intCast(r * 8 + f);
-            attacks |= @as(u64, 1) << sq;
-            if ((occupied & (@as(u64, 1) << sq)) != 0) break;
-        }
-
-        return attacks;
+        const mask = BISHOP_MASKS[square];
+        const masked_occupied = occupied & mask;
+        const index = (masked_occupied *% BISHOP_MAGICS[square]) >> @intCast(BISHOP_SHIFTS[square]);
+        return BISHOP_ATTACKS[square][index];
     }
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
         return rankFileToSquare(rank - '1', file - 'a');
