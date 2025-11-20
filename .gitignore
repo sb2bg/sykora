@@ -11,3 +11,4 @@ zig-out/
 zig-cache/
 *.log
 /reference/*
+.env
