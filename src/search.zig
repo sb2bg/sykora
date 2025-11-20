@@ -344,12 +344,12 @@ pub const SearchEngine = struct {
         }
 
         // Determine which color we are and get our time/increment
-        const our_time: ?u64 = if (self.board.board.side_to_move == piece.Color.white)
+        const our_time: ?u64 = if (self.board.board.move == piece.Color.white)
             options.wtime
         else
             options.btime;
 
-        const our_increment: u64 = if (self.board.board.side_to_move == piece.Color.white)
+        const our_increment: u64 = if (self.board.board.move == piece.Color.white)
             options.winc orelse 0
         else
             options.binc orelse 0;
