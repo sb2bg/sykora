@@ -122,6 +122,7 @@ class GameSession(threading.Thread):
         self.bot_username = bot_username
         self.board = chess.Board()
         self.engine = None
+        self.is_white = None
 
     def run(self):
         try:
@@ -169,8 +170,35 @@ class GameSession(threading.Thread):
         )
 
         if is_our_turn and not self.board.is_game_over():
-            print(f"Thinking... (Fen: {self.board.fen()})")
-            limit = chess.engine.Limit(time=2.0)  # 1 second per move
+            # Get time remaining and increment (can be timedelta or milliseconds)
+            wtime = state.get("wtime", 0)
+            btime = state.get("btime", 0)
+            winc = state.get("winc", 0)
+            binc = state.get("binc", 0)
+
+            # Convert to milliseconds (handle both timedelta and numeric types)
+            def to_milliseconds(value):
+                if hasattr(value, "total_seconds"):
+                    return int(value.total_seconds() * 1000)
+                return int(value) if value else 0
+
+            wtime_ms = to_milliseconds(wtime)
+            btime_ms = to_milliseconds(btime)
+            winc_ms = to_milliseconds(winc)
+            binc_ms = to_milliseconds(binc)
+
+            print(
+                f"Thinking... (Fen: {self.board.fen()}, W: {wtime_ms}ms+{winc_ms}ms, B: {btime_ms}ms+{binc_ms}ms)"
+            )
+
+            # Let the engine handle time management
+            limit = chess.engine.Limit(
+                white_clock=wtime_ms / 1000.0,
+                black_clock=btime_ms / 1000.0,
+                white_inc=winc_ms / 1000.0,
+                black_inc=binc_ms / 1000.0,
+            )
+
             result = self.engine.play(self.board, limit)
             self.client.bots.make_move(self.game_id, result.move.uci())
             print(f"Played {result.move.uci()}")
