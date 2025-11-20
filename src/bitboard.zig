@@ -17,10 +17,10 @@ fn initKnightAttacks() [64]u64 {
         const file = square % 8;
         var result: u64 = 0;
 
-        if (file > 0 and square < 56) result |= sq << 15;
-        if (file < 7 and square < 56) result |= sq << 17;
-        if (file > 1 and square < 48) result |= sq << 6;
-        if (file < 6 and square < 48) result |= sq << 10;
+        if (file > 0 and square < 48) result |= sq << 15;
+        if (file < 7 and square < 48) result |= sq << 17;
+        if (file > 1 and square < 56) result |= sq << 6;
+        if (file < 6 and square < 56) result |= sq << 10;
         if (file > 0 and square >= 16) result |= sq >> 17;
         if (file < 7 and square >= 16) result |= sq >> 15;
         if (file > 1 and square >= 8) result |= sq >> 10;
