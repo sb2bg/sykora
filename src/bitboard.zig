@@ -358,6 +358,7 @@ fn initBishopAttacks() [64][512]u64 {
 
 // Convert an index to an occupancy bitboard for magic bitboard initialization
 fn indexToOccupancy(index: usize, bits: u8, mask: u64) u64 {
+    @setEvalBranchQuota(2000000);
     var occupancy: u64 = 0;
     var temp_mask = mask;
 
