@@ -23,6 +23,12 @@ pub const UciParser = struct {
         return moves_list.toOwnedSlice() catch null;
     }
 
+    /// Helper function to parse a u64 parameter from the token iterator
+    fn parseU64Param(parser: *std.mem.TokenIterator(u8, .any)) UciError!u64 {
+        const value = parser.next() orelse return error.UnexpectedEOF;
+        return std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+    }
+
     pub fn parseCommand(self: Self, command: []const u8) UciError!ToEngineCommand {
         var parser = std.mem.tokenizeAny(u8, command, " ");
         const uciCmd = parser.next() orelse return error.UnexpectedEOF;
@@ -181,32 +187,23 @@ pub const UciParser = struct {
                     } else if (std.mem.eql(u8, param, "ponder")) {
                         go_params.ponder = true;
                     } else if (std.mem.eql(u8, param, "wtime")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.wtime = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.wtime = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "btime")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.btime = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.btime = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "winc")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.winc = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.winc = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "binc")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.binc = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.binc = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "movestogo")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.moves_to_go = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.moves_to_go = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "depth")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.depth = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.depth = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "nodes")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.nodes = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.nodes = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "mate")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.mate = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.mate = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "movetime")) {
-                        const value = parser.next() orelse return error.UnexpectedEOF;
-                        go_params.move_time = std.fmt.parseInt(u64, value, 10) catch return error.InvalidArgument;
+                        go_params.move_time = try parseU64Param(&parser);
                     } else if (std.mem.eql(u8, param, "infinite")) {
                         go_params.infinite = true;
                     }

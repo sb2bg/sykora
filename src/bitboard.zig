@@ -21,6 +21,14 @@ const BISHOP_MASKS = initBishopMasks();
 const BISHOP_SHIFTS = initBishopShifts();
 const BISHOP_ATTACKS = initBishopAttacks();
 
+// Bitboard masks for ranks and files (used in move generation)
+const RANK_1_MASK: u64 = 0x00000000000000FF;
+const RANK_2_MASK: u64 = 0x000000000000FF00;
+const RANK_7_MASK: u64 = 0x00FF000000000000;
+const RANK_8_MASK: u64 = 0xFF00000000000000;
+const NOT_A_FILE: u64 = 0xFEFEFEFEFEFEFEFE;
+const NOT_H_FILE: u64 = 0x7F7F7F7F7F7F7F7F;
+
 fn initKnightAttacks() [64]u64 {
     @setEvalBranchQuota(10000);
     var attacks: [64]u64 = undefined;
@@ -469,104 +477,25 @@ pub const Board = struct {
         return self;
     }
 
-    pub fn makeStrMove(self: *Self, move: []const u8) UciError!void {
-        if (move.len != 4) return error.InvalidArgument;
-
-        const from_file = std.ascii.toLower(move[0]);
-        const from_rank = move[1];
-        const to_file = std.ascii.toLower(move[2]);
-        const to_rank = move[3];
-
-        if (from_file < 'a' or from_file > 'h' or from_rank < '1' or from_rank > '8' or
-            to_file < 'a' or to_file > 'h' or to_rank < '1' or to_rank > '8')
-        {
-            return error.InvalidArgument;
-        }
-
-        const from_index = rankFileToIndex(from_rank, from_file);
-        const to_index = rankFileToIndex(to_rank, to_file);
-
+    /// Make a move on the board using a Move structure.
+    /// This updates the board state and zobrist hash.
+    /// Note: This does NOT validate that the move is legal. Use with caution.
+    pub fn makeMove(self: *Self, move: Move) UciError!void {
         const color = self.getTurn();
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-        const piece_type = self.board.getPieceAt(from_index, color) orelse return error.InvalidMove;
-        const captured = self.board.getPieceAt(to_index, opponent_color);
-        const is_capture = captured != null;
+        const piece_type = self.board.getPieceAt(move.from, color) orelse return error.InvalidMove;
+        const captured = self.board.getPieceAt(move.to, opponent_color);
 
         const prev_castle = self.board.castle_rights;
         const prev_ep = self.board.en_passant_square;
 
-        // Handle en passant capture - must clear the captured pawn's square
-        if (piece_type == .pawn) {
-            if (self.board.en_passant_square) |en_passant_square| {
-                if (en_passant_square == to_index) {
-                    // Clear the captured pawn (which is one rank behind the en passant square)
-                    const captured_pawn_square = if (color == .white) to_index - 8 else to_index + 8;
-                    self.board.clearSquare(captured_pawn_square);
-                }
-            }
-        }
+        // Apply the move unchecked
+        self.applyMoveUnchecked(move);
 
-        self.board.clearSquare(to_index);
-        self.board.clearSquare(from_index);
-        self.board.setPieceAt(to_index, color, piece_type);
-
-        // Update en passant square for double pawn pushes
-        self.board.en_passant_square = null;
-        if (piece_type == .pawn) {
-            const pawn_from_rank = from_index / 8;
-            const pawn_to_rank = to_index / 8;
-            // Check if it's a double pawn push
-            if (@as(i16, @intCast(pawn_to_rank)) - @as(i16, @intCast(pawn_from_rank)) == 2) {
-                // White double push (e.g., e2-e4), en passant square is e3
-                self.board.en_passant_square = from_index + 8;
-            } else if (@as(i16, @intCast(pawn_to_rank)) - @as(i16, @intCast(pawn_from_rank)) == -2) {
-                // Black double push (e.g., e7-e5), en passant square is e6
-                self.board.en_passant_square = from_index - 8;
-            }
-        }
-
-        self.board.move = if (self.board.whiteToMove()) pieceInfo.Color.black else pieceInfo.Color.white;
-        self.board.fullmove_number += if (color == .black) 1 else 0;
-
-        // Update castling rights
-        if (piece_type == .king) {
-            if (color == .white) {
-                self.board.castle_rights.white_kingside = false;
-                self.board.castle_rights.white_queenside = false;
-            } else {
-                self.board.castle_rights.black_kingside = false;
-                self.board.castle_rights.black_queenside = false;
-            }
-        } else if (piece_type == .rook) {
-            if (color == .white) {
-                if (from_index == 0) self.board.castle_rights.white_queenside = false;
-                if (from_index == 7) self.board.castle_rights.white_kingside = false;
-            } else {
-                if (from_index == 56) self.board.castle_rights.black_queenside = false;
-                if (from_index == 63) self.board.castle_rights.black_kingside = false;
-            }
-        }
-        // If a rook is captured, remove castling rights
-        if (captured == .rook) {
-            const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-            if (opponent == .white) {
-                if (to_index == 0) self.board.castle_rights.white_queenside = false;
-                if (to_index == 7) self.board.castle_rights.white_kingside = false;
-            } else {
-                if (to_index == 56) self.board.castle_rights.black_queenside = false;
-                if (to_index == 63) self.board.castle_rights.black_kingside = false;
-            }
-        }
-
-        if (piece_type == .pawn or is_capture) {
-            self.board.halfmove_clock = 0;
-        } else {
-            self.board.halfmove_clock += 1;
-        }
-
+        // Update zobrist hash for the move
         self.zobrist_hasher.updateHash(
-            from_index,
-            to_index,
+            move.from,
+            move.to,
             piece_type,
             color,
             captured,
@@ -577,10 +506,25 @@ pub const Board = struct {
         );
     }
 
-    pub fn makeMove(self: *Self, move: Move) UciError!void {
-        _ = move;
-        _ = self;
-        return error.Unimplemented;
+    /// Make a move from string notation (e.g., "e2e4").
+    /// This validates that the move is legal before applying it.
+    pub fn makeStrMove(self: *Self, move_str: []const u8) UciError!void {
+        const move = try Move.fromString(move_str);
+
+        // Validate that the move is legal
+        var legal_moves = MoveList.init();
+        try self.generateLegalMoves(&legal_moves);
+
+        for (legal_moves.slice()) |legal_move| {
+            if (legal_move.from == move.from and
+                legal_move.to == move.to and
+                legal_move.promotion == move.promotion)
+            {
+                return self.makeMove(move);
+            }
+        }
+
+        return error.IllegalMove;
     }
 
     /// Generate all legal moves for the current position
@@ -809,7 +753,18 @@ pub const Board = struct {
         }
     }
 
-    /// Count how many pieces are giving check to the king of the specified color
+    /// Count how many pieces are giving check to the king of the specified color.
+    ///
+    /// This function examines all possible attack vectors (pawns, knights, bishops,
+    /// rooks, and queens) to determine how many enemy pieces are currently attacking
+    /// the king. This is useful for distinguishing between single checks, double checks,
+    /// and discovered checks.
+    ///
+    /// Parameters:
+    ///   - king_color: The color of the king to check attacks against
+    ///
+    /// Returns: The number of pieces attacking the king (0-2 typically, though
+    ///          theoretically more is possible)
     fn countCheckingPieces(self: *Self, king_color: pieceInfo.Color) u32 {
         const king_bb = self.board.getColorBitboard(king_color) & self.board.getKindBitboard(.king);
         if (king_bb == 0) return 0;
@@ -848,7 +803,21 @@ pub const Board = struct {
         return count;
     }
 
-    /// Check if a move gives direct check (the piece that moved is giving check)
+    /// Check if a move gives direct check.
+    ///
+    /// A "direct check" means the piece that just moved is the one giving check,
+    /// as opposed to a "discovered check" where moving one piece uncovers an
+    /// attack from another piece.
+    ///
+    /// This is determined by checking if the moved piece (now at the 'to' square)
+    /// can attack the opponent's king from its new position.
+    ///
+    /// Parameters:
+    ///   - move: The move that was just made
+    ///   - moving_color: The color of the side that made the move
+    ///   - opponent_color: The color of the opponent (whose king we check)
+    ///
+    /// Returns: true if the piece that moved is directly attacking the opponent's king
     fn isDirectCheck(self: *Self, move: Move, moving_color: pieceInfo.Color, opponent_color: pieceInfo.Color) bool {
         const king_bb = self.board.getColorBitboard(opponent_color) & self.board.getKindBitboard(.king);
         if (king_bb == 0) return false;
@@ -966,7 +935,30 @@ pub const Board = struct {
         return false;
     }
 
-    /// Apply a move without checking legality (used for legal move testing)
+    /// Apply a move without checking legality.
+    ///
+    /// This function assumes the move is pseudo-legal and updates the board state
+    /// accordingly. It handles:
+    /// - Regular captures (clearing destination square)
+    /// - En passant captures (clearing captured pawn square)
+    /// - Castling (moving the rook)
+    /// - Pawn promotions
+    /// - En passant square updates (for double pawn pushes)
+    /// - Castling rights updates
+    /// - Turn switching
+    ///
+    /// IMPORTANT: This does NOT:
+    /// - Check if the move is legal (king may be in check after)
+    /// - Update the zobrist hash (caller must do this)
+    /// - Validate the move exists or is pseudo-legal
+    ///
+    /// Use only:
+    /// - During move generation legality testing (with save/restore)
+    /// - After verifying move legality explicitly
+    /// - When implementing makeMove (which handles zobrist)
+    ///
+    /// Parameters:
+    ///   - move: The move to apply (must be pseudo-legal)
     fn applyMoveUnchecked(self: *Self, move: Move) void {
         const color = self.board.move;
         const piece_type = self.board.getPieceAt(move.from, color) orelse return;
@@ -1087,8 +1079,7 @@ pub const Board = struct {
 
         if (color == .white) {
             // White pawns move up the board (towards rank 8)
-            const promo_rank_mask: u64 = 0xFF00000000000000; // Rank 8
-            const start_rank_mask: u64 = 0x000000000000FF00; // Rank 2
+            const promo_rank_mask: u64 = RANK_8_MASK;
 
             // Single pushes
             const push_one = (pawns << 8) & empty;
@@ -1115,8 +1106,9 @@ pub const Board = struct {
                 moves.append(Move.init(from, to, .bishop));
             }
 
-            // Double pushes (only from rank 2)
-            const push_two = ((push_one & start_rank_mask) << 8) & empty;
+            // Double pushes (only from rank 2, so pushed pawns are on rank 3)
+            const rank_3_mask: u64 = 0x0000000000FF0000;
+            const push_two = ((push_one & rank_3_mask) << 8) & empty;
             bb = push_two;
             while (bb != 0) {
                 const to: u6 = @intCast(@ctz(bb));
@@ -1125,8 +1117,7 @@ pub const Board = struct {
             }
 
             // Left captures (not A-file)
-            const not_a_file: u64 = 0xFEFEFEFEFEFEFEFE;
-            const left_captures = ((pawns & not_a_file) << 7) & opponent_pieces;
+            const left_captures = ((pawns & NOT_A_FILE) << 7) & opponent_pieces;
             const left_captures_no_promo = left_captures & ~promo_rank_mask;
             const left_captures_promo = left_captures & promo_rank_mask;
 
@@ -1149,8 +1140,7 @@ pub const Board = struct {
             }
 
             // Right captures (not H-file)
-            const not_h_file: u64 = 0x7F7F7F7F7F7F7F7F;
-            const right_captures = ((pawns & not_h_file) << 9) & opponent_pieces;
+            const right_captures = ((pawns & NOT_H_FILE) << 9) & opponent_pieces;
             const right_captures_no_promo = right_captures & ~promo_rank_mask;
             const right_captures_promo = right_captures & promo_rank_mask;
 
@@ -1175,8 +1165,8 @@ pub const Board = struct {
             // En passant
             if (self.board.en_passant_square) |ep_sq| {
                 const ep_bb: u64 = @as(u64, 1) << @intCast(ep_sq);
-                const ep_left = ((pawns & not_a_file) << 7) & ep_bb;
-                const ep_right = ((pawns & not_h_file) << 9) & ep_bb;
+                const ep_left = ((pawns & NOT_A_FILE) << 7) & ep_bb;
+                const ep_right = ((pawns & NOT_H_FILE) << 9) & ep_bb;
 
                 if (ep_left != 0) {
                     moves.append(Move.init(ep_sq - 7, ep_sq, null));
@@ -1187,8 +1177,7 @@ pub const Board = struct {
             }
         } else {
             // Black pawns move down the board (towards rank 1)
-            const promo_rank_mask: u64 = 0x00000000000000FF; // Rank 1
-            const start_rank_mask: u64 = 0x00FF000000000000; // Rank 7
+            const promo_rank_mask: u64 = RANK_1_MASK;
 
             // Single pushes
             const push_one = (pawns >> 8) & empty;
@@ -1215,8 +1204,9 @@ pub const Board = struct {
                 moves.append(Move.init(from, to, .bishop));
             }
 
-            // Double pushes (only from rank 7)
-            const push_two = ((push_one & start_rank_mask) >> 8) & empty;
+            // Double pushes (only from rank 7, so pushed pawns are on rank 6)
+            const rank_6_mask: u64 = 0x0000FF0000000000;
+            const push_two = ((push_one & rank_6_mask) >> 8) & empty;
             bb = push_two;
             while (bb != 0) {
                 const to: u6 = @intCast(@ctz(bb));
@@ -1225,8 +1215,7 @@ pub const Board = struct {
             }
 
             // Left captures (not H-file for black, moving down-left)
-            const not_h_file: u64 = 0x7F7F7F7F7F7F7F7F;
-            const left_captures = ((pawns & not_h_file) >> 7) & opponent_pieces;
+            const left_captures = ((pawns & NOT_H_FILE) >> 7) & opponent_pieces;
             const left_captures_no_promo = left_captures & ~promo_rank_mask;
             const left_captures_promo = left_captures & promo_rank_mask;
 
@@ -1249,8 +1238,7 @@ pub const Board = struct {
             }
 
             // Right captures (not A-file for black, moving down-right)
-            const not_a_file: u64 = 0xFEFEFEFEFEFEFEFE;
-            const right_captures = ((pawns & not_a_file) >> 9) & opponent_pieces;
+            const right_captures = ((pawns & NOT_A_FILE) >> 9) & opponent_pieces;
             const right_captures_no_promo = right_captures & ~promo_rank_mask;
             const right_captures_promo = right_captures & promo_rank_mask;
 
@@ -1275,8 +1263,8 @@ pub const Board = struct {
             // En passant
             if (self.board.en_passant_square) |ep_sq| {
                 const ep_bb: u64 = @as(u64, 1) << @intCast(ep_sq);
-                const ep_left = ((pawns & not_h_file) >> 7) & ep_bb;
-                const ep_right = ((pawns & not_a_file) >> 9) & ep_bb;
+                const ep_left = ((pawns & NOT_H_FILE) >> 7) & ep_bb;
+                const ep_right = ((pawns & NOT_A_FILE) >> 9) & ep_bb;
 
                 if (ep_left != 0) {
                     moves.append(Move.init(ep_sq + 7, ep_sq, null));
