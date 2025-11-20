@@ -70,4 +70,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_fen_tests = b.addRunArtifact(fen_tests);
     test_step.dependOn(&run_fen_tests.step);
+
+    // Test evaluation.zig
+    const eval_tests = b.addTest(.{
+        .root_source_file = b.path("src/evaluation.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_eval_tests = b.addRunArtifact(eval_tests);
+    test_step.dependOn(&run_eval_tests.step);
+
+    // Test search.zig
+    const search_tests = b.addTest(.{
+        .root_source_file = b.path("src/search.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_search_tests = b.addRunArtifact(search_tests);
+    test_step.dependOn(&run_search_tests.step);
 }

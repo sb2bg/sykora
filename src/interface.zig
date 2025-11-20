@@ -269,8 +269,12 @@ pub const Uci = struct {
     fn search(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
         try self.writeInfoString("search thread started", .{});
 
+        // Create a copy of the board for the search thread
+        var search_board = self.board;
+
         // Create search engine
-        var search_engine = SearchEngine.init(&self.board, self.allocator, &self.stop_search);
+        var search_engine = try SearchEngine.init(&search_board, self.allocator, &self.stop_search);
+        defer search_engine.deinit();
 
         // Convert UCI go options to search options
         const search_opts = SearchOptions{
@@ -294,8 +298,9 @@ pub const Uci = struct {
             result.nodes * 1000;
 
         try self.writeStdout(
-            "info depth 1 score cp {d} nodes {d} nps {d} time {d}",
+            "info depth {d} score cp {d} nodes {d} nps {d} time {d}",
             .{
+                result.depth,
                 result.score,
                 result.nodes,
                 nps,

@@ -507,6 +507,25 @@ pub const Board = struct {
         );
     }
 
+    /// Make a move and update the hash, assuming the move is pseudo-legal.
+    /// This is faster than makeMove as it skips some checks.
+    pub fn makeMoveUnchecked(self: *Self, move: Move) void {
+        const color = self.board.move;
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+        // We assume the move is valid so piece must exist
+        const piece_type = self.board.getPieceAt(move.from, color).?;
+        const captured = self.board.getPieceAt(move.to, opponent_color);
+
+        const prev_castle = self.board.castle_rights;
+        const prev_ep = self.board.en_passant_square;
+
+        // Apply the move
+        self.applyMoveUnchecked(move);
+
+        // Update zobrist hash
+        self.zobrist_hasher.updateHash(move.from, move.to, piece_type, color, captured, prev_castle, self.board.castle_rights, prev_ep, self.board.en_passant_square);
+    }
+
     /// Make a move from string notation (e.g., "e2e4").
     /// This validates that the move is legal before applying it.
     pub fn makeStrMove(self: *Self, move_str: []const u8) UciError!void {
@@ -888,7 +907,7 @@ pub const Board = struct {
     }
 
     /// Check if the given color's king is currently in check
-    inline fn isInCheck(self: *Self, color: pieceInfo.Color) bool {
+    pub inline fn isInCheck(self: *Self, color: pieceInfo.Color) bool {
         const king_bb = self.board.getColorBitboard(color) & self.board.getKindBitboard(.king);
         if (king_bb == 0) return false;
 
@@ -960,7 +979,7 @@ pub const Board = struct {
     ///
     /// Parameters:
     ///   - move: The move to apply (must be pseudo-legal)
-    fn applyMoveUnchecked(self: *Self, move: Move) void {
+    pub fn applyMoveUnchecked(self: *Self, move: Move) void {
         const color = self.board.move;
         const piece_type = self.board.getPieceAt(move.from, color) orelse return;
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
@@ -1617,11 +1636,11 @@ pub const BitBoard = struct {
         return Self{};
     }
 
-    fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
+    pub fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
         return self.color_sets[@intFromEnum(color)];
     }
 
-    fn getKindBitboard(self: Self, kind: pieceInfo.Type) u64 {
+    pub fn getKindBitboard(self: Self, kind: pieceInfo.Type) u64 {
         return self.kind_sets[@intFromEnum(kind)];
     }
 
