@@ -151,12 +151,13 @@ pub const Board = struct {
         const to_index = rankFileToIndex(to_rank, to_file);
 
         const color = self.getTurn();
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
         const piece_type = self.board.getPieceAt(from_index, color) orelse return error.InvalidMove;
-        const is_capture = self.board.getPieceAt(to_index, color) != null;
+        const captured = self.board.getPieceAt(to_index, opponent_color);
+        const is_capture = captured != null;
 
         const prev_castle = self.board.castle_rights;
         const prev_ep = self.board.en_passant_square;
-        const captured = self.board.getPieceAt(to_index, if (color == .white) .black else .white);
 
         // Handle en passant capture - must clear the captured pawn's square
         if (piece_type == .pawn) {
