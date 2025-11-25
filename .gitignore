@@ -13,3 +13,4 @@ zig-cache/
 /reference/*
 .env
 /benchmark_games/
+./old_versions/
