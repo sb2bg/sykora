@@ -31,6 +31,12 @@ const TEMPO_BONUS: i32 = 10;
 const KING_PAWN_SHIELD_BONUS: i32 = 12;
 const KING_OPEN_FILE_PENALTY: i32 = 25;
 const PAWN_CHAIN_BONUS: i32 = 5;
+const PROTECTED_PASSED_PAWN_BONUS: i32 = 20;
+const CONNECTED_PASSED_PAWN_BONUS: i32 = 25;
+const SAFE_PAWN_ADVANCE_BONUS: i32 = 8;
+const MOP_UP_CENTER_BONUS: i32 = 10;
+const MOP_UP_CORNER_BONUS: i32 = 20;
+const MOP_UP_KING_PROXIMITY_BONUS: i32 = 5;
 
 // Piece-Square Tables (from white's perspective)
 // Values are in centipawns, will be mirrored for black
@@ -282,6 +288,49 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         if ((opponent_pawns & ahead_mask) == 0) {
             const advancement: usize = if (color == .white) rank else 7 - rank;
             score += PASSED_PAWN_BONUS[advancement];
+
+            // Protected passed pawn bonus - defended by another pawn
+            const our_pawn_attacks = board.getPawnAttacks(@intCast(sq), if (color == .white) .black else .white);
+            if ((pawns & our_pawn_attacks) != 0) {
+                score += PROTECTED_PASSED_PAWN_BONUS;
+            }
+
+            // Connected passed pawn bonus - another passed pawn on adjacent file
+            const adj_passed_mask = adjacent_files & pawns;
+            if (adj_passed_mask != 0) {
+                // Check if any adjacent pawn is also passed
+                var adj_bb = adj_passed_mask;
+                while (adj_bb != 0) {
+                    const adj_sq: u8 = @intCast(@ctz(adj_bb));
+                    adj_bb &= adj_bb - 1;
+                    const adj_file = adj_sq % 8;
+                    const adj_rank = adj_sq / 8;
+
+                    // Build ahead mask for adjacent pawn
+                    var adj_blocking: u64 = file_masks[adj_file];
+                    if (adj_file > 0) adj_blocking |= file_masks[adj_file - 1];
+                    if (adj_file < 7) adj_blocking |= file_masks[adj_file + 1];
+
+                    const adj_ahead: u64 = if (color == .white)
+                        adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast((adj_rank + 1) * 8))
+                    else
+                        adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> @intCast((7 - adj_rank + 1) * 8));
+
+                    if ((opponent_pawns & adj_ahead) == 0) {
+                        score += CONNECTED_PASSED_PAWN_BONUS / 2; // Half bonus since both pawns get it
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Safe pawn advance bonus - square in front not attacked by enemy pawns
+        if ((color == .white and rank < 7) or (color == .black and rank > 0)) {
+            const front_sq_safe: u6 = if (color == .white) @intCast(sq + 8) else @intCast(sq - 8);
+            const enemy_attacks_front = board.getPawnAttacks(front_sq_safe, if (color == .white) .black else .white);
+            if ((opponent_pawns & enemy_attacks_front) == 0) {
+                score += SAFE_PAWN_ADVANCE_BONUS;
+            }
         }
     }
 
@@ -525,6 +574,44 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
     return score;
 }
 
+/// Endgame mop-up heuristics - drive enemy king to corner when winning
+/// Returns bonus from perspective of the winning side
+fn evaluateMopUp(b: BitBoard, winning_color: piece.Color) i32 {
+    const losing_color = if (winning_color == .white) piece.Color.black else piece.Color.white;
+
+    const winning_king_bb = b.getColorBitboard(winning_color) & b.getKindBitboard(.king);
+    const losing_king_bb = b.getColorBitboard(losing_color) & b.getKindBitboard(.king);
+
+    if (winning_king_bb == 0 or losing_king_bb == 0) return 0;
+
+    const winning_king_sq: u8 = @intCast(@ctz(winning_king_bb));
+    const losing_king_sq: u8 = @intCast(@ctz(losing_king_bb));
+
+    var score: i32 = 0;
+
+    // Push losing king away from center
+    const losing_file: i32 = @intCast(losing_king_sq % 8);
+    const losing_rank: i32 = @intCast(losing_king_sq / 8);
+    const center_dist_file = @max(3 - losing_file, losing_file - 4);
+    const center_dist_rank = @max(3 - losing_rank, losing_rank - 4);
+    score += (center_dist_file + center_dist_rank) * MOP_UP_CENTER_BONUS;
+
+    // Corner distance bonus - prefer corners over edges
+    const corner_dist = @min(
+        @min(losing_file + losing_rank, losing_file + (7 - losing_rank)),
+        @min((7 - losing_file) + losing_rank, (7 - losing_file) + (7 - losing_rank)),
+    );
+    score += @divTrunc((7 - corner_dist) * MOP_UP_CORNER_BONUS, 7);
+
+    // Bring winning king closer to losing king (Manhattan distance)
+    const winning_file: i32 = @intCast(winning_king_sq % 8);
+    const winning_rank: i32 = @intCast(winning_king_sq / 8);
+    const king_dist: i32 = @intCast(@abs(winning_file - losing_file) + @abs(winning_rank - losing_rank));
+    score += (14 - king_dist) * MOP_UP_KING_PROXIMITY_BONUS;
+
+    return score;
+}
+
 /// Main evaluation function
 /// Returns score from the perspective of the side to move
 pub fn evaluate(b: *Board) i32 {
@@ -598,6 +685,19 @@ pub fn evaluate(b: *Board) i32 {
     const black_bishops = @popCount(board_state.getColorBitboard(.black) & board_state.getKindBitboard(.bishop));
     if (white_bishops >= 2) score += BISHOP_PAIR_BONUS;
     if (black_bishops >= 2) score -= BISHOP_PAIR_BONUS;
+
+    // Endgame mop-up heuristics - drive enemy king to corner when winning
+    // Only apply when we have significant material advantage in endgame
+    if (is_endgame_phase) {
+        const material_diff = white_material - black_material;
+        const mop_up_threshold: i32 = ROOK_VALUE; // Need at least a rook advantage
+
+        if (material_diff >= mop_up_threshold) {
+            score += evaluateMopUp(board_state, .white);
+        } else if (material_diff <= -mop_up_threshold) {
+            score -= evaluateMopUp(board_state, .black);
+        }
+    }
 
     // Tempo bonus - small bonus for side to move
     score += if (side_to_move == .white) TEMPO_BONUS else -TEMPO_BONUS;
