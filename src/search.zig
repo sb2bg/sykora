@@ -143,8 +143,8 @@ const KillerMoves = struct {
         if (ply >= MAX_PLY) return;
 
         // Don't add if already first killer
-        if (self.moves[ply][0].from == move.from and
-            self.moves[ply][0].to == move.to)
+        if (self.moves[ply][0].from() == move.from() and
+            self.moves[ply][0].to() == move.to())
         {
             return;
         }
@@ -158,7 +158,7 @@ const KillerMoves = struct {
         if (ply >= MAX_PLY) return false;
 
         for (self.moves[ply]) |killer| {
-            if (killer.from == move.from and killer.to == move.to) {
+            if (killer.from() == move.from() and killer.to() == move.to()) {
                 return true;
             }
         }
@@ -178,16 +178,16 @@ const HistoryTable = struct {
 
     fn update(self: *HistoryTable, move: Move, depth: u32) void {
         const bonus = @as(i32, @intCast(depth * depth));
-        self.scores[move.from][move.to] += bonus;
+        self.scores[move.from()][move.to()] += bonus;
 
         // Cap at a reasonable value to prevent overflow
-        if (self.scores[move.from][move.to] > 10000) {
-            self.scores[move.from][move.to] = 10000;
+        if (self.scores[move.from()][move.to()] > 10000) {
+            self.scores[move.from()][move.to()] = 10000;
         }
     }
 
     fn get(self: *HistoryTable, move: Move) i32 {
-        return self.scores[move.from][move.to];
+        return self.scores[move.from()][move.to()];
     }
 
     fn clear(self: *HistoryTable) void {
@@ -475,7 +475,7 @@ pub const SearchEngine = struct {
             // Beta cutoff
             if (alpha >= beta) {
                 // Store killer move for non-captures
-                const is_capture = old_board.getPieceAt(move.to, if (old_board.move == .white) .black else .white) != null;
+                const is_capture = old_board.getPieceAt(move.to(), if (old_board.move == .white) .black else .white) != null;
                 if (!is_capture) {
                     self.killer_moves.add(move, ply);
                     self.history.update(move, depth);
@@ -530,7 +530,7 @@ pub const SearchEngine = struct {
 
         for (moves.slice()) |move| {
             // Delta pruning - skip captures that can't possibly raise alpha
-            const captured_value = if (self.board.board.getPieceAt(move.to, if (self.board.board.move == .white) .black else .white)) |p|
+            const captured_value = if (self.board.board.getPieceAt(move.to(), if (self.board.board.move == .white) .black else .white)) |p|
                 eval.getPieceValue(p)
             else
                 0;
@@ -573,16 +573,16 @@ pub const SearchEngine = struct {
 
         for (all_moves.slice()) |move| {
             // Include captures
-            if (self.board.board.getPieceAt(move.to, opponent_color) != null) {
+            if (self.board.board.getPieceAt(move.to(), opponent_color) != null) {
                 moves.append(move);
             }
             // Include promotions
-            else if (move.promotion != null) {
+            else if (move.promotion() != null) {
                 moves.append(move);
             }
             // Include en passant
-            else if (self.board.board.en_passant_square == move.to) {
-                const piece_type = self.board.board.getPieceAt(move.from, self.board.board.move);
+            else if (self.board.board.en_passant_square == move.to()) {
+                const piece_type = self.board.board.getPieceAt(move.from(), self.board.board.move);
                 if (piece_type == .pawn) {
                     moves.append(move);
                 }
@@ -604,16 +604,16 @@ pub const SearchEngine = struct {
 
             // TT move gets highest priority
             if (tt_move) |tt| {
-                if (tt.from == move.from and tt.to == move.to and tt.promotion == move.promotion) {
+                if (tt.from() == move.from() and tt.to() == move.to() and Move.eqlPromotion(tt.promotion(), move.promotion())) {
                     scores[i] = 1000000;
                     continue;
                 }
             }
 
             // Captures scored by MVV-LVA
-            if (self.board.board.getPieceAt(move.to, opponent_color)) |victim| {
+            if (self.board.board.getPieceAt(move.to(), opponent_color)) |victim| {
                 const victim_value = eval.getPieceValue(victim);
-                const attacker_value = if (self.board.board.getPieceAt(move.from, self.board.board.move)) |att|
+                const attacker_value = if (self.board.board.getPieceAt(move.from(), self.board.board.move)) |att|
                     eval.getPieceValue(att)
                 else
                     0;
@@ -621,7 +621,7 @@ pub const SearchEngine = struct {
                 score = victim_value * 100 - attacker_value + 10000;
             }
             // Promotions
-            else if (move.promotion) |promo| {
+            else if (move.promotion()) |promo| {
                 score = eval.getPieceValue(promo) + 9000;
             }
             // Killer moves
@@ -667,9 +667,9 @@ pub const SearchEngine = struct {
         for (move_slice, 0..) |move, i| {
             var score: i32 = 0;
 
-            if (self.board.board.getPieceAt(move.to, opponent_color)) |victim| {
+            if (self.board.board.getPieceAt(move.to(), opponent_color)) |victim| {
                 const victim_value = eval.getPieceValue(victim);
-                const attacker_value = if (self.board.board.getPieceAt(move.from, self.board.board.move)) |att|
+                const attacker_value = if (self.board.board.getPieceAt(move.from(), self.board.board.move)) |att|
                     eval.getPieceValue(att)
                 else
                     0;

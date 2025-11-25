@@ -5,9 +5,11 @@ const fen = @import("fen.zig");
 const zobrist = @import("zobrist.zig");
 const ZobristHasher = zobrist.ZobristHasher;
 
-// Pre-computed attack tables for knight and king
+// Pre-computed attack tables for knight, king, and pawns
 const KNIGHT_ATTACKS = initKnightAttacks();
 const KING_ATTACKS = initKingAttacks();
+const WHITE_PAWN_ATTACKS = initWhitePawnAttacks();
+const BLACK_PAWN_ATTACKS = initBlackPawnAttacks();
 
 // Magic bitboard constants for rook attacks
 const ROOK_MAGICS = initRookMagics();
@@ -67,6 +69,38 @@ fn initKingAttacks() [64]u64 {
         if (file < 7 and square < 56) result |= sq << 9;
         if (file > 0 and square >= 8) result |= sq >> 9;
         if (file < 7 and square >= 8) result |= sq >> 7;
+
+        attacks[square] = result;
+    }
+    return attacks;
+}
+
+fn initWhitePawnAttacks() [64]u64 {
+    @setEvalBranchQuota(10000);
+    var attacks: [64]u64 = undefined;
+    for (0..64) |square| {
+        const sq: u64 = @as(u64, 1) << @intCast(square);
+        const file = square % 8;
+        var result: u64 = 0;
+
+        if (file > 0 and square < 56) result |= sq << 7; // Up-left
+        if (file < 7 and square < 56) result |= sq << 9; // Up-right
+
+        attacks[square] = result;
+    }
+    return attacks;
+}
+
+fn initBlackPawnAttacks() [64]u64 {
+    @setEvalBranchQuota(10000);
+    var attacks: [64]u64 = undefined;
+    for (0..64) |square| {
+        const sq: u64 = @as(u64, 1) << @intCast(square);
+        const file = square % 8;
+        var result: u64 = 0;
+
+        if (file > 0 and square >= 8) result |= sq >> 9; // Down-left
+        if (file < 7 and square >= 8) result |= sq >> 7; // Down-right
 
         attacks[square] = result;
     }
@@ -398,14 +432,54 @@ pub const MoveList = struct {
     }
 };
 
+/// Compact move representation packed into 16 bits for cache efficiency
+/// Bit layout: [15:12] flags | [11:6] to square | [5:0] from square
+/// Flags: 0=none, 1=knight promo, 2=bishop promo, 3=rook promo, 4=queen promo
+///        5=en passant, 6=castling (can extend for other special moves)
 pub const Move = struct {
     const Self = @This();
-    from: u8,
-    to: u8,
-    promotion: ?pieceInfo.Type = null,
 
-    pub fn init(from: u8, to: u8, promotion: ?pieceInfo.Type) Self {
-        return Self{ .from = from, .to = to, .promotion = promotion };
+    // Flag constants
+    pub const FLAG_NONE: u4 = 0;
+    pub const FLAG_PROMO_KNIGHT: u4 = 1;
+    pub const FLAG_PROMO_BISHOP: u4 = 2;
+    pub const FLAG_PROMO_ROOK: u4 = 3;
+    pub const FLAG_PROMO_QUEEN: u4 = 4;
+    // Note: en passant and castling are detected by piece type + move pattern, not stored
+
+    data: u16,
+
+    pub inline fn init(from_sq: u8, to_sq: u8, promo: ?pieceInfo.Type) Self {
+        const flag: u4 = if (promo) |p| switch (p) {
+            .knight => FLAG_PROMO_KNIGHT,
+            .bishop => FLAG_PROMO_BISHOP,
+            .rook => FLAG_PROMO_ROOK,
+            .queen => FLAG_PROMO_QUEEN,
+            else => FLAG_NONE,
+        } else FLAG_NONE;
+
+        return Self{
+            .data = @as(u16, from_sq) | (@as(u16, to_sq) << 6) | (@as(u16, flag) << 12),
+        };
+    }
+
+    pub inline fn from(self: Self) u8 {
+        return @intCast(self.data & 0x3F);
+    }
+
+    pub inline fn to(self: Self) u8 {
+        return @intCast((self.data >> 6) & 0x3F);
+    }
+
+    pub inline fn promotion(self: Self) ?pieceInfo.Type {
+        const flag: u4 = @intCast((self.data >> 12) & 0xF);
+        return switch (flag) {
+            FLAG_PROMO_KNIGHT => .knight,
+            FLAG_PROMO_BISHOP => .bishop,
+            FLAG_PROMO_ROOK => .rook,
+            FLAG_PROMO_QUEEN => .queen,
+            else => null,
+        };
     }
 
     pub fn fromString(str: []const u8) UciError!Self {
@@ -423,11 +497,18 @@ pub const Move = struct {
             return error.InvalidArgument;
         }
 
-        const promotion = if (promotion_str) |p| pieceInfo.Type.fromChar(p) else null;
+        const promo = if (promotion_str) |p| pieceInfo.Type.fromChar(p) else null;
         const from_index = Board.rankFileToIndex(from_rank, from_file);
         const to_index = Board.rankFileToIndex(to_rank, to_file);
 
-        return Self.init(from_index, to_index, promotion);
+        return Self.init(from_index, to_index, promo);
+    }
+
+    /// Compare two optional promotions for equality
+    pub inline fn eqlPromotion(a: ?pieceInfo.Type, b: ?pieceInfo.Type) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        return a.? == b.?;
     }
 
     pub fn format(
@@ -436,20 +517,23 @@ pub const Move = struct {
         _: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        if (self.from == 0 and self.to == 0 and self.promotion == null) {
+        const from_sq = self.from();
+        const to_sq = self.to();
+
+        if (from_sq == 0 and to_sq == 0 and self.promotion() == null) {
             // null move
             try writer.writeAll("0000");
             return;
         }
 
-        const from_file = 'a' + (self.from % 8);
-        const from_rank = '1' + (self.from / 8);
-        const to_file = 'a' + (self.to % 8);
-        const to_rank = '1' + (self.to / 8);
+        const from_file = 'a' + (from_sq % 8);
+        const from_rank = '1' + (from_sq / 8);
+        const to_file = 'a' + (to_sq % 8);
+        const to_rank = '1' + (to_sq / 8);
 
         try writer.print("{c}{c}{c}{c}", .{ from_file, from_rank, to_file, to_rank });
 
-        if (self.promotion) |p| {
+        if (self.promotion()) |p| {
             try writer.print("{c}", .{std.ascii.toLower(p.getName())});
         }
     }
@@ -484,8 +568,8 @@ pub const Board = struct {
     pub fn makeMove(self: *Self, move: Move) UciError!void {
         const color = self.getTurn();
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-        const piece_type = self.board.getPieceAt(move.from, color) orelse return error.InvalidMove;
-        const captured = self.board.getPieceAt(move.to, opponent_color);
+        const piece_type = self.board.getPieceAt(move.from(), color) orelse return error.InvalidMove;
+        const captured = self.board.getPieceAt(move.to(), opponent_color);
 
         const prev_castle = self.board.castle_rights;
         const prev_ep = self.board.en_passant_square;
@@ -495,8 +579,8 @@ pub const Board = struct {
 
         // Update zobrist hash for the move
         self.zobrist_hasher.updateHash(
-            move.from,
-            move.to,
+            move.from(),
+            move.to(),
             piece_type,
             color,
             captured,
@@ -513,8 +597,8 @@ pub const Board = struct {
         const color = self.board.move;
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
         // We assume the move is valid so piece must exist
-        const piece_type = self.board.getPieceAt(move.from, color).?;
-        const captured = self.board.getPieceAt(move.to, opponent_color);
+        const piece_type = self.board.getPieceAt(move.from(), color).?;
+        const captured = self.board.getPieceAt(move.to(), opponent_color);
 
         const prev_castle = self.board.castle_rights;
         const prev_ep = self.board.en_passant_square;
@@ -523,7 +607,7 @@ pub const Board = struct {
         self.applyMoveUnchecked(move);
 
         // Update zobrist hash
-        self.zobrist_hasher.updateHash(move.from, move.to, piece_type, color, captured, prev_castle, self.board.castle_rights, prev_ep, self.board.en_passant_square);
+        self.zobrist_hasher.updateHash(move.from(), move.to(), piece_type, color, captured, prev_castle, self.board.castle_rights, prev_ep, self.board.en_passant_square);
     }
 
     /// Make a move from string notation (e.g., "e2e4").
@@ -536,9 +620,9 @@ pub const Board = struct {
         try self.generateLegalMoves(&legal_moves);
 
         for (legal_moves.slice()) |legal_move| {
-            if (legal_move.from == move.from and
-                legal_move.to == move.to and
-                legal_move.promotion == move.promotion)
+            if (legal_move.from() == move.from() and
+                legal_move.to() == move.to() and
+                Move.eqlPromotion(legal_move.promotion(), move.promotion()))
             {
                 return self.makeMove(move);
             }
@@ -685,31 +769,31 @@ pub const Board = struct {
                 stats.nodes += 1;
 
                 // Check piece type before checking move properties
-                const piece_type = old_board.getPieceAt(move.from, moving_color);
+                const piece_type = old_board.getPieceAt(move.from(), moving_color);
 
                 // Check if it's en passant
-                const is_en_passant = piece_type == .pawn and old_board.en_passant_square == move.to;
+                const is_en_passant = piece_type == .pawn and old_board.en_passant_square == move.to();
                 if (is_en_passant) {
                     stats.en_passant += 1;
                 }
 
                 // Check if it's a capture (including en passant)
-                const piece_at_dest = old_board.getPieceAt(move.to, opponent_color);
+                const piece_at_dest = old_board.getPieceAt(move.to(), opponent_color);
                 if (piece_at_dest != null or is_en_passant) {
                     stats.captures += 1;
                 }
 
                 // Check if it's a castle
                 if (piece_type == .king) {
-                    const from_file = move.from % 8;
-                    const to_file = move.to % 8;
+                    const from_file = move.from() % 8;
+                    const to_file = move.to() % 8;
                     if (from_file == 4 and (to_file == 6 or to_file == 2)) {
                         stats.castles += 1;
                     }
                 }
 
                 // Check if it's a promotion
-                if (move.promotion != null) {
+                if (move.promotion() != null) {
                     stats.promotions += 1;
                 }
 
@@ -843,9 +927,9 @@ pub const Board = struct {
         if (king_bb == 0) return false;
 
         const king_square: u6 = @intCast(@ctz(king_bb));
-        const piece_type = self.board.getPieceAt(move.to, moving_color) orelse return false;
+        const piece_type = self.board.getPieceAt(move.to(), moving_color) orelse return false;
         const occupied = self.board.occupied();
-        const move_to: u6 = @intCast(move.to);
+        const move_to: u6 = @intCast(move.to());
 
         const result = switch (piece_type) {
             .pawn => blk: {
@@ -921,32 +1005,33 @@ pub const Board = struct {
     fn isSquareAttackedBy(self: *Self, square: u6, attacker_color: pieceInfo.Color) bool {
         const attacker_bb = self.board.getColorBitboard(attacker_color);
 
-        // Check pawn attacks
-        const pawn_attacks = self.getPawnAttacks(square, if (attacker_color == .white) .black else .white);
+        // Check knights first (cheapest - just array lookup)
+        if ((KNIGHT_ATTACKS[square] & attacker_bb & self.board.getKindBitboard(.knight)) != 0) {
+            return true;
+        }
+
+        // Check pawns (cheap - no occupancy needed)
+        const defender_color = if (attacker_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+        const pawn_attacks = self.getPawnAttacks(square, defender_color);
         if ((pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn)) != 0) {
             return true;
         }
 
-        // Check knight attacks
-        const knight_attacks = self.getKnightAttacks(square);
-        if ((knight_attacks & attacker_bb & self.board.getKindBitboard(.knight)) != 0) {
+        // Check king (cheap - just array lookup)
+        if ((KING_ATTACKS[square] & attacker_bb & self.board.getKindBitboard(.king)) != 0) {
             return true;
         }
 
-        // Check king attacks
-        const king_attacks = self.getKingAttacks(square);
-        if ((king_attacks & attacker_bb & self.board.getKindBitboard(.king)) != 0) {
-            return true;
-        }
-
-        // Check sliding pieces (bishop, rook, queen)
+        // Now check sliding pieces (more expensive - requires occupancy calculation)
         const occupied = self.board.occupied();
 
+        // Check bishops/queens on diagonals
         const bishop_attacks = self.getBishopAttacks(square, occupied);
         if ((bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen))) != 0) {
             return true;
         }
 
+        // Check rooks/queens on ranks/files
         const rook_attacks = self.getRookAttacks(square, occupied);
         if ((rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen))) != 0) {
             return true;
@@ -981,53 +1066,55 @@ pub const Board = struct {
     ///   - move: The move to apply (must be pseudo-legal)
     pub fn applyMoveUnchecked(self: *Self, move: Move) void {
         const color = self.board.move;
-        const piece_type = self.board.getPieceAt(move.from, color) orelse return;
+        const from_sq = move.from();
+        const to_sq = move.to();
+        const piece_type = self.board.getPieceAt(from_sq, color) orelse return;
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
-        const captured_piece = self.board.getPieceAt(move.to, opponent_color);
+        const captured_piece = self.board.getPieceAt(to_sq, opponent_color);
 
         // Handle captures - must clear the destination square first
-        self.board.clearSquare(move.to);
+        self.board.clearSquare(to_sq);
 
         // Handle en passant capture
-        if (piece_type == .pawn and self.board.en_passant_square == move.to) {
-            const ep_capture_square = if (color == .white) move.to - 8 else move.to + 8;
+        if (piece_type == .pawn and self.board.en_passant_square == to_sq) {
+            const ep_capture_square = if (color == .white) to_sq - 8 else to_sq + 8;
             self.board.clearSquare(ep_capture_square);
         }
 
         // Handle castling
         if (piece_type == .king) {
-            const from_file = move.from % 8;
-            const to_file = move.to % 8;
+            const from_file = from_sq % 8;
+            const to_file = to_sq % 8;
 
             // Kingside castling
             if (from_file == 4 and to_file == 6) {
-                const rook_from = move.from + 3;
-                const rook_to = move.from + 1;
+                const rook_from = from_sq + 3;
+                const rook_to = from_sq + 1;
                 self.board.clearSquare(rook_from);
                 self.board.setPieceAt(rook_to, color, .rook);
             }
             // Queenside castling
             else if (from_file == 4 and to_file == 2) {
-                const rook_from = move.from - 4;
-                const rook_to = move.from - 1;
+                const rook_from = from_sq - 4;
+                const rook_to = from_sq - 1;
                 self.board.clearSquare(rook_from);
                 self.board.setPieceAt(rook_to, color, .rook);
             }
         }
 
         // Move the piece
-        self.board.clearSquare(move.from);
-        const final_piece = if (move.promotion) |promo| promo else piece_type;
-        self.board.setPieceAt(move.to, color, final_piece);
+        self.board.clearSquare(from_sq);
+        const final_piece = if (move.promotion()) |promo| promo else piece_type;
+        self.board.setPieceAt(to_sq, color, final_piece);
 
         // Update en passant square
         self.board.en_passant_square = null;
         if (piece_type == .pawn) {
-            const from_rank = move.from / 8;
-            const to_rank = move.to / 8;
+            const from_rank = from_sq / 8;
+            const to_rank = to_sq / 8;
             if (@as(i16, to_rank) - @as(i16, from_rank) == 2 or @as(i16, to_rank) - @as(i16, from_rank) == -2) {
-                self.board.en_passant_square = if (color == .white) move.from + 8 else move.from - 8;
+                self.board.en_passant_square = if (color == .white) from_sq + 8 else from_sq - 8;
             }
         }
 
@@ -1042,11 +1129,11 @@ pub const Board = struct {
             }
         } else if (piece_type == .rook) {
             if (color == .white) {
-                if (move.from == 0) self.board.castle_rights.white_queenside = false;
-                if (move.from == 7) self.board.castle_rights.white_kingside = false;
+                if (from_sq == 0) self.board.castle_rights.white_queenside = false;
+                if (from_sq == 7) self.board.castle_rights.white_kingside = false;
             } else {
-                if (move.from == 56) self.board.castle_rights.black_queenside = false;
-                if (move.from == 63) self.board.castle_rights.black_kingside = false;
+                if (from_sq == 56) self.board.castle_rights.black_queenside = false;
+                if (from_sq == 63) self.board.castle_rights.black_kingside = false;
             }
         }
 
@@ -1054,11 +1141,11 @@ pub const Board = struct {
         if (captured_piece) |captured| {
             if (captured == .rook) {
                 if (opponent_color == .white) {
-                    if (move.to == 0) self.board.castle_rights.white_queenside = false;
-                    if (move.to == 7) self.board.castle_rights.white_kingside = false;
+                    if (to_sq == 0) self.board.castle_rights.white_queenside = false;
+                    if (to_sq == 7) self.board.castle_rights.white_kingside = false;
                 } else {
-                    if (move.to == 56) self.board.castle_rights.black_queenside = false;
-                    if (move.to == 63) self.board.castle_rights.black_kingside = false;
+                    if (to_sq == 56) self.board.castle_rights.black_queenside = false;
+                    if (to_sq == 63) self.board.castle_rights.black_kingside = false;
                 }
             }
         }
@@ -1120,10 +1207,11 @@ pub const Board = struct {
                 const to: u6 = @intCast(@ctz(bb));
                 bb &= bb - 1;
                 const from: u6 = to - 8;
-                moves.append(Move.init(from, to, .queen));
-                moves.append(Move.init(from, to, .knight));
-                moves.append(Move.init(from, to, .rook));
-                moves.append(Move.init(from, to, .bishop));
+                // Unroll promotion generation for better performance
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
             }
 
             // Double pushes (only from rank 2, so pushed pawns are on rank 3)
@@ -1153,10 +1241,10 @@ pub const Board = struct {
                 const to: u6 = @intCast(@ctz(bb));
                 bb &= bb - 1;
                 const from: u6 = to - 7;
-                moves.append(Move.init(from, to, .queen));
-                moves.append(Move.init(from, to, .knight));
-                moves.append(Move.init(from, to, .rook));
-                moves.append(Move.init(from, to, .bishop));
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
             }
 
             // Right captures (not H-file)
@@ -1176,10 +1264,10 @@ pub const Board = struct {
                 const to: u6 = @intCast(@ctz(bb));
                 bb &= bb - 1;
                 const from: u6 = to - 9;
-                moves.append(Move.init(from, to, .queen));
-                moves.append(Move.init(from, to, .knight));
-                moves.append(Move.init(from, to, .rook));
-                moves.append(Move.init(from, to, .bishop));
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
             }
 
             // En passant
@@ -1218,10 +1306,10 @@ pub const Board = struct {
                 const to: u6 = @intCast(@ctz(bb));
                 bb &= bb - 1;
                 const from: u6 = to + 8;
-                moves.append(Move.init(from, to, .queen));
-                moves.append(Move.init(from, to, .knight));
-                moves.append(Move.init(from, to, .rook));
-                moves.append(Move.init(from, to, .bishop));
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
             }
 
             // Double pushes (only from rank 7, so pushed pawns are on rank 6)
@@ -1251,10 +1339,10 @@ pub const Board = struct {
                 const to: u6 = @intCast(@ctz(bb));
                 bb &= bb - 1;
                 const from: u6 = to + 7;
-                moves.append(Move.init(from, to, .queen));
-                moves.append(Move.init(from, to, .knight));
-                moves.append(Move.init(from, to, .rook));
-                moves.append(Move.init(from, to, .bishop));
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
             }
 
             // Right captures (not A-file for black, moving down-right)
@@ -1274,10 +1362,10 @@ pub const Board = struct {
                 const to: u6 = @intCast(@ctz(bb));
                 bb &= bb - 1;
                 const from: u6 = to + 9;
-                moves.append(Move.init(from, to, .queen));
-                moves.append(Move.init(from, to, .knight));
-                moves.append(Move.init(from, to, .rook));
-                moves.append(Move.init(from, to, .bishop));
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
             }
 
             // En passant
@@ -1446,22 +1534,8 @@ pub const Board = struct {
         return KING_ATTACKS[square];
     }
 
-    inline fn getPawnAttacks(self: *Self, square: u6, pawn_color: pieceInfo.Color) u64 {
-        _ = self;
-        const sq: u64 = @as(u64, 1) << square;
-        const file = square % 8;
-
-        var attacks: u64 = 0;
-
-        if (pawn_color == .white) {
-            if (file > 0 and square < 56) attacks |= sq << 7; // Up-left
-            if (file < 7 and square < 56) attacks |= sq << 9; // Up-right
-        } else {
-            if (file > 0 and square >= 8) attacks |= sq >> 9; // Down-left
-            if (file < 7 and square >= 8) attacks |= sq >> 7; // Down-right
-        }
-
-        return attacks;
+    inline fn getPawnAttacks(_: *Self, square: u6, pawn_color: pieceInfo.Color) u64 {
+        return if (pawn_color == .white) WHITE_PAWN_ATTACKS[square] else BLACK_PAWN_ATTACKS[square];
     }
 
     inline fn getRookAttacks(self: *Self, square: u6, occupied: u64) u64 {
