@@ -279,8 +279,9 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         if ((pawns & behind_mask) == 0 and (pawns & adjacent_files) == 0) {
             // And it can't safely advance (opponent pawn attacks the square in front)
             const front_sq: u6 = if (color == .white) @intCast(sq + 8) else @intCast(sq -| 8);
-            const front_attacks = board.getPawnAttacks(front_sq, if (color == .white) .black else .white);
-            if ((opponent_pawns & front_attacks) != 0) {
+            // Squares from which enemy pawns attack front_sq
+            const attackers_squares = board.getPawnAttacks(front_sq, color);
+            if ((opponent_pawns & attackers_squares) != 0) {
                 score -= BACKWARD_PAWN_PENALTY;
             }
         }
@@ -328,8 +329,12 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         // Safe pawn advance bonus - square in front not attacked by enemy pawns
         if ((color == .white and rank < 7) or (color == .black and rank > 0)) {
             const front_sq_safe: u6 = if (color == .white) @intCast(sq + 8) else @intCast(sq - 8);
-            const enemy_attacks_front = board.getPawnAttacks(front_sq_safe, if (color == .white) .black else .white);
-            if ((opponent_pawns & enemy_attacks_front) == 0) {
+            // To check if front_sq is attacked by enemy pawns, we need squares from which
+            // enemy pawns would attack it. For a white pawn's front square, black pawns
+            // attack from diagonally above (higher rank). getPawnAttacks with our color
+            // gives us those squares.
+            const attackers_squares = board.getPawnAttacks(front_sq_safe, color);
+            if ((opponent_pawns & attackers_squares) == 0) {
                 score += SAFE_PAWN_ADVANCE_BONUS;
             }
         }
