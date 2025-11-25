@@ -7,6 +7,342 @@ const piece = @import("piece.zig");
 const UciError = @import("uci_error.zig").UciError;
 const eval = @import("evaluation.zig");
 
+/// Staged move picker for efficient move ordering
+/// Generates moves lazily in stages: TT move -> Good captures -> Killers -> Quiet moves -> Bad captures
+pub const MovePicker = struct {
+    const Self = @This();
+
+    pub const Stage = enum {
+        tt_move,
+        generate_captures,
+        good_captures,
+        generate_killers,
+        killers,
+        generate_quiets,
+        quiets,
+        bad_captures,
+        done,
+    };
+
+    // Move scoring constants
+    const TT_MOVE_SCORE: i32 = 2_000_000;
+    const GOOD_CAPTURE_BASE: i32 = 1_000_000;
+    const KILLER_SCORE: i32 = 900_000;
+    const BAD_CAPTURE_SCORE: i32 = -100_000;
+
+    board_ptr: *Board,
+    stage: Stage,
+    tt_move: ?Move,
+    killer_moves: *const [MAX_KILLER_MOVES]Move,
+    history: *const HistoryTable,
+    ply: u32,
+
+    // Move lists for each category
+    captures: MoveList,
+    quiets: MoveList,
+    bad_captures: MoveList,
+
+    // Scores for sorting
+    capture_scores: [256]i32,
+    quiet_scores: [256]i32,
+
+    // Current indices
+    capture_idx: usize,
+    quiet_idx: usize,
+    bad_capture_idx: usize,
+    killer_idx: usize,
+
+    pub fn init(
+        board_ptr: *Board,
+        tt_move: ?Move,
+        killer_moves: *const [MAX_KILLER_MOVES]Move,
+        history: *const HistoryTable,
+        ply: u32,
+    ) Self {
+        return Self{
+            .board_ptr = board_ptr,
+            .stage = .tt_move,
+            .tt_move = tt_move,
+            .killer_moves = killer_moves,
+            .history = history,
+            .ply = ply,
+            .captures = MoveList.init(),
+            .quiets = MoveList.init(),
+            .bad_captures = MoveList.init(),
+            .capture_scores = undefined,
+            .quiet_scores = undefined,
+            .capture_idx = 0,
+            .quiet_idx = 0,
+            .bad_capture_idx = 0,
+            .killer_idx = 0,
+        };
+    }
+
+    /// Get the next move, or null if no more moves
+    pub fn next(self: *Self) ?Move {
+        while (true) {
+            switch (self.stage) {
+                .tt_move => {
+                    self.stage = .generate_captures;
+                    if (self.tt_move) |tt| {
+                        // Validate TT move is pseudo-legal (basic check)
+                        if (self.isPseudoLegal(tt)) {
+                            return tt;
+                        }
+                    }
+                },
+                .generate_captures => {
+                    self.board_ptr.generateLegalCaptures(&self.captures);
+                    self.scoreCaptures();
+                    self.stage = .good_captures;
+                },
+                .good_captures => {
+                    while (self.capture_idx < self.captures.count) {
+                        const idx = self.selectBestCapture();
+                        const move = self.captures.moves[idx];
+                        const score = self.capture_scores[idx];
+
+                        // Swap to front and increment
+                        if (idx != self.capture_idx) {
+                            self.captures.moves[idx] = self.captures.moves[self.capture_idx];
+                            self.capture_scores[idx] = self.capture_scores[self.capture_idx];
+                            self.captures.moves[self.capture_idx] = move;
+                            self.capture_scores[self.capture_idx] = score;
+                        }
+                        self.capture_idx += 1;
+
+                        // Skip if same as TT move
+                        if (self.isTTMove(move)) continue;
+
+                        // Good capture (positive SEE or equal trade)
+                        if (score >= GOOD_CAPTURE_BASE) {
+                            return move;
+                        } else {
+                            // Bad capture - save for later
+                            self.bad_captures.append(move);
+                        }
+                    }
+                    self.stage = .generate_killers;
+                },
+                .generate_killers => {
+                    self.stage = .killers;
+                },
+                .killers => {
+                    while (self.killer_idx < MAX_KILLER_MOVES) {
+                        const killer = self.killer_moves[self.killer_idx];
+                        self.killer_idx += 1;
+
+                        // Skip null/invalid killers
+                        if (killer.from() == 0 and killer.to() == 0) continue;
+
+                        // Skip if same as TT move
+                        if (self.isTTMove(killer)) continue;
+
+                        // Skip if it's a capture (already generated)
+                        if (self.isCapture(killer)) continue;
+
+                        // Verify it's pseudo-legal and legal
+                        if (self.isPseudoLegalQuiet(killer) and self.isLegal(killer)) {
+                            return killer;
+                        }
+                    }
+                    self.stage = .generate_quiets;
+                },
+                .generate_quiets => {
+                    self.board_ptr.generateLegalQuietMoves(&self.quiets);
+                    self.scoreQuiets();
+                    self.stage = .quiets;
+                },
+                .quiets => {
+                    while (self.quiet_idx < self.quiets.count) {
+                        const idx = self.selectBestQuiet();
+                        const move = self.quiets.moves[idx];
+                        const score = self.quiet_scores[idx];
+
+                        // Swap to front and increment
+                        if (idx != self.quiet_idx) {
+                            self.quiets.moves[idx] = self.quiets.moves[self.quiet_idx];
+                            self.quiet_scores[idx] = self.quiet_scores[self.quiet_idx];
+                            self.quiets.moves[self.quiet_idx] = move;
+                            self.quiet_scores[self.quiet_idx] = score;
+                        }
+                        self.quiet_idx += 1;
+
+                        // Skip if same as TT move or killer
+                        if (self.isTTMove(move)) continue;
+                        if (self.isKiller(move)) continue;
+
+                        return move;
+                    }
+                    self.stage = .bad_captures;
+                },
+                .bad_captures => {
+                    if (self.bad_capture_idx < self.bad_captures.count) {
+                        const move = self.bad_captures.moves[self.bad_capture_idx];
+                        self.bad_capture_idx += 1;
+                        return move;
+                    }
+                    self.stage = .done;
+                },
+                .done => return null,
+            }
+        }
+    }
+
+    fn scoreCaptures(self: *Self) void {
+        const opponent_color = if (self.board_ptr.board.move == .white) piece.Color.black else piece.Color.white;
+
+        for (self.captures.slice(), 0..) |move, i| {
+            var score: i32 = GOOD_CAPTURE_BASE;
+
+            // MVV-LVA scoring
+            if (self.board_ptr.board.getPieceAt(move.to(), opponent_color)) |victim| {
+                const victim_value = eval.getPieceValue(victim);
+                const attacker_value = if (self.board_ptr.board.getPieceAt(move.from(), self.board_ptr.board.move)) |att|
+                    eval.getPieceValue(att)
+                else
+                    0;
+
+                // MVV-LVA: victim value * 10 - attacker value
+                // Higher victim value = better, lower attacker value = better
+                score += victim_value * 10 - attacker_value;
+
+                // If victim < attacker, it might be a bad capture
+                // Simple heuristic: if attacker significantly more valuable, mark as potentially bad
+                if (attacker_value > victim_value + 50) {
+                    score = BAD_CAPTURE_SCORE + victim_value * 10 - attacker_value;
+                }
+            }
+
+            // Promotion bonus
+            if (move.promotion()) |promo| {
+                score += eval.getPieceValue(promo);
+            }
+
+            self.capture_scores[i] = score;
+        }
+    }
+
+    fn scoreQuiets(self: *Self) void {
+        for (self.quiets.slice(), 0..) |move, i| {
+            self.quiet_scores[i] = self.history.get(move);
+        }
+    }
+
+    fn selectBestCapture(self: *Self) usize {
+        var best_idx = self.capture_idx;
+        var best_score = self.capture_scores[self.capture_idx];
+
+        for (self.capture_idx + 1..self.captures.count) |i| {
+            if (self.capture_scores[i] > best_score) {
+                best_score = self.capture_scores[i];
+                best_idx = i;
+            }
+        }
+
+        return best_idx;
+    }
+
+    fn selectBestQuiet(self: *Self) usize {
+        var best_idx = self.quiet_idx;
+        var best_score = self.quiet_scores[self.quiet_idx];
+
+        for (self.quiet_idx + 1..self.quiets.count) |i| {
+            if (self.quiet_scores[i] > best_score) {
+                best_score = self.quiet_scores[i];
+                best_idx = i;
+            }
+        }
+
+        return best_idx;
+    }
+
+    fn isTTMove(self: *Self, move: Move) bool {
+        if (self.tt_move) |tt| {
+            return tt.from() == move.from() and tt.to() == move.to() and Move.eqlPromotion(tt.promotion(), move.promotion());
+        }
+        return false;
+    }
+
+    fn isKiller(self: *Self, move: Move) bool {
+        for (self.killer_moves) |killer| {
+            if (killer.from() == move.from() and killer.to() == move.to()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn isCapture(self: *Self, move: Move) bool {
+        const opponent_color = if (self.board_ptr.board.move == .white) piece.Color.black else piece.Color.white;
+        return self.board_ptr.board.getPieceAt(move.to(), opponent_color) != null or
+            (self.board_ptr.board.en_passant_square == move.to() and
+                self.board_ptr.board.getPieceAt(move.from(), self.board_ptr.board.move) == .pawn);
+    }
+
+    fn isPseudoLegal(self: *Self, move: Move) bool {
+        const color = self.board_ptr.board.move;
+        const from_sq = move.from();
+
+        // Check if we have a piece on the from square
+        const piece_type = self.board_ptr.board.getPieceAt(from_sq, color) orelse return false;
+
+        // Basic validation - piece exists and destination isn't our own piece
+        const our_pieces = self.board_ptr.board.getColorBitboard(color);
+        const to_mask = @as(u64, 1) << @intCast(move.to());
+        if ((our_pieces & to_mask) != 0) return false;
+
+        // For promotions, verify it's a pawn on the right rank
+        if (move.promotion() != null) {
+            if (piece_type != .pawn) return false;
+            const from_rank = from_sq / 8;
+            if (color == .white and from_rank != 6) return false;
+            if (color == .black and from_rank != 1) return false;
+        }
+
+        return true;
+    }
+
+    fn isPseudoLegalQuiet(self: *Self, move: Move) bool {
+        const color = self.board_ptr.board.move;
+        const from_sq = move.from();
+
+        // Check if we have a piece on the from square
+        const piece_type = self.board_ptr.board.getPieceAt(from_sq, color) orelse return false;
+
+        // Destination must be empty (quiet move)
+        const occupied = self.board_ptr.board.occupied();
+        const to_mask = @as(u64, 1) << @intCast(move.to());
+        if ((occupied & to_mask) != 0) return false;
+
+        // Not a promotion (killers shouldn't be promotions in quiet context)
+        if (move.promotion() != null) return false;
+
+        _ = piece_type;
+        return true;
+    }
+
+    fn isLegal(self: *Self, move: Move) bool {
+        const color = self.board_ptr.board.move;
+
+        // Save state
+        const old_board = self.board_ptr.board;
+        const old_hash = self.board_ptr.zobrist_hasher.zobrist_hash;
+
+        // Make move
+        self.board_ptr.applyMoveUnchecked(move);
+
+        // Check legality
+        const legal = !self.board_ptr.isInCheck(color);
+
+        // Restore state
+        self.board_ptr.board = old_board;
+        self.board_ptr.zobrist_hasher.zobrist_hash = old_hash;
+
+        return legal;
+    }
+};
+
 pub const SearchOptions = struct {
     infinite: bool = false,
     move_time: ?u64 = null,
@@ -186,7 +522,7 @@ const HistoryTable = struct {
         }
     }
 
-    fn get(self: *HistoryTable, move: Move) i32 {
+    fn get(self: *const HistoryTable, move: Move) i32 {
         return self.scores[move.from()][move.to()];
     }
 
@@ -430,26 +766,15 @@ pub const SearchEngine = struct {
             }
         }
 
-        // Generate moves
-        var moves = MoveList.init();
-        try self.board.generateLegalMoves(&moves);
+        // Use staged move picker for efficient move ordering
+        const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
+        var move_picker = MovePicker.init(self.board, tt_move, killers, &self.history, ply);
 
-        // Checkmate/stalemate detection
-        if (moves.count == 0) {
-            if (self.board.isInCheck(self.board.board.move)) {
-                return -eval.mateIn(ply); // Checkmate
-            } else {
-                return DRAW_SCORE; // Stalemate
-            }
-        }
-
-        // Order moves
-        self.orderMoves(&moves, tt_move, ply);
-
-        var best_move = moves.moves[0];
+        var best_move: ?Move = null;
         var best_score: i32 = -INF;
+        var moves_searched: u32 = 0;
 
-        for (moves.slice()) |move| {
+        while (move_picker.next()) |move| {
             // Save state
             const old_board = self.board.board;
             const old_hash = self.board.zobrist_hasher.zobrist_hash;
@@ -464,6 +789,8 @@ pub const SearchEngine = struct {
             // Unmake move
             self.board.board = old_board;
             self.board.zobrist_hasher.zobrist_hash = old_hash;
+
+            moves_searched += 1;
 
             if (score > best_score) {
                 best_score = score;
@@ -484,6 +811,15 @@ pub const SearchEngine = struct {
             }
         }
 
+        // Checkmate/stalemate detection
+        if (moves_searched == 0) {
+            if (self.board.isInCheck(self.board.board.move)) {
+                return -eval.mateIn(ply); // Checkmate
+            } else {
+                return DRAW_SCORE; // Stalemate
+            }
+        }
+
         // Store in transposition table
         const bound: TTEntryBound = if (best_score <= original_alpha)
             .upper_bound
@@ -492,7 +828,7 @@ pub const SearchEngine = struct {
         else
             .exact;
 
-        self.tt.store(self.board.zobrist_hasher.zobrist_hash, @intCast(depth), best_score, bound, best_move);
+        self.tt.store(self.board.zobrist_hasher.zobrist_hash, @intCast(depth), best_score, bound, best_move orelse Move.init(0, 0, null));
 
         return best_score;
     }
@@ -517,9 +853,9 @@ pub const SearchEngine = struct {
             alpha = stand_pat;
         }
 
-        // Generate only captures and promotions
+        // Generate only captures and promotions using optimized generator
         var moves = MoveList.init();
-        try self.generateTacticalMoves(&moves);
+        self.board.generateLegalCaptures(&moves);
 
         if (moves.count == 0) {
             return stand_pat;

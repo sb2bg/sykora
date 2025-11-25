@@ -881,25 +881,25 @@ pub const Board = struct {
         var count: u32 = 0;
 
         // Check pawns
-        const pawn_attacks = self.getPawnAttacks(king_square, king_color);
+        const pawn_attacks = getPawnAttacks(king_square, king_color);
         if ((pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn)) != 0) {
             count += @popCount(pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn));
         }
 
         // Check knights
-        const knight_attacks = self.getKnightAttacks(king_square);
+        const knight_attacks = KNIGHT_ATTACKS[king_square];
         if ((knight_attacks & attacker_bb & self.board.getKindBitboard(.knight)) != 0) {
             count += @popCount(knight_attacks & attacker_bb & self.board.getKindBitboard(.knight));
         }
 
         // Check bishops/queens (diagonal)
-        const bishop_attacks = self.getBishopAttacks(king_square, occupied);
+        const bishop_attacks = getBishopAttacks(king_square, occupied);
         if ((bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen))) != 0) {
             count += @popCount(bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen)));
         }
 
         // Check rooks/queens (straight)
-        const rook_attacks = self.getRookAttacks(king_square, occupied);
+        const rook_attacks = getRookAttacks(king_square, occupied);
         if ((rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen))) != 0) {
             count += @popCount(rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen)));
         }
@@ -933,25 +933,20 @@ pub const Board = struct {
 
         const result = switch (piece_type) {
             .pawn => blk: {
-                const pawn_attacks = self.getPawnAttacks(king_square, opponent_color);
+                const pawn_attacks = getPawnAttacks(king_square, opponent_color);
                 break :blk (pawn_attacks & (@as(u64, 1) << move_to)) != 0;
             },
             .knight => blk: {
-                const knight_attacks = self.getKnightAttacks(king_square);
-                break :blk (knight_attacks & (@as(u64, 1) << move_to)) != 0;
+                break :blk (KNIGHT_ATTACKS[king_square] & (@as(u64, 1) << move_to)) != 0;
             },
             .bishop => blk: {
-                const bishop_attacks = self.getBishopAttacks(king_square, occupied);
-                break :blk (bishop_attacks & (@as(u64, 1) << move_to)) != 0;
+                break :blk (getBishopAttacks(king_square, occupied) & (@as(u64, 1) << move_to)) != 0;
             },
             .rook => blk: {
-                const rook_attacks = self.getRookAttacks(king_square, occupied);
-                break :blk (rook_attacks & (@as(u64, 1) << move_to)) != 0;
+                break :blk (getRookAttacks(king_square, occupied) & (@as(u64, 1) << move_to)) != 0;
             },
             .queen => blk: {
-                const bishop_attacks = self.getBishopAttacks(king_square, occupied);
-                const rook_attacks = self.getRookAttacks(king_square, occupied);
-                const queen_attacks = bishop_attacks | rook_attacks;
+                const queen_attacks = getBishopAttacks(king_square, occupied) | getRookAttacks(king_square, occupied);
                 break :blk (queen_attacks & (@as(u64, 1) << move_to)) != 0;
             },
             .king => false, // Kings don't give check
@@ -1002,39 +997,56 @@ pub const Board = struct {
     }
 
     /// Check if a square is attacked by any piece of the given color
+    /// Optimized version that minimizes bitboard operations
     fn isSquareAttackedBy(self: *Self, square: u6, attacker_color: pieceInfo.Color) bool {
         const attacker_bb = self.board.getColorBitboard(attacker_color);
 
         // Check knights first (cheapest - just array lookup)
-        if ((KNIGHT_ATTACKS[square] & attacker_bb & self.board.getKindBitboard(.knight)) != 0) {
-            return true;
-        }
-
-        // Check pawns (cheap - no occupancy needed)
-        const defender_color = if (attacker_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-        const pawn_attacks = self.getPawnAttacks(square, defender_color);
-        if ((pawn_attacks & attacker_bb & self.board.getKindBitboard(.pawn)) != 0) {
+        const knights = attacker_bb & self.board.getKindBitboard(.knight);
+        if ((KNIGHT_ATTACKS[square] & knights) != 0) {
             return true;
         }
 
         // Check king (cheap - just array lookup)
-        if ((KING_ATTACKS[square] & attacker_bb & self.board.getKindBitboard(.king)) != 0) {
+        const kings = attacker_bb & self.board.getKindBitboard(.king);
+        if ((KING_ATTACKS[square] & kings) != 0) {
             return true;
         }
 
-        // Now check sliding pieces (more expensive - requires occupancy calculation)
+        // Check pawns (cheap - no occupancy needed)
+        const pawns = attacker_bb & self.board.getKindBitboard(.pawn);
+        if (pawns != 0) {
+            const defender_color = if (attacker_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+            const pawn_attacks = getPawnAttacks(square, defender_color);
+            if ((pawn_attacks & pawns) != 0) {
+                return true;
+            }
+        }
+
+        // Cache bishop/queen and rook/queen combinations
+        const queens = attacker_bb & self.board.getKindBitboard(.queen);
+        const bishops_queens = (attacker_bb & self.board.getKindBitboard(.bishop)) | queens;
+        const rooks_queens = (attacker_bb & self.board.getKindBitboard(.rook)) | queens;
+
+        // Early exit if no sliding pieces
+        if (bishops_queens == 0 and rooks_queens == 0) {
+            return false;
+        }
+
         const occupied = self.board.occupied();
 
         // Check bishops/queens on diagonals
-        const bishop_attacks = self.getBishopAttacks(square, occupied);
-        if ((bishop_attacks & attacker_bb & (self.board.getKindBitboard(.bishop) | self.board.getKindBitboard(.queen))) != 0) {
-            return true;
+        if (bishops_queens != 0) {
+            if ((getBishopAttacks(square, occupied) & bishops_queens) != 0) {
+                return true;
+            }
         }
 
         // Check rooks/queens on ranks/files
-        const rook_attacks = self.getRookAttacks(square, occupied);
-        if ((rook_attacks & attacker_bb & (self.board.getKindBitboard(.rook) | self.board.getKindBitboard(.queen))) != 0) {
-            return true;
+        if (rooks_queens != 0) {
+            if ((getRookAttacks(square, occupied) & rooks_queens) != 0) {
+                return true;
+            }
         }
 
         return false;
@@ -1178,6 +1190,542 @@ pub const Board = struct {
 
         // Generate king moves
         try self.generateKingMoves(moves, color, our_pieces, opponent_pieces, occupied);
+    }
+
+    /// Generate only capture moves (for quiescence search)
+    /// This is more efficient than generating all moves and filtering
+    pub fn generateCaptures(self: *Self, moves: *MoveList) void {
+        const color = self.board.move;
+        const our_pieces = self.board.getColorBitboard(color);
+        const opponent_pieces = self.board.getColorBitboard(if (color == .white) .black else .white);
+        const occupied = self.board.occupied();
+
+        // Generate pawn captures (including promotions and en passant)
+        self.generatePawnCaptures(moves, color, our_pieces, opponent_pieces);
+
+        // Generate knight captures
+        self.generateKnightCaptures(moves, our_pieces, opponent_pieces);
+
+        // Generate bishop captures
+        self.generateBishopCaptures(moves, our_pieces, opponent_pieces, occupied);
+
+        // Generate rook captures
+        self.generateRookCaptures(moves, our_pieces, opponent_pieces, occupied);
+
+        // Generate queen captures
+        self.generateQueenCaptures(moves, our_pieces, opponent_pieces, occupied);
+
+        // Generate king captures
+        self.generateKingCaptures(moves, our_pieces, opponent_pieces);
+    }
+
+    /// Generate legal captures only
+    pub fn generateLegalCaptures(self: *Self, moves: *MoveList) void {
+        var pseudo_captures = MoveList.init();
+        self.generateCaptures(&pseudo_captures);
+
+        const color = self.board.move;
+
+        for (pseudo_captures.slice()) |move| {
+            // Save state
+            const old_board = self.board;
+            const old_hash = self.zobrist_hasher.zobrist_hash;
+
+            // Make move
+            self.applyMoveUnchecked(move);
+
+            // Check legality
+            const legal = !self.isInCheck(color);
+
+            // Restore state
+            self.board = old_board;
+            self.zobrist_hasher.zobrist_hash = old_hash;
+
+            if (legal) {
+                moves.append(move);
+            }
+        }
+    }
+
+    /// Generate only quiet (non-capture, non-promotion) moves
+    pub fn generateQuietMoves(self: *Self, moves: *MoveList) void {
+        const color = self.board.move;
+        const our_pieces = self.board.getColorBitboard(color);
+        const opponent_pieces = self.board.getColorBitboard(if (color == .white) .black else .white);
+        const occupied = self.board.occupied();
+
+        // Generate pawn quiet moves (single and double pushes, no promotions)
+        self.generatePawnQuietMoves(moves, color, our_pieces, occupied);
+
+        // Generate knight quiet moves
+        self.generateKnightQuietMoves(moves, our_pieces, occupied);
+
+        // Generate bishop quiet moves
+        self.generateBishopQuietMoves(moves, our_pieces, occupied);
+
+        // Generate rook quiet moves
+        self.generateRookQuietMoves(moves, our_pieces, occupied);
+
+        // Generate queen quiet moves
+        self.generateQueenQuietMoves(moves, our_pieces, occupied);
+
+        // Generate king quiet moves (including castling)
+        self.generateKingQuietMoves(moves, color, our_pieces, opponent_pieces, occupied);
+    }
+
+    /// Generate legal quiet moves only
+    pub fn generateLegalQuietMoves(self: *Self, moves: *MoveList) void {
+        var pseudo_quiets = MoveList.init();
+        self.generateQuietMoves(&pseudo_quiets);
+
+        const color = self.board.move;
+
+        for (pseudo_quiets.slice()) |move| {
+            // Save state
+            const old_board = self.board;
+            const old_hash = self.zobrist_hasher.zobrist_hash;
+
+            // Make move
+            self.applyMoveUnchecked(move);
+
+            // Check legality
+            const legal = !self.isInCheck(color);
+
+            // Restore state
+            self.board = old_board;
+            self.zobrist_hasher.zobrist_hash = old_hash;
+
+            if (legal) {
+                moves.append(move);
+            }
+        }
+    }
+
+    // ========== Capture move generators ==========
+
+    fn generatePawnCaptures(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64) void {
+        const pawns = our_pieces & self.board.getKindBitboard(.pawn);
+
+        if (color == .white) {
+            const promo_rank_mask: u64 = RANK_8_MASK;
+
+            // Left captures (not A-file)
+            const left_captures = ((pawns & NOT_A_FILE) << 7) & opponent_pieces;
+            const left_captures_no_promo = left_captures & ~promo_rank_mask;
+            const left_captures_promo = left_captures & promo_rank_mask;
+
+            var bb = left_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 7, to, null));
+            }
+
+            bb = left_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to - 7;
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
+            }
+
+            // Right captures (not H-file)
+            const right_captures = ((pawns & NOT_H_FILE) << 9) & opponent_pieces;
+            const right_captures_no_promo = right_captures & ~promo_rank_mask;
+            const right_captures_promo = right_captures & promo_rank_mask;
+
+            bb = right_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 9, to, null));
+            }
+
+            bb = right_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to - 9;
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
+            }
+
+            // Push promotions (captures to 8th rank are already handled, but we need non-capture promotions)
+            const push_promo = ((pawns << 8) & ~(our_pieces | opponent_pieces)) & promo_rank_mask;
+            bb = push_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to - 8;
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
+            }
+
+            // En passant
+            if (self.board.en_passant_square) |ep_sq| {
+                const ep_bb: u64 = @as(u64, 1) << @intCast(ep_sq);
+                const ep_left = ((pawns & NOT_A_FILE) << 7) & ep_bb;
+                const ep_right = ((pawns & NOT_H_FILE) << 9) & ep_bb;
+
+                if (ep_left != 0) {
+                    moves.append(Move.init(ep_sq - 7, ep_sq, null));
+                }
+                if (ep_right != 0) {
+                    moves.append(Move.init(ep_sq - 9, ep_sq, null));
+                }
+            }
+        } else {
+            const promo_rank_mask: u64 = RANK_1_MASK;
+
+            // Left captures (not H-file for black)
+            const left_captures = ((pawns & NOT_H_FILE) >> 7) & opponent_pieces;
+            const left_captures_no_promo = left_captures & ~promo_rank_mask;
+            const left_captures_promo = left_captures & promo_rank_mask;
+
+            var bb = left_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 7, to, null));
+            }
+
+            bb = left_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to + 7;
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
+            }
+
+            // Right captures (not A-file for black)
+            const right_captures = ((pawns & NOT_A_FILE) >> 9) & opponent_pieces;
+            const right_captures_no_promo = right_captures & ~promo_rank_mask;
+            const right_captures_promo = right_captures & promo_rank_mask;
+
+            bb = right_captures_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 9, to, null));
+            }
+
+            bb = right_captures_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to + 9;
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
+            }
+
+            // Push promotions
+            const push_promo = ((pawns >> 8) & ~(our_pieces | opponent_pieces)) & promo_rank_mask;
+            bb = push_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                const from: u6 = to + 8;
+                const promo_types = [_]pieceInfo.Type{ .queen, .knight, .rook, .bishop };
+                inline for (promo_types) |promo_type| {
+                    moves.append(Move.init(from, to, promo_type));
+                }
+            }
+
+            // En passant
+            if (self.board.en_passant_square) |ep_sq| {
+                const ep_bb: u64 = @as(u64, 1) << @intCast(ep_sq);
+                const ep_left = ((pawns & NOT_H_FILE) >> 7) & ep_bb;
+                const ep_right = ((pawns & NOT_A_FILE) >> 9) & ep_bb;
+
+                if (ep_left != 0) {
+                    moves.append(Move.init(ep_sq + 7, ep_sq, null));
+                }
+                if (ep_right != 0) {
+                    moves.append(Move.init(ep_sq + 9, ep_sq, null));
+                }
+            }
+        }
+    }
+
+    fn generateKnightCaptures(self: *Self, moves: *MoveList, our_pieces: u64, opponent_pieces: u64) void {
+        const knights = our_pieces & self.board.getKindBitboard(.knight);
+        var knight_bb = knights;
+
+        while (knight_bb != 0) {
+            const from: u6 = @intCast(@ctz(knight_bb));
+            knight_bb &= knight_bb - 1;
+
+            var attack_bb = KNIGHT_ATTACKS[from] & opponent_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateBishopCaptures(self: *Self, moves: *MoveList, our_pieces: u64, opponent_pieces: u64, occupied: u64) void {
+        const bishops = our_pieces & self.board.getKindBitboard(.bishop);
+        var bishop_bb = bishops;
+
+        while (bishop_bb != 0) {
+            const from: u6 = @intCast(@ctz(bishop_bb));
+            bishop_bb &= bishop_bb - 1;
+
+            var attack_bb = getBishopAttacks(from, occupied) & opponent_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateRookCaptures(self: *Self, moves: *MoveList, our_pieces: u64, opponent_pieces: u64, occupied: u64) void {
+        const rooks = our_pieces & self.board.getKindBitboard(.rook);
+        var rook_bb = rooks;
+
+        while (rook_bb != 0) {
+            const from: u6 = @intCast(@ctz(rook_bb));
+            rook_bb &= rook_bb - 1;
+
+            var attack_bb = getRookAttacks(from, occupied) & opponent_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateQueenCaptures(self: *Self, moves: *MoveList, our_pieces: u64, opponent_pieces: u64, occupied: u64) void {
+        const queens = our_pieces & self.board.getKindBitboard(.queen);
+        var queen_bb = queens;
+
+        while (queen_bb != 0) {
+            const from: u6 = @intCast(@ctz(queen_bb));
+            queen_bb &= queen_bb - 1;
+
+            var attack_bb = (getBishopAttacks(from, occupied) | getRookAttacks(from, occupied)) & opponent_pieces;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateKingCaptures(self: *Self, moves: *MoveList, our_pieces: u64, opponent_pieces: u64) void {
+        const kings = our_pieces & self.board.getKindBitboard(.king);
+        if (kings == 0) return;
+
+        const from: u6 = @intCast(@ctz(kings));
+        var attack_bb = KING_ATTACKS[from] & opponent_pieces;
+
+        while (attack_bb != 0) {
+            const to: u6 = @intCast(@ctz(attack_bb));
+            attack_bb &= attack_bb - 1;
+            moves.append(Move.init(from, to, null));
+        }
+    }
+
+    // ========== Quiet move generators ==========
+
+    fn generatePawnQuietMoves(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, occupied: u64) void {
+        const pawns = our_pieces & self.board.getKindBitboard(.pawn);
+        const empty = ~occupied;
+
+        if (color == .white) {
+            // Single pushes (excluding promotions - those are tactical)
+            const push_one = (pawns << 8) & empty;
+            const push_one_no_promo = push_one & ~RANK_8_MASK;
+
+            var bb = push_one_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 8, to, null));
+            }
+
+            // Double pushes
+            const rank_3_mask: u64 = 0x0000000000FF0000;
+            const push_two = ((push_one & rank_3_mask) << 8) & empty;
+            bb = push_two;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to - 16, to, null));
+            }
+        } else {
+            // Single pushes (excluding promotions)
+            const push_one = (pawns >> 8) & empty;
+            const push_one_no_promo = push_one & ~RANK_1_MASK;
+
+            var bb = push_one_no_promo;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 8, to, null));
+            }
+
+            // Double pushes
+            const rank_6_mask: u64 = 0x0000FF0000000000;
+            const push_two = ((push_one & rank_6_mask) >> 8) & empty;
+            bb = push_two;
+            while (bb != 0) {
+                const to: u6 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                moves.append(Move.init(to + 16, to, null));
+            }
+        }
+    }
+
+    fn generateKnightQuietMoves(self: *Self, moves: *MoveList, our_pieces: u64, occupied: u64) void {
+        const knights = our_pieces & self.board.getKindBitboard(.knight);
+        const empty = ~occupied;
+        var knight_bb = knights;
+
+        while (knight_bb != 0) {
+            const from: u6 = @intCast(@ctz(knight_bb));
+            knight_bb &= knight_bb - 1;
+
+            var attack_bb = KNIGHT_ATTACKS[from] & empty;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateBishopQuietMoves(self: *Self, moves: *MoveList, our_pieces: u64, occupied: u64) void {
+        const bishops = our_pieces & self.board.getKindBitboard(.bishop);
+        const empty = ~occupied;
+        var bishop_bb = bishops;
+
+        while (bishop_bb != 0) {
+            const from: u6 = @intCast(@ctz(bishop_bb));
+            bishop_bb &= bishop_bb - 1;
+
+            var attack_bb = getBishopAttacks(from, occupied) & empty;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateRookQuietMoves(self: *Self, moves: *MoveList, our_pieces: u64, occupied: u64) void {
+        const rooks = our_pieces & self.board.getKindBitboard(.rook);
+        const empty = ~occupied;
+        var rook_bb = rooks;
+
+        while (rook_bb != 0) {
+            const from: u6 = @intCast(@ctz(rook_bb));
+            rook_bb &= rook_bb - 1;
+
+            var attack_bb = getRookAttacks(from, occupied) & empty;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateQueenQuietMoves(self: *Self, moves: *MoveList, our_pieces: u64, occupied: u64) void {
+        const queens = our_pieces & self.board.getKindBitboard(.queen);
+        const empty = ~occupied;
+        var queen_bb = queens;
+
+        while (queen_bb != 0) {
+            const from: u6 = @intCast(@ctz(queen_bb));
+            queen_bb &= queen_bb - 1;
+
+            var attack_bb = (getBishopAttacks(from, occupied) | getRookAttacks(from, occupied)) & empty;
+
+            while (attack_bb != 0) {
+                const to: u6 = @intCast(@ctz(attack_bb));
+                attack_bb &= attack_bb - 1;
+                moves.append(Move.init(from, to, null));
+            }
+        }
+    }
+
+    fn generateKingQuietMoves(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, _: u64, occupied: u64) void {
+        const kings = our_pieces & self.board.getKindBitboard(.king);
+        if (kings == 0) return;
+
+        const from: u6 = @intCast(@ctz(kings));
+        const empty = ~occupied;
+
+        // Regular king moves to empty squares
+        var attack_bb = KING_ATTACKS[from] & empty;
+
+        while (attack_bb != 0) {
+            const to: u6 = @intCast(@ctz(attack_bb));
+            attack_bb &= attack_bb - 1;
+            moves.append(Move.init(from, to, null));
+        }
+
+        // Castling
+        const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+        if (color == .white) {
+            if (self.board.castle_rights.white_kingside) {
+                if ((occupied & ((@as(u64, 1) << 5) | (@as(u64, 1) << 6))) == 0 and
+                    !self.isSquareAttackedBy(4, opponent) and
+                    !self.isSquareAttackedBy(5, opponent))
+                {
+                    moves.append(Move.init(4, 6, null));
+                }
+            }
+            if (self.board.castle_rights.white_queenside) {
+                if ((occupied & ((@as(u64, 1) << 1) | (@as(u64, 1) << 2) | (@as(u64, 1) << 3))) == 0 and
+                    !self.isSquareAttackedBy(4, opponent) and
+                    !self.isSquareAttackedBy(3, opponent))
+                {
+                    moves.append(Move.init(4, 2, null));
+                }
+            }
+        } else {
+            if (self.board.castle_rights.black_kingside) {
+                if ((occupied & ((@as(u64, 1) << 61) | (@as(u64, 1) << 62))) == 0 and
+                    !self.isSquareAttackedBy(60, opponent) and
+                    !self.isSquareAttackedBy(61, opponent))
+                {
+                    moves.append(Move.init(60, 62, null));
+                }
+            }
+            if (self.board.castle_rights.black_queenside) {
+                if ((occupied & ((@as(u64, 1) << 57) | (@as(u64, 1) << 58) | (@as(u64, 1) << 59))) == 0 and
+                    !self.isSquareAttackedBy(60, opponent) and
+                    !self.isSquareAttackedBy(59, opponent))
+                {
+                    moves.append(Move.init(60, 58, null));
+                }
+            }
+        }
     }
 
     fn generatePawnMoves(self: *Self, moves: *MoveList, color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64, occupied: u64) !void {
@@ -1392,8 +1940,7 @@ pub const Board = struct {
             const from: u6 = @intCast(@ctz(knight_bb));
             knight_bb &= knight_bb - 1;
 
-            const attacks = self.getKnightAttacks(from);
-            var attack_bb = attacks & ~our_pieces;
+            var attack_bb = KNIGHT_ATTACKS[from] & ~our_pieces;
 
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
@@ -1411,8 +1958,7 @@ pub const Board = struct {
             const from: u6 = @intCast(@ctz(bishop_bb));
             bishop_bb &= bishop_bb - 1;
 
-            const attacks = self.getBishopAttacks(from, occupied);
-            var attack_bb = attacks & ~our_pieces;
+            var attack_bb = getBishopAttacks(from, occupied) & ~our_pieces;
 
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
@@ -1430,8 +1976,7 @@ pub const Board = struct {
             const from: u6 = @intCast(@ctz(rook_bb));
             rook_bb &= rook_bb - 1;
 
-            const attacks = self.getRookAttacks(from, occupied);
-            var attack_bb = attacks & ~our_pieces;
+            var attack_bb = getRookAttacks(from, occupied) & ~our_pieces;
 
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
@@ -1449,10 +1994,7 @@ pub const Board = struct {
             const from: u6 = @intCast(@ctz(queen_bb));
             queen_bb &= queen_bb - 1;
 
-            const bishop_attacks = self.getBishopAttacks(from, occupied);
-            const rook_attacks = self.getRookAttacks(from, occupied);
-            const attacks = bishop_attacks | rook_attacks;
-            var attack_bb = attacks & ~our_pieces;
+            var attack_bb = (getBishopAttacks(from, occupied) | getRookAttacks(from, occupied)) & ~our_pieces;
 
             while (attack_bb != 0) {
                 const to: u6 = @intCast(@ctz(attack_bb));
@@ -1469,8 +2011,7 @@ pub const Board = struct {
         const from: u6 = @intCast(@ctz(kings));
 
         // Regular king moves
-        const attacks = self.getKingAttacks(from);
-        var attack_bb = attacks & ~our_pieces;
+        var attack_bb = KING_ATTACKS[from] & ~our_pieces;
 
         while (attack_bb != 0) {
             const to: u6 = @intCast(@ctz(attack_bb));
@@ -1523,35 +2064,6 @@ pub const Board = struct {
         }
     }
 
-    // Attack pattern generators
-    inline fn getKnightAttacks(self: *Self, square: u6) u64 {
-        _ = self;
-        return KNIGHT_ATTACKS[square];
-    }
-
-    inline fn getKingAttacks(self: *Self, square: u6) u64 {
-        _ = self;
-        return KING_ATTACKS[square];
-    }
-
-    inline fn getPawnAttacks(_: *Self, square: u6, pawn_color: pieceInfo.Color) u64 {
-        return if (pawn_color == .white) WHITE_PAWN_ATTACKS[square] else BLACK_PAWN_ATTACKS[square];
-    }
-
-    inline fn getRookAttacks(self: *Self, square: u6, occupied: u64) u64 {
-        _ = self;
-        const mask = ROOK_MASKS[square];
-        const masked_occupied = occupied & mask;
-        const index = (masked_occupied *% ROOK_MAGICS[square]) >> @intCast(ROOK_SHIFTS[square]);
-        return ROOK_ATTACKS[square][index];
-    }
-    inline fn getBishopAttacks(self: *Self, square: u6, occupied: u64) u64 {
-        _ = self;
-        const mask = BISHOP_MASKS[square];
-        const masked_occupied = occupied & mask;
-        const index = (masked_occupied *% BISHOP_MAGICS[square]) >> @intCast(BISHOP_SHIFTS[square]);
-        return BISHOP_ATTACKS[square][index];
-    }
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
         return rankFileToSquare(rank - '1', file - 'a');
     }
@@ -1685,6 +2197,35 @@ pub const Board = struct {
     }
 };
 
+// Static attack functions - can be called without a Board instance
+pub inline fn getKnightAttacks(square: u6) u64 {
+    return KNIGHT_ATTACKS[square];
+}
+
+pub inline fn getKingAttacks(square: u6) u64 {
+    return KING_ATTACKS[square];
+}
+
+pub inline fn getPawnAttacks(square: u6, pawn_color: pieceInfo.Color) u64 {
+    return if (pawn_color == .white) WHITE_PAWN_ATTACKS[square] else BLACK_PAWN_ATTACKS[square];
+}
+
+pub inline fn getRookAttacks(square: u6, occupied: u64) u64 {
+    const masked_occupied = occupied & ROOK_MASKS[square];
+    const index = (masked_occupied *% ROOK_MAGICS[square]) >> @intCast(ROOK_SHIFTS[square]);
+    return ROOK_ATTACKS[square][index];
+}
+
+pub inline fn getBishopAttacks(square: u6, occupied: u64) u64 {
+    const masked_occupied = occupied & BISHOP_MASKS[square];
+    const index = (masked_occupied *% BISHOP_MAGICS[square]) >> @intCast(BISHOP_SHIFTS[square]);
+    return BISHOP_ATTACKS[square][index];
+}
+
+pub inline fn getQueenAttacks(square: u6, occupied: u64) u64 {
+    return getRookAttacks(square, occupied) | getBishopAttacks(square, occupied);
+}
+
 pub const CastleRights = struct {
     white_kingside: bool = false,
     white_queenside: bool = false,
@@ -1783,7 +2324,7 @@ pub const BitBoard = struct {
         return self.move == pieceInfo.Color.white;
     }
 
-    inline fn occupied(self: Self) u64 {
+    pub inline fn occupied(self: Self) u64 {
         return self.color_sets[0] | self.color_sets[1];
     }
 
