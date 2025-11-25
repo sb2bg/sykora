@@ -38,18 +38,19 @@ from typing import Optional
 @dataclass
 class MatchResult:
     """Stores the result of a match between two engines."""
+
     engine1_wins: float = 0
     engine2_wins: float = 0
     draws: float = 0
-    
+
     @property
     def total_games(self) -> int:
         return int(self.engine1_wins + self.engine2_wins + self.draws)
-    
+
     @property
     def engine1_score(self) -> float:
         return self.engine1_wins + (self.draws * 0.5)
-    
+
     @property
     def engine2_score(self) -> float:
         return self.engine2_wins + (self.draws * 0.5)
@@ -66,32 +67,32 @@ def play_game(
 ) -> tuple[chess.pgn.Game, Optional[bool]]:
     """
     Play a single game between two engines.
-    
+
     Returns:
         A tuple of (pgn_game, winner) where winner is True for white, False for black, None for draw.
     """
     board = chess.Board()
     game = chess.pgn.Game()
-    
+
     # Set up game headers
     game.headers["Event"] = "Engine Self-Play Match"
     game.headers["Site"] = "Localhost"
     game.headers["Date"] = datetime.date.today().strftime("%Y.%m.%d")
     game.headers["White"] = white_name
     game.headers["Black"] = black_name
-    
+
     node = game
     move_count = 0
-    
+
     # Build the limit object
     if depth_limit:
         limit = chess.engine.Limit(time=time_limit, depth=depth_limit)
     else:
         limit = chess.engine.Limit(time=time_limit)
-    
+
     while not board.is_game_over():
         current_engine = white_engine if board.turn == chess.WHITE else black_engine
-        
+
         try:
             result = current_engine.play(board, limit)
             if result.move is None:
@@ -113,10 +114,10 @@ def play_game(
             if verbose:
                 print(f"  Error during game: {e}")
             break
-    
+
     outcome = board.outcome()
     game.headers["Result"] = board.result()
-    
+
     if outcome:
         if outcome.termination == chess.Termination.CHECKMATE:
             game.headers["Termination"] = "Checkmate"
@@ -130,10 +131,10 @@ def play_game(
             game.headers["Termination"] = "Threefold repetition"
         else:
             game.headers["Termination"] = "Normal"
-    
+
     if verbose:
         print(f"  Moves: {move_count}, Result: {board.result()}")
-    
+
     return game, outcome.winner if outcome else None
 
 
@@ -150,7 +151,7 @@ def play_match(
 ) -> MatchResult:
     """
     Play a match between two engines, alternating colors.
-    
+
     Args:
         engine1_path: Path to the first engine executable
         engine2_path: Path to the second engine executable
@@ -161,15 +162,15 @@ def play_match(
         depth_limit: Optional depth limit for search
         output_dir: Directory to save PGN files (None to skip saving)
         verbose: Whether to print progress
-    
+
     Returns:
         MatchResult with the scores
     """
     result = MatchResult()
-    
+
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    
+
     if verbose:
         print(f"\n{'='*60}")
         print(f"Self-Play Match: {engine1_name} vs {engine2_name}")
@@ -177,7 +178,7 @@ def play_match(
         if depth_limit:
             print(f"Depth limit: {depth_limit}")
         print(f"{'='*60}\n")
-    
+
     try:
         engine1 = chess.engine.SimpleEngine.popen_uci(engine1_path)
         engine2 = chess.engine.SimpleEngine.popen_uci(engine2_path)
@@ -188,7 +189,7 @@ def play_match(
     except Exception as e:
         print(f"Error starting engines: {e}")
         sys.exit(1)
-    
+
     try:
         for game_num in range(1, num_games + 1):
             # Alternate colors - engine1 plays white on odd games
@@ -198,10 +199,12 @@ def play_match(
             else:
                 white_engine, black_engine = engine2, engine1
                 white_name, black_name = engine2_name, engine1_name
-            
+
             if verbose:
-                print(f"Game {game_num}/{num_games}: {white_name} (White) vs {black_name} (Black)")
-            
+                print(
+                    f"Game {game_num}/{num_games}: {white_name} (White) vs {black_name} (Black)"
+                )
+
             game, winner = play_game(
                 white_engine=white_engine,
                 black_engine=black_engine,
@@ -212,7 +215,7 @@ def play_match(
                 verbose=verbose,
             )
             game.headers["Round"] = str(game_num)
-            
+
             # Track results
             if winner is None:
                 result.draws += 1
@@ -226,22 +229,24 @@ def play_match(
                     result.engine1_wins += 1
                 else:
                     result.engine2_wins += 1
-            
+
             # Save PGN if output directory specified
             if output_dir:
                 pgn_path = os.path.join(output_dir, f"game_{game_num}.pgn")
                 with open(pgn_path, "w") as f:
                     print(game, file=f, end="\n\n")
-            
+
             # Print running score
             if verbose:
-                print(f"  Running score: {engine1_name} {result.engine1_score} - {result.engine2_score} {engine2_name}")
+                print(
+                    f"  Running score: {engine1_name} {result.engine1_score} - {result.engine2_score} {engine2_name}"
+                )
                 print()
-    
+
     finally:
         engine1.quit()
         engine2.quit()
-    
+
     return result
 
 
@@ -256,14 +261,14 @@ def print_results(result: MatchResult, engine1_name: str, engine2_name: str):
     print(f"  Draws:  {int(result.draws)}")
     print(f"  Score:  {result.engine1_score} / {result.total_games}")
     print(f"  Win %:  {result.engine1_score / result.total_games * 100:.1f}%")
-    
+
     print(f"\n{engine2_name}:")
     print(f"  Wins:   {int(result.engine2_wins)}")
     print(f"  Losses: {int(result.engine1_wins)}")
     print(f"  Draws:  {int(result.draws)}")
     print(f"  Score:  {result.engine2_score} / {result.total_games}")
     print(f"  Win %:  {result.engine2_score / result.total_games * 100:.1f}%")
-    
+
     # Determine winner
     print("\n" + "-" * 60)
     if result.engine1_score > result.engine2_score:
@@ -288,7 +293,7 @@ Examples:
   %(prog)s engine_v1 engine_v2 --output selfplay_games --depth 8
         """,
     )
-    
+
     parser.add_argument(
         "engine1",
         help="Path to the first (old) engine executable",
@@ -308,36 +313,41 @@ Examples:
         help="Display name for the second engine (default: New)",
     )
     parser.add_argument(
-        "-g", "--games",
+        "-g",
+        "--games",
         type=int,
         default=10,
         help="Number of games to play (default: 10)",
     )
     parser.add_argument(
-        "-t", "--time",
+        "-t",
+        "--time",
         type=float,
         default=1.0,
         help="Time limit per move in seconds (default: 1.0)",
     )
     parser.add_argument(
-        "-d", "--depth",
+        "-d",
+        "--depth",
         type=int,
         default=None,
         help="Optional depth limit for search",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         default=None,
         help="Directory to save PGN files (default: no saving)",
     )
     parser.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Reduce output verbosity",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Validate engine paths
     if not os.path.isfile(args.engine1):
         print(f"Error: Engine 1 not found: {args.engine1}")
@@ -345,7 +355,7 @@ Examples:
     if not os.path.isfile(args.engine2):
         print(f"Error: Engine 2 not found: {args.engine2}")
         sys.exit(1)
-    
+
     # Run the match
     result = play_match(
         engine1_path=args.engine1,
@@ -358,10 +368,10 @@ Examples:
         output_dir=args.output,
         verbose=not args.quiet,
     )
-    
+
     # Print final results
     print_results(result, args.name1, args.name2)
-    
+
     # Exit with code based on whether new engine won
     if result.engine2_score > result.engine1_score:
         sys.exit(0)  # New engine won
