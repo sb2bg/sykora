@@ -521,9 +521,11 @@ const TranspositionTable = struct {
         const idx = self.index(hash);
         const entry = &self.entries[idx];
 
-        // Replace if: empty, same position, or lower depth and older age
-        if (entry.hash == 0 or entry.hash == hash or
-            (entry.depth <= depth and entry.age != self.current_age))
+        // Replace if: empty, same position, deeper search, or older entry
+        if (entry.hash == 0 or
+            entry.hash == hash or
+            depth >= entry.depth or
+            entry.age != self.current_age)
         {
             entry.hash = hash;
             entry.depth = depth;
@@ -662,7 +664,7 @@ pub const SearchEngine = struct {
     board: *Board,
     allocator: std.mem.Allocator,
     stop_search: *std.atomic.Value(bool),
-    info_callback: ?*const fn ([]const u8) void,
+    uci_writer: ?std.io.AnyWriter,
 
     // Search state
     tt: TranspositionTable,
@@ -690,7 +692,7 @@ pub const SearchEngine = struct {
             .board = board_ptr,
             .allocator = allocator,
             .stop_search = stop_search,
-            .info_callback = null,
+            .uci_writer = null,
             .tt = tt,
             .killer_moves = KillerMoves.init(),
             .history = HistoryTable.init(),
@@ -798,19 +800,18 @@ pub const SearchEngine = struct {
             const iter_time = std.time.milliTimestamp() - iter_start;
             const total_time = std.time.milliTimestamp() - start_time;
 
-            // UCI info output
-            if (self.info_callback) |callback| {
-                var buf: [256]u8 = undefined;
-                const info = std.fmt.bufPrint(&buf, "info depth {d} seldepth {d} score cp {d} nodes {d} time {d} nps {d} pv {s}\n", .{
+            // UCI info output at every depth
+            if (self.uci_writer) |writer| {
+                const nps = if (total_time > 0) (self.nodes_searched * 1000) / @as(usize, @intCast(total_time)) else 0;
+                writer.print("info depth {d} seldepth {d} score cp {d} nodes {d} time {d} nps {d} pv {s}\n", .{
                     depth,
                     self.seldepth,
                     score,
                     self.nodes_searched,
                     total_time,
-                    if (total_time > 0) (self.nodes_searched * 1000) / @as(usize, @intCast(total_time)) else 0,
+                    nps,
                     best_move,
-                }) catch "";
-                callback(info);
+                }) catch {};
             }
 
             // Check time limit

@@ -283,6 +283,9 @@ pub const Uci = struct {
         var search_engine = try SearchEngine.init(&search_board, self.allocator, &self.stop_search);
         defer search_engine.deinit();
 
+        // Set UCI writer for info output at each depth
+        search_engine.uci_writer = self.stdout;
+
         // Convert UCI go options to search options
         const search_opts = SearchOptions{
             .infinite = go_opts.infinite orelse false,
@@ -299,23 +302,6 @@ pub const Uci = struct {
 
         // Output the result
         self.best_move = result.best_move;
-
-        // Output final info line
-        const nps = if (result.time_ms > 0)
-            (result.nodes * 1000) / @as(usize, @intCast(result.time_ms))
-        else
-            result.nodes * 1000;
-
-        try self.writeStdout(
-            "info depth {d} score cp {d} nodes {d} nps {d} time {d}",
-            .{
-                result.depth,
-                result.score,
-                result.nodes,
-                nps,
-                result.time_ms,
-            },
-        );
 
         try self.writeInfoString("search thread stopped", .{});
         try self.writeStdout("bestmove {s}", .{self.best_move});
