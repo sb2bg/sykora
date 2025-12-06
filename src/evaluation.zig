@@ -264,16 +264,22 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         if (file < 7) blocking_mask |= file_masks[file + 1];
 
         // Mask for squares ahead of this pawn
+        // Clamp shift amounts to 0-63 to avoid overflow
+        const ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
+        const ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
         const ahead_mask: u64 = if (color == .white)
-            blocking_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast((rank + 1) * 8))
+            blocking_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) << ahead_shift_white)
         else
-            blocking_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> @intCast((7 - rank + 1) * 8));
+            blocking_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> ahead_shift_black);
 
         // Check for backward pawns
+        // Clamp shift amounts to 0-63 to avoid overflow
+        const behind_shift_white: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
+        const behind_shift_black: u6 = @intCast(rank * 8);
         const behind_mask: u64 = if (color == .white)
-            adjacent_files & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> @intCast((8 - rank) * 8))
+            adjacent_files & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> behind_shift_white)
         else
-            adjacent_files & (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast(rank * 8));
+            adjacent_files & (@as(u64, 0xFFFFFFFFFFFFFFFF) << behind_shift_black);
 
         // Backward pawn: no friendly pawns behind on adjacent files that could defend it
         if ((pawns & behind_mask) == 0 and (pawns & adjacent_files) == 0) {
@@ -313,10 +319,13 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
                     if (adj_file > 0) adj_blocking |= file_masks[adj_file - 1];
                     if (adj_file < 7) adj_blocking |= file_masks[adj_file + 1];
 
+                    // Clamp shift amounts to avoid overflow
+                    const adj_ahead_shift_white: u6 = if (adj_rank >= 7) 63 else @intCast((adj_rank + 1) * 8);
+                    const adj_ahead_shift_black: u6 = if (adj_rank == 0) 63 else @intCast((8 - adj_rank) * 8);
                     const adj_ahead: u64 = if (color == .white)
-                        adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast((adj_rank + 1) * 8))
+                        adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) << adj_ahead_shift_white)
                     else
-                        adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> @intCast((7 - adj_rank + 1) * 8));
+                        adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> adj_ahead_shift_black);
 
                     if ((opponent_pawns & adj_ahead) == 0) {
                         score += CONNECTED_PASSED_PAWN_BONUS / 2; // Half bonus since both pawns get it
@@ -538,10 +547,13 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         if (file < 7) attack_mask |= file_masks[file + 1];
 
         // Mask squares in front of the knight
+        // Clamp shift amounts to avoid overflow
+        const knight_ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
+        const knight_ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
         const ahead_mask: u64 = if (color == .white)
-            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast((rank + 1) * 8))
+            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) << knight_ahead_shift_white)
         else
-            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> @intCast((7 - rank + 1) * 8));
+            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> knight_ahead_shift_black);
 
         if ((enemy_pawns & ahead_mask) == 0) {
             score += KNIGHT_OUTPOST_BONUS;
@@ -567,12 +579,15 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         if (file > 0) attack_mask |= file_masks[file - 1];
         if (file < 7) attack_mask |= file_masks[file + 1];
 
-        const ahead_mask: u64 = if (color == .white)
-            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast((rank + 1) * 8))
+        // Clamp shift amounts to avoid overflow
+        const bishop_ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
+        const bishop_ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
+        const bishop_ahead_mask: u64 = if (color == .white)
+            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) << bishop_ahead_shift_white)
         else
-            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> @intCast((7 - rank + 1) * 8));
+            attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> bishop_ahead_shift_black);
 
-        if ((enemy_pawns & ahead_mask) == 0) {
+        if ((enemy_pawns & bishop_ahead_mask) == 0) {
             score += BISHOP_OUTPOST_BONUS;
         }
     }
