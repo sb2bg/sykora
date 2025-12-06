@@ -86,8 +86,8 @@ pub const MovePicker = struct {
                 .tt_move => {
                     self.stage = .generate_captures;
                     if (self.tt_move) |tt| {
-                        // Validate TT move is pseudo-legal (basic check)
-                        if (self.isPseudoLegal(tt)) {
+                        // Validate TT move is fully legal (not just pseudo-legal)
+                        if (self.isPseudoLegal(tt) and self.isLegal(tt)) {
                             return tt;
                         }
                     }
@@ -739,7 +739,7 @@ pub const SearchEngine = struct {
         self.killer_moves = KillerMoves.init();
         self.history.age(); // Age history instead of clearing
         self.counter_moves.clear();
-        self.tt.nextAge();
+        self.tt.nextAge(); // Age TT entries
         self.previous_move = null;
         // Initialize position history
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
@@ -940,19 +940,17 @@ pub const SearchEngine = struct {
         if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
             tt_move = entry.best_move;
 
-            if (entry.depth >= search_depth) {
+            // Use TT score for cutoffs (only in non-PV nodes with sufficient depth)
+            if (!is_pv_node and entry.depth >= search_depth) {
                 const tt_score = scoreFromTT(entry.score, ply);
-
-                if (!is_pv_node) {
-                    switch (entry.bound) {
-                        .exact => return tt_score,
-                        .lower_bound => alpha = @max(alpha, tt_score),
-                        .upper_bound => beta_adj = @min(beta_adj, tt_score),
-                    }
-
-                    if (alpha >= beta_adj) {
-                        return tt_score;
-                    }
+                switch (entry.bound) {
+                    .exact => return tt_score,
+                    .lower_bound => {
+                        if (tt_score >= beta) return tt_score;
+                    },
+                    .upper_bound => {
+                        if (tt_score <= alpha) return tt_score;
+                    },
                 }
             }
         }
@@ -1175,7 +1173,6 @@ pub const SearchEngine = struct {
             .lower_bound
         else
             .exact;
-
         const score_to_store = scoreToTT(best_score, ply);
         self.tt.store(self.board.zobrist_hasher.zobrist_hash, @intCast(search_depth), score_to_store, bound, best_move orelse Move.init(0, 0, null));
 
