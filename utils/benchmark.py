@@ -129,7 +129,7 @@ if __name__ == "__main__":
     print("Benchmarking Sykora...")
 
     # List of Elos to test against
-    elos = [1320, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500]
+    elos = [2000, 2100, 2200, 2300, 2400, 2500]
 
     for elo in elos:
         score = play_match(elo)
