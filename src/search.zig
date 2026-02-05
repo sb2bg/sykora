@@ -126,7 +126,9 @@ pub const MovePicker = struct {
                     self.stage = .generate_killers;
                 },
                 .generate_killers => {
-                    self.stage = .killers;
+                    // Skip killer stage for now; stale killer moves can become
+                    // pseudo-legal in this position and pollute search.
+                    self.stage = .generate_quiets;
                 },
                 .killers => {
                     while (self.killer_idx < MAX_KILLER_MOVES) {
@@ -229,7 +231,7 @@ pub const MovePicker = struct {
         const friendly = self.board_ptr.board.getColorBitboard(self.board_ptr.board.move);
 
         for (self.quiets.slice(), 0..) |move, i| {
-            var score = self.history.get(move);
+            var score = self.history.getForColor(move, self.board_ptr.board.move);
 
             // Add mobility bonus - moves that increase piece mobility
             if (self.board_ptr.board.getPieceAt(move.from(), self.board_ptr.board.move)) |piece_type| {
@@ -400,6 +402,12 @@ const MAX_KILLER_MOVES = 2;
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
 
+fn elapsedMs(start: std.time.Instant) i64 {
+    const now = std.time.Instant.now() catch return 0;
+    const ns = now.since(start);
+    return @intCast(@divFloor(ns, std.time.ns_per_ms));
+}
+
 // Adjust mate score for TT storage (store relative to root, not current ply)
 fn scoreToTT(score: i32, ply: u32) i32 {
     if (score >= eval.MATE_BOUND) {
@@ -521,18 +529,27 @@ const TranspositionTable = struct {
         const idx = self.index(hash);
         const entry = &self.entries[idx];
 
-        // Replace if: empty, same position, deeper search, or older entry
-        if (entry.hash == 0 or
-            entry.hash == hash or
-            depth >= entry.depth or
-            entry.age != self.current_age)
-        {
+        // Replacement strategy:
+        // - Always replace empty slots
+        // - Always replace old entries from previous searches
+        // - For same position: only replace if depth >= existing depth
+        // - For different position (collision): use depth-preferred replacement
+        const replace = entry.hash == 0 or // empty
+            entry.age != self.current_age or // old entry
+            (entry.hash == hash and depth >= entry.depth) or // same position, equal or deeper
+            (entry.hash != hash and depth > entry.depth); // collision, deeper search wins
+
+        if (replace) {
             entry.hash = hash;
             entry.depth = depth;
             entry.score = score;
             entry.bound = bound;
             entry.best_move = best_move;
             entry.age = self.current_age;
+        } else if (entry.hash == hash and best_move.from() != 0) {
+            // For same position with shallower search, still update best_move if we found one
+            // This helps preserve the PV even from shallower searches
+            entry.best_move = best_move;
         }
     }
 };
@@ -664,7 +681,8 @@ pub const SearchEngine = struct {
     board: *Board,
     allocator: std.mem.Allocator,
     stop_search: *std.atomic.Value(bool),
-    uci_writer: ?std.io.AnyWriter,
+    uci_output: ?std.fs.File,
+    root_best_move: Move,
 
     // Search state
     tt: TranspositionTable,
@@ -692,7 +710,8 @@ pub const SearchEngine = struct {
             .board = board_ptr,
             .allocator = allocator,
             .stop_search = stop_search,
-            .uci_writer = null,
+            .uci_output = null,
+            .root_best_move = Move.init(0, 0, null),
             .tt = tt,
             .killer_moves = KillerMoves.init(),
             .history = HistoryTable.init(),
@@ -731,7 +750,7 @@ pub const SearchEngine = struct {
 
     /// Run a search and return the best move
     pub fn search(self: *Self, options: SearchOptions) !SearchResult {
-        const start_time = std.time.milliTimestamp();
+        const start_time = std.time.Instant.now() catch unreachable;
 
         // Reset search state
         self.nodes_searched = 0;
@@ -739,7 +758,7 @@ pub const SearchEngine = struct {
         self.killer_moves = KillerMoves.init();
         self.history.age(); // Age history instead of clearing
         self.counter_moves.clear();
-        self.tt.nextAge(); // Age TT entries
+        self.tt.nextAge(); // Age TT entries between root searches
         self.previous_move = null;
         // Initialize position history
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
@@ -768,13 +787,14 @@ pub const SearchEngine = struct {
                 .best_move = legal_moves.moves[0],
                 .score = 0,
                 .nodes = 1,
-                .time_ms = std.time.milliTimestamp() - start_time,
+                .time_ms = elapsedMs(start_time),
                 .depth = 0,
             };
         }
 
         var best_move = legal_moves.moves[0];
         var best_score: i32 = -INF;
+        self.root_best_move = best_move;
         const max_depth: u32 = if (options.depth) |d| @intCast(d) else 64;
 
         // Iterative deepening
@@ -782,28 +802,23 @@ pub const SearchEngine = struct {
         while (depth <= max_depth) : (depth += 1) {
             if (self.stop_search.load(.seq_cst)) break;
 
-            const iter_start = std.time.milliTimestamp();
+            const iter_start = std.time.Instant.now() catch unreachable;
+
             const score = try self.alphaBeta(-INF, INF, depth, 0, true);
 
             // Skip incomplete iterations (stopped mid-search)
             if (self.stop_search.load(.seq_cst)) break;
 
-            // Get best move from TT - this should always succeed after a complete search
-            if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
-                // Only update if we found a valid move
-                if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
-                    best_move = entry.best_move;
-                    best_score = score;
-                }
-            }
+            best_move = self.root_best_move;
+            best_score = score;
 
-            const iter_time = std.time.milliTimestamp() - iter_start;
-            const total_time = std.time.milliTimestamp() - start_time;
+            const iter_time = elapsedMs(iter_start);
+            const total_time = elapsedMs(start_time);
 
             // UCI info output at every depth
-            if (self.uci_writer) |writer| {
+            if (self.uci_output != null) {
                 const nps = if (total_time > 0) (self.nodes_searched * 1000) / @as(usize, @intCast(total_time)) else 0;
-                writer.print("info depth {d} seldepth {d} score cp {d} nodes {d} time {d} nps {d} pv {s}\n", .{
+                self.writeUciLine("info depth {d} seldepth {d} score cp {d} nodes {d} time {d} nps {d} pv {f}", .{
                     depth,
                     self.seldepth,
                     score,
@@ -811,13 +826,15 @@ pub const SearchEngine = struct {
                     total_time,
                     nps,
                     best_move,
-                }) catch {};
+                });
             }
 
             // Check time limit
             if (time_limit) |limit| {
+                const total_time_ms: u64 = @intCast(@max(total_time, 0));
+                const iter_time_ms: u64 = @intCast(@max(iter_time, 0));
                 // Stop if we've used most of our time or if next iteration unlikely to finish
-                if (total_time >= limit or total_time + (iter_time * 2) >= limit) {
+                if (total_time_ms >= limit or total_time_ms + (iter_time_ms * 2) >= limit) {
                     break;
                 }
             }
@@ -828,7 +845,7 @@ pub const SearchEngine = struct {
             }
         }
 
-        const elapsed = std.time.milliTimestamp() - start_time;
+        const elapsed = elapsedMs(start_time);
 
         return SearchResult{
             .best_move = best_move,
@@ -880,10 +897,10 @@ pub const SearchEngine = struct {
         var max_time = @min(time_remaining / 5, 30000); // Max 20% of remaining or 30s
 
         // If low on time, be more conservative
-        if (time_remaining < 10000) {
-            max_time = @min(time_remaining * 15 / 100, max_time);
-        } else if (time_remaining < 5000) {
+        if (time_remaining < 5000) {
             max_time = @min(time_remaining / 10, max_time);
+        } else if (time_remaining < 10000) {
+            max_time = @min(time_remaining * 15 / 100, max_time);
         }
 
         const time_for_move = @max(min_time, @min(time_budget, max_time));
@@ -927,18 +944,20 @@ pub const SearchEngine = struct {
 
         const original_alpha = alpha;
 
-        // Check extension - extend search when in check
-        var search_depth = depth;
-        if (in_check and depth < 20) {
-            search_depth += 1;
-        }
+        // Check extension - DISABLED FOR DEBUGGING
+        const search_depth = depth;
+        // if (in_check and depth < 20) {
+        //     search_depth += 1;
+        // }
 
         const is_pv_node = (beta_adj - alpha) > 1;
 
         // Probe transposition table
         var tt_move: ?Move = null;
         if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
-            tt_move = entry.best_move;
+            if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
+                tt_move = entry.best_move;
+            }
 
             // Use TT score for cutoffs (only in non-PV nodes with sufficient depth)
             if (!is_pv_node and entry.depth >= search_depth) {
@@ -946,7 +965,7 @@ pub const SearchEngine = struct {
                 switch (entry.bound) {
                     .exact => return tt_score,
                     .lower_bound => {
-                        if (tt_score >= beta) return tt_score;
+                        if (tt_score >= beta_adj) return tt_score;
                     },
                     .upper_bound => {
                         if (tt_score <= alpha) return tt_score;
@@ -1077,7 +1096,8 @@ pub const SearchEngine = struct {
 
             // Late Move Reductions (LMR)
             if (moves_searched >= LMR_FULL_DEPTH_MOVES and
-                depth >= LMR_MIN_DEPTH and
+                search_depth >= LMR_MIN_DEPTH and
+                !is_pv_node and
                 !in_check and
                 !is_capture and
                 !is_promotion and
@@ -1086,22 +1106,22 @@ pub const SearchEngine = struct {
                 // Calculate reduction based on depth and moves searched
                 var reduction: u32 = 1;
                 if (moves_searched > 6) reduction += 1;
-                if (depth > 6) reduction += 1;
+                if (search_depth > 6) reduction += 1;
                 if (!is_pv_node) reduction += 1;
                 reduction = @min(reduction, LMR_REDUCTION_LIMIT);
-                reduction = @min(reduction, depth - 1);
+                reduction = @min(reduction, search_depth - 1);
 
                 // Search with reduced depth
-                score = -try self.alphaBeta(-alpha - 1, -alpha, depth - 1 - reduction, ply + 1, true);
+                score = -try self.alphaBeta(-alpha - 1, -alpha, search_depth - 1 - reduction, ply + 1, true);
 
                 // If LMR found something good, re-search at full depth
                 if (score > alpha) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, depth - 1, ply + 1, true);
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, search_depth - 1, ply + 1, true);
                 }
             } else {
                 // PVS - search with null window first if not first move
                 if (moves_searched > 0) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, depth - 1, ply + 1, true);
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, search_depth - 1, ply + 1, true);
                 } else {
                     // First move always searched with full window
                     score = alpha + 1; // Force full search
@@ -1110,7 +1130,7 @@ pub const SearchEngine = struct {
 
             // Full window search if PVS failed high or first move
             if (score > alpha) {
-                score = -try self.alphaBeta(-beta, -alpha, depth - 1, ply + 1, true);
+                score = -try self.alphaBeta(-beta, -alpha, search_depth - 1, ply + 1, true);
             }
 
             // Unmake move
@@ -1130,12 +1150,15 @@ pub const SearchEngine = struct {
             if (score > best_score) {
                 best_score = score;
                 best_move = move;
+                if (ply == 0) {
+                    self.root_best_move = move;
+                }
             }
 
             alpha = @max(alpha, score);
 
-            // Beta cutoff
-            if (alpha >= beta) {
+            // Beta cutoff (use beta_adj for consistency with bound determination)
+            if (alpha >= beta_adj) {
                 // Update heuristics for non-captures
                 if (!is_capture and !is_promotion) {
                     self.killer_moves.add(move, ply);
@@ -1166,10 +1189,10 @@ pub const SearchEngine = struct {
             }
         }
 
-        // Store in transposition table (adjust mate scores for storage)
+        // Store in transposition table
         const bound: TTEntryBound = if (best_score <= original_alpha)
             .upper_bound
-        else if (best_score >= beta)
+        else if (best_score >= beta_adj)
             .lower_bound
         else
             .exact;
@@ -1464,5 +1487,13 @@ pub const SearchEngine = struct {
                 scores[best_idx] = tmp_score;
             }
         }
+    }
+
+    fn writeUciLine(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        const file = self.uci_output orelse return;
+        var out_buf: [1024]u8 = undefined;
+        const line = std.fmt.bufPrint(&out_buf, fmt, args) catch return;
+        file.writeAll(line) catch return;
+        file.writeAll("\n") catch return;
     }
 };

@@ -13,14 +13,15 @@ pub const UciParser = struct {
     }
 
     fn parseMoves(self: Self, parser: *std.mem.TokenIterator(u8, .any)) !?[][]const u8 {
-        var moves_list = std.ArrayList([]const u8).init(self.allocator);
+        var moves_list = std.ArrayList([]const u8).empty;
+        defer moves_list.deinit(self.allocator);
         var move = parser.next();
         while (move) |m| {
-            try moves_list.append(m);
+            try moves_list.append(self.allocator, m);
             move = parser.next();
         }
 
-        return moves_list.toOwnedSlice() catch null;
+        return moves_list.toOwnedSlice(self.allocator) catch null;
     }
 
     /// Helper function to parse a u64 parameter from the token iterator
@@ -62,11 +63,11 @@ pub const UciParser = struct {
                     }
                 } else return error.UnexpectedEOF;
 
-                var name_parts = std.ArrayList([]const u8).init(self.allocator);
-                defer name_parts.deinit();
+                var name_parts = std.ArrayList([]const u8).empty;
+                defer name_parts.deinit(self.allocator);
                 var curr = parser.next();
                 while (curr != null and !std.mem.eql(u8, curr.?, "value")) {
-                    try name_parts.append(curr.?);
+                    try name_parts.append(self.allocator, curr.?);
                     curr = parser.next();
                 }
 
@@ -110,12 +111,12 @@ pub const UciParser = struct {
                 }
 
                 // "fen" case
-                var fen_parts = std.ArrayList([]const u8).init(self.allocator);
-                defer fen_parts.deinit();
+                var fen_parts = std.ArrayList([]const u8).empty;
+                defer fen_parts.deinit(self.allocator);
 
                 var curr = parser.next();
                 while (curr != null and !std.mem.eql(u8, curr.?, "moves")) {
-                    try fen_parts.append(curr.?);
+                    try fen_parts.append(self.allocator, curr.?);
                     curr = parser.next();
                 }
 
@@ -164,7 +165,8 @@ pub const UciParser = struct {
 
                 while (parser.next()) |param| {
                     if (std.mem.eql(u8, param, "searchmoves")) {
-                        var moves_list = std.ArrayList([]const u8).init(self.allocator);
+                        var moves_list = std.ArrayList([]const u8).empty;
+                        defer moves_list.deinit(self.allocator);
                         while (parser.peek()) |peeked| {
                             if (std.mem.startsWith(u8, peeked, "ponder") or
                                 std.mem.startsWith(u8, peeked, "wtime") or
@@ -181,9 +183,9 @@ pub const UciParser = struct {
                                 break;
                             }
                             const move = parser.next() orelse break;
-                            try moves_list.append(move);
+                            try moves_list.append(self.allocator, move);
                         }
-                        go_params.search_moves = moves_list.toOwnedSlice() catch &[_][]const u8{};
+                        go_params.search_moves = moves_list.toOwnedSlice(self.allocator) catch &[_][]const u8{};
                     } else if (std.mem.eql(u8, param, "ponder")) {
                         go_params.ponder = true;
                     } else if (std.mem.eql(u8, param, "wtime")) {

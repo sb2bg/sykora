@@ -28,7 +28,7 @@ pub const Options = struct {
 
     pub fn init(allocator: std.mem.Allocator) Options {
         return Options{
-            .items = std.ArrayList(Option).init(allocator),
+            .items = .empty,
             .allocator = allocator,
         };
     }
@@ -39,7 +39,7 @@ pub const Options = struct {
                 self.allocator.free(vars);
             }
         }
-        self.items.deinit();
+        self.items.deinit(self.allocator);
     }
 
     pub fn getOption(self: *Options, name: []const u8) ?*Option {
@@ -52,7 +52,7 @@ pub const Options = struct {
     }
 
     pub fn addOption(self: *Options, option: Option) UciError!void {
-        self.items.append(option) catch return UciError.OutOfMemory;
+        self.items.append(self.allocator, option) catch return UciError.OutOfMemory;
     }
 
     pub fn setOption(self: *Options, name: []const u8, value: []const u8) UciError!bool {

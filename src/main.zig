@@ -17,8 +17,8 @@ fn tryMain() UciError!void {
     const allocator = gpa.allocator();
 
     var uci_interface = try Uci.init(
-        std.io.getStdIn().reader().any(),
-        std.io.getStdOut().writer().any(),
+        std.fs.File.stdin(),
+        std.fs.File.stdout(),
         allocator,
     );
     defer uci_interface.deinit();

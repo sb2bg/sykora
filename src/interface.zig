@@ -20,8 +20,8 @@ const version = "0.1.0";
 
 pub const Uci = struct {
     const Self = @This();
-    stdin: std.io.AnyReader,
-    stdout: std.io.AnyWriter,
+    stdin: std.fs.File,
+    stdout: std.fs.File,
     uci_parser: UciParser,
     debug: bool,
     options: Options,
@@ -32,7 +32,7 @@ pub const Uci = struct {
     best_move: board.Move,
     log_file: ?std.fs.File,
 
-    pub fn init(stdin: std.io.AnyReader, stdout: std.io.AnyWriter, allocator: std.mem.Allocator) !*Self {
+    pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
         const stop_search = std.atomic.Value(bool).init(false);
 
@@ -51,7 +51,7 @@ pub const Uci = struct {
         };
 
         // Add logging option
-        try uci_ptr.options.items.append(Option{
+        try uci_ptr.options.items.append(allocator, Option{
             .name = "Debug Log File",
             .type = .string,
             .default_value = "<empty>",
@@ -78,18 +78,39 @@ pub const Uci = struct {
         self.allocator.destroy(self);
     }
 
+    fn elapsedMs(start: std.time.Instant) i64 {
+        const now = std.time.Instant.now() catch return 0;
+        const ns = now.since(start);
+        return @intCast(@divFloor(ns, std.time.ns_per_ms));
+    }
+
     pub fn run(self: *Self) UciError!void {
-        var buf = std.ArrayList(u8).init(self.allocator);
-        defer buf.deinit();
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(self.allocator);
 
         while (true) {
             defer buf.clearRetainingCapacity();
-            self.stdin.streamUntilDelimiter(buf.writer(), '\n', null) catch return UciError.IOError;
+
+            // Read a single command line from stdin.
+            while (true) {
+                var byte: [1]u8 = undefined;
+                const n = self.stdin.read(&byte) catch return UciError.IOError;
+                if (n == 0) {
+                    // EOF: if partial command exists, process it; otherwise exit cleanly.
+                    if (buf.items.len == 0) return;
+                    break;
+                }
+
+                if (byte[0] == '\n') break;
+                if (byte[0] == '\r') continue;
+                buf.append(self.allocator, byte[0]) catch return UciError.OutOfMemory;
+            }
 
             // Log input
             if (self.log_file) |file| {
-                const writer = file.writer();
-                writer.print("> {s}\n", .{buf.items}) catch return UciError.IOError;
+                file.writeAll("> ") catch return UciError.IOError;
+                file.writeAll(buf.items) catch return UciError.IOError;
+                file.writeAll("\n") catch return UciError.IOError;
             }
 
             const command = self.uci_parser.parseCommand(buf.items) catch |err| {
@@ -113,12 +134,10 @@ pub const Uci = struct {
 
         if (self.search_thread) |thread| {
             // time to see how long it takes to join the thread
-            const start = std.time.milliTimestamp();
+            const start = std.time.Instant.now() catch return UciError.IOError;
             thread.join(); // block until it finishes
             self.search_thread = null;
-            const end = std.time.milliTimestamp();
-
-            const duration = end - start;
+            const duration = elapsedMs(start);
             try self.writeInfoString("search thread joined in {d}ms", .{duration});
         }
     }
@@ -128,7 +147,10 @@ pub const Uci = struct {
             .uci => {
                 try self.writeStdout("id name {s}", .{name});
                 try self.writeStdout("id author {s}", .{author});
-                try self.options.printOptions(self.stdout);
+                var stdout_buf: [1024]u8 = undefined;
+                var stdout_writer = self.stdout.writer(&stdout_buf);
+                try self.options.printOptions(&stdout_writer.interface);
+                stdout_writer.interface.flush() catch return UciError.IOError;
                 try self.writeStdout("uciok", .{});
             },
             .debug => |value| {
@@ -161,13 +183,14 @@ pub const Uci = struct {
                 }
             },
             .display => {
-                try self.writeStdout("{}", .{self.board});
+                try self.writeStdout("{f}", .{self.board});
                 const fen = try self.board.getFenString(self.allocator);
                 defer self.allocator.free(fen);
                 try self.writeStdout("fen {s}", .{fen});
                 try self.writeStdout("key {x}", .{self.board.zobrist_hasher.zobrist_hash});
             },
             .go => |go_opts| {
+                try self.terminateSearch();
                 try self.writeInfoString("{any}", .{go_opts});
                 try self.writeInfoString("starting search thread", .{});
                 self.stop_search.store(false, .seq_cst);
@@ -219,15 +242,15 @@ pub const Uci = struct {
                         try self.writeStdout("Depth | Nodes      | Captures   | E.p. | Castles | Promotions | Checks | Discovery | Double | Checkmates | Time(ms)", .{});
                         try self.writeStdout("------|------------|------------|------|---------|------------|--------|-----------|--------|------------|----------", .{});
 
-                        const start_time = std.time.milliTimestamp();
+                        const start_time = std.time.Instant.now() catch return UciError.IOError;
 
                         // Run perft for each depth up to target depth
                         var d: u32 = 1;
                         while (d <= perft_opts.depth) : (d += 1) {
-                            const depth_start = std.time.milliTimestamp();
+                            const depth_start = std.time.Instant.now() catch return UciError.IOError;
                             var stats = board.Board.PerftStats{};
                             try self.board.perftWithStats(@intCast(d), &stats);
-                            const depth_time = std.time.milliTimestamp() - depth_start;
+                            const depth_time = elapsedMs(depth_start);
 
                             try self.writeStdout("{d: >5} | {d: >10} | {d: >10} | {d: >4} | {d: >7} | {d: >10} | {d: >6} | {d: >9} | {d: >6} | {d: >10} | {d: >8}", .{
                                 d,
@@ -244,7 +267,7 @@ pub const Uci = struct {
                             });
                         }
 
-                        const total_time = std.time.milliTimestamp() - start_time;
+                        const total_time = elapsedMs(start_time);
 
                         try self.writeStdout("", .{});
                         try self.writeStdout("Total time: {d}ms", .{total_time});
@@ -255,9 +278,12 @@ pub const Uci = struct {
                         try self.writeStdout("Perft divide at depth {d}:", .{perft_opts.depth});
                         try self.writeStdout("", .{});
 
-                        const start_time = std.time.milliTimestamp();
-                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), self.stdout);
-                        const total_time = std.time.milliTimestamp() - start_time;
+                        const start_time = std.time.Instant.now() catch return UciError.IOError;
+                        var stdout_buf: [1024]u8 = undefined;
+                        var stdout_writer = self.stdout.writer(&stdout_buf);
+                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), &stdout_writer.interface);
+                        stdout_writer.interface.flush() catch return UciError.IOError;
+                        const total_time = elapsedMs(start_time);
                         const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
 
                         try self.writeStdout("", .{});
@@ -284,7 +310,7 @@ pub const Uci = struct {
         defer search_engine.deinit();
 
         // Set UCI writer for info output at each depth
-        search_engine.uci_writer = self.stdout;
+        search_engine.uci_output = self.stdout;
 
         // Convert UCI go options to search options
         const search_opts = SearchOptions{
@@ -304,28 +330,32 @@ pub const Uci = struct {
         self.best_move = result.best_move;
 
         try self.writeInfoString("search thread stopped", .{});
-        try self.writeStdout("bestmove {s}", .{self.best_move});
+        try self.writeStdout("bestmove {f}", .{self.best_move});
     }
 
-    fn writeStdout(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
-        self.stdout.print(fmt, args) catch return UciError.IOError;
-        self.stdout.writeByte('\n') catch return UciError.IOError;
+    fn writeStdout(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
+        const line = std.fmt.allocPrint(self.allocator, fmt, args) catch return UciError.OutOfMemory;
+        defer self.allocator.free(line);
+
+        self.stdout.writeAll(line) catch return UciError.IOError;
+        self.stdout.writeAll("\n") catch return UciError.IOError;
 
         // Log output
         if (self.log_file) |file| {
-            const writer = file.writer();
-            writer.print(fmt, args) catch return UciError.IOError;
-            writer.writeByte('\n') catch return UciError.IOError;
+            file.writeAll(line) catch return UciError.IOError;
+            file.writeAll("\n") catch return UciError.IOError;
         }
     }
 
-    fn writeInfoString(self: Self, comptime fmt: []const u8, args: anytype) UciError!void {
+    fn writeInfoString(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
         if (!self.debug) {
             return;
         }
 
-        self.stdout.print("info string ", .{}) catch return UciError.IOError;
-        try self.writeStdout(fmt, args);
+        const line = std.fmt.allocPrint(self.allocator, fmt, args) catch return UciError.OutOfMemory;
+        defer self.allocator.free(line);
+
+        try self.writeStdout("info string {s}", .{line});
     }
 
     fn handleLogFileChange(self: *Self, value: []const u8) !void {

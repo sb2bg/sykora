@@ -511,12 +511,7 @@ pub const Move = struct {
         return a.? == b.?;
     }
 
-    pub fn format(
-        self: Self,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const from_sq = self.from();
         const to_sq = self.to();
 
@@ -567,47 +562,27 @@ pub const Board = struct {
     /// Note: This does NOT validate that the move is legal. Use with caution.
     pub fn makeMove(self: *Self, move: Move) UciError!void {
         const color = self.getTurn();
-        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-        const piece_type = self.board.getPieceAt(move.from(), color) orelse return error.InvalidMove;
-        const captured = self.board.getPieceAt(move.to(), opponent_color);
-
-        const prev_castle = self.board.castle_rights;
-        const prev_ep = self.board.en_passant_square;
+        _ = self.board.getPieceAt(move.from(), color) orelse return error.InvalidMove;
 
         // Apply the move unchecked
         self.applyMoveUnchecked(move);
 
-        // Update zobrist hash for the move
-        self.zobrist_hasher.updateHash(
-            move.from(),
-            move.to(),
-            piece_type,
-            color,
-            captured,
-            prev_castle,
-            self.board.castle_rights,
-            prev_ep,
-            self.board.en_passant_square,
-        );
+        // Recompute hash to avoid incremental edge-case bugs (EP/castle/promo).
+        self.zobrist_hasher.hash(self.board);
     }
 
     /// Make a move and update the hash, assuming the move is pseudo-legal.
     /// This is faster than makeMove as it skips some checks.
     pub fn makeMoveUnchecked(self: *Self, move: Move) void {
         const color = self.board.move;
-        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
         // We assume the move is valid so piece must exist
-        const piece_type = self.board.getPieceAt(move.from(), color).?;
-        const captured = self.board.getPieceAt(move.to(), opponent_color);
-
-        const prev_castle = self.board.castle_rights;
-        const prev_ep = self.board.en_passant_square;
+        _ = self.board.getPieceAt(move.from(), color).?;
 
         // Apply the move
         self.applyMoveUnchecked(move);
 
-        // Update zobrist hash
-        self.zobrist_hasher.updateHash(move.from(), move.to(), piece_type, color, captured, prev_castle, self.board.castle_rights, prev_ep, self.board.en_passant_square);
+        // Recompute hash to avoid incremental edge-case bugs (EP/castle/promo).
+        self.zobrist_hasher.hash(self.board);
     }
 
     /// Make a move from string notation (e.g., "e2e4").
@@ -974,7 +949,7 @@ pub const Board = struct {
             total_nodes += nodes;
 
             // Print result
-            writer.print("{s}: {d}\n", .{ move, nodes }) catch return UciError.IOError;
+            writer.print("{f}: {d}\n", .{ move, nodes }) catch return UciError.IOError;
 
             // Restore state
             self.board = old_board;
@@ -2076,12 +2051,7 @@ pub const Board = struct {
         return self.board.move;
     }
 
-    pub fn format(
-        self: Self,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.writeAll("  +---+---+---+---+---+---+---+---+\n");
 
         var rank: i32 = 7;
@@ -2115,9 +2085,8 @@ pub const Board = struct {
     }
 
     fn getFenStringGenericError(self: Self, allocator: std.mem.Allocator) ![]u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
-        const writer = buffer.writer();
+        var buffer = std.ArrayList(u8).empty;
+        defer buffer.deinit(allocator);
 
         for (0..8) |rank| {
             const actual_rank = 7 - rank;
@@ -2130,70 +2099,78 @@ pub const Board = struct {
 
                 if (white_piece) |p| {
                     if (empty_count > 0) {
-                        try writer.print("{}", .{empty_count});
+                        var count_buf: [3]u8 = undefined;
+                        const count_str = try std.fmt.bufPrint(&count_buf, "{d}", .{empty_count});
+                        try buffer.appendSlice(allocator, count_str);
                         empty_count = 0;
                     }
-                    try writer.writeByte(p.getName());
+                    try buffer.append(allocator, p.getName());
                 } else if (black_piece) |p| {
                     if (empty_count > 0) {
-                        try writer.print("{}", .{empty_count});
+                        var count_buf: [3]u8 = undefined;
+                        const count_str = try std.fmt.bufPrint(&count_buf, "{d}", .{empty_count});
+                        try buffer.appendSlice(allocator, count_str);
                         empty_count = 0;
                     }
-                    try writer.writeByte(std.ascii.toLower(p.getName()));
+                    try buffer.append(allocator, std.ascii.toLower(p.getName()));
                 } else {
                     empty_count += 1;
                 }
             }
 
             if (empty_count > 0) {
-                try writer.print("{}", .{empty_count});
+                var count_buf: [3]u8 = undefined;
+                const count_str = try std.fmt.bufPrint(&count_buf, "{d}", .{empty_count});
+                try buffer.appendSlice(allocator, count_str);
             }
 
             if (rank != 7) {
-                try writer.writeByte('/');
+                try buffer.append(allocator, '/');
             }
         }
 
         // Turn
         const turn: u8 = if (self.board.move == .white) 'w' else 'b';
-        try writer.writeByte(' ');
-        try writer.writeByte(turn);
+        try buffer.append(allocator, ' ');
+        try buffer.append(allocator, turn);
 
         // Castling rights
-        try writer.writeByte(' ');
+        try buffer.append(allocator, ' ');
         var any_castle = false;
         if (self.board.castle_rights.white_kingside) {
-            try writer.writeByte('K');
+            try buffer.append(allocator, 'K');
             any_castle = true;
         }
         if (self.board.castle_rights.white_queenside) {
-            try writer.writeByte('Q');
+            try buffer.append(allocator, 'Q');
             any_castle = true;
         }
         if (self.board.castle_rights.black_kingside) {
-            try writer.writeByte('k');
+            try buffer.append(allocator, 'k');
             any_castle = true;
         }
         if (self.board.castle_rights.black_queenside) {
-            try writer.writeByte('q');
+            try buffer.append(allocator, 'q');
             any_castle = true;
         }
-        if (!any_castle) try writer.writeByte('-');
+        if (!any_castle) try buffer.append(allocator, '-');
 
         // En passant
-        try writer.writeByte(' ');
+        try buffer.append(allocator, ' ');
         if (self.board.en_passant_square) |sq| {
             const file = sq % 8 + 'a';
             const rank = sq / 8 + '1';
-            try writer.writeByte(file);
-            try writer.writeByte(rank);
+            try buffer.append(allocator, file);
+            try buffer.append(allocator, rank);
         } else {
-            try writer.writeByte('-');
+            try buffer.append(allocator, '-');
         }
 
         // Halfmove and fullmove
-        try writer.print(" {} {}", .{ self.board.halfmove_clock, self.board.fullmove_number });
-        return buffer.toOwnedSlice();
+        var moves_buf: [32]u8 = undefined;
+        const moves_str = try std.fmt.bufPrint(&moves_buf, " {d} {d}", .{ self.board.halfmove_clock, self.board.fullmove_number });
+        try buffer.appendSlice(allocator, moves_str);
+        return buffer.toOwnedSlice(allocator);
     }
 };
 
