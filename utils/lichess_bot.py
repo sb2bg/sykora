@@ -597,6 +597,10 @@ class BotService:
         def handler(signum: int, _frame: object) -> None:
             LOGGER.info("Received signal %s; shutting down", signum)
             self.stop_event.set()
+            # The incoming-event stream is a blocking iterator, so setting a flag
+            # alone may not unblock immediately. Raise KeyboardInterrupt so the
+            # main thread exits the blocking read and reaches cleanup promptly.
+            raise KeyboardInterrupt
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
