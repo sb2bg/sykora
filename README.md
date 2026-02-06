@@ -45,6 +45,18 @@ To run the test suite:
 zig build test
 ```
 
+To run perft validation:
+
+```bash
+utils/test_perft_suite.sh
+```
+
+To run Strategic Test Suite (STS) EPD files (requires `python-chess`):
+
+```bash
+utils/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-out/bin/sykora --movetime-ms 300
+```
+
 ## Documentation
 
 - `engine-interface.md` - Detailed documentation of the engine interface
