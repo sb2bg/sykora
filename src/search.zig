@@ -35,6 +35,7 @@ pub const MovePicker = struct {
     stage: Stage,
     tt_move: ?Move,
     killer_moves: *const [MAX_KILLER_MOVES]Move,
+    counter_move: ?Move,
     history: *const HistoryTable,
     ply: u32,
 
@@ -57,6 +58,7 @@ pub const MovePicker = struct {
         board_ptr: *Board,
         tt_move: ?Move,
         killer_moves: *const [MAX_KILLER_MOVES]Move,
+        counter_move: ?Move,
         history: *const HistoryTable,
         ply: u32,
     ) Self {
@@ -65,6 +67,7 @@ pub const MovePicker = struct {
             .stage = .tt_move,
             .tt_move = tt_move,
             .killer_moves = killer_moves,
+            .counter_move = counter_move,
             .history = history,
             .ply = ply,
             .captures = MoveList.init(),
@@ -126,9 +129,7 @@ pub const MovePicker = struct {
                     self.stage = .generate_killers;
                 },
                 .generate_killers => {
-                    // Skip killer stage for now; stale killer moves can become
-                    // pseudo-legal in this position and pollute search.
-                    self.stage = .generate_quiets;
+                    self.stage = .killers;
                 },
                 .killers => {
                     while (self.killer_idx < MAX_KILLER_MOVES) {
@@ -232,6 +233,13 @@ pub const MovePicker = struct {
 
         for (self.quiets.slice(), 0..) |move, i| {
             var score = self.history.getForColor(move, self.board_ptr.board.move);
+
+            // Counter move bonus - prioritize moves that refute opponent's last move
+            if (self.counter_move) |cm| {
+                if (cm.from() == move.from() and cm.to() == move.to()) {
+                    score += 100_000;
+                }
+            }
 
             // Add mobility bonus - moves that increase piece mobility
             if (self.board_ptr.board.getPieceAt(move.from(), self.board_ptr.board.move)) |piece_type| {
@@ -804,7 +812,36 @@ pub const SearchEngine = struct {
 
             const iter_start = std.time.Instant.now() catch unreachable;
 
-            const score = try self.alphaBeta(-INF, INF, depth, 0, true);
+            // Aspiration windows - narrow search window around previous score
+            var asp_alpha: i32 = -INF;
+            var asp_beta: i32 = INF;
+            var asp_delta: i32 = 25;
+
+            if (depth >= 4 and !eval.isMateScore(best_score)) {
+                asp_alpha = @max(best_score - asp_delta, -INF);
+                asp_beta = @min(best_score + asp_delta, INF);
+            }
+
+            var score: i32 = -INF;
+
+            // Aspiration window loop - re-search with wider window on fail
+            while (true) {
+                score = try self.alphaBeta(asp_alpha, asp_beta, depth, 0, true);
+
+                if (self.stop_search.load(.seq_cst)) break;
+
+                if (score <= asp_alpha) {
+                    // Fail low - widen alpha
+                    asp_alpha = @max(asp_alpha - asp_delta, -INF);
+                    asp_delta *= 2;
+                } else if (score >= asp_beta) {
+                    // Fail high - widen beta
+                    asp_beta = @min(asp_beta + asp_delta, INF);
+                    asp_delta *= 2;
+                } else {
+                    break; // Score within window
+                }
+            }
 
             // Skip incomplete iterations (stopped mid-search)
             if (self.stop_search.load(.seq_cst)) break;
@@ -944,11 +981,11 @@ pub const SearchEngine = struct {
 
         const original_alpha = alpha;
 
-        // Check extension - DISABLED FOR DEBUGGING
-        const search_depth = depth;
-        // if (in_check and depth < 20) {
-        //     search_depth += 1;
-        // }
+        // Check extension - extend search when in check
+        var search_depth = depth;
+        if (in_check) {
+            search_depth += 1;
+        }
 
         const is_pv_node = (beta_adj - alpha) > 1;
 
@@ -976,6 +1013,15 @@ pub const SearchEngine = struct {
 
         // Static evaluation for pruning decisions
         const static_eval = if (!in_check) eval.evaluate(self.board) else -INF;
+
+        // Reverse futility pruning (static null move pruning)
+        // If static eval is far above beta at shallow depths, prune immediately
+        if (!is_pv_node and !in_check and depth <= 5) {
+            const rfp_margin = 80 * @as(i32, @intCast(depth));
+            if (static_eval - rfp_margin >= beta_adj) {
+                return static_eval;
+            }
+        }
 
         // Razoring - if we're far behind, drop into quiescence
         if (!is_pv_node and !in_check and depth <= 2 and static_eval + RAZOR_MARGIN < alpha) {
@@ -1049,7 +1095,8 @@ pub const SearchEngine = struct {
 
         // Use staged move picker for efficient move ordering
         const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
-        var move_picker = MovePicker.init(self.board, tt_move, killers, &self.history, ply);
+        const counter_move: ?Move = if (self.previous_move) |prev| self.counter_moves.get(prev) else null;
+        var move_picker = MovePicker.init(self.board, tt_move, killers, counter_move, &self.history, ply);
 
         var best_move: ?Move = null;
         var best_score: i32 = -INF;
