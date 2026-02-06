@@ -324,45 +324,189 @@ pub const MovePicker = struct {
     }
 
     fn isPseudoLegal(self: *Self, move: Move) bool {
-        const color = self.board_ptr.board.move;
-        const from_sq = move.from();
-
-        // Check if we have a piece on the from square
-        const piece_type = self.board_ptr.board.getPieceAt(from_sq, color) orelse return false;
-
-        // Basic validation - piece exists and destination isn't our own piece
-        const our_pieces = self.board_ptr.board.getColorBitboard(color);
-        const to_mask = @as(u64, 1) << @intCast(move.to());
-        if ((our_pieces & to_mask) != 0) return false;
-
-        // For promotions, verify it's a pawn on the right rank
-        if (move.promotion() != null) {
-            if (piece_type != .pawn) return false;
-            const from_rank = from_sq / 8;
-            if (color == .white and from_rank != 6) return false;
-            if (color == .black and from_rank != 1) return false;
-        }
-
-        return true;
+        return self.isPseudoLegalImpl(move, false);
     }
 
     fn isPseudoLegalQuiet(self: *Self, move: Move) bool {
+        return self.isPseudoLegalImpl(move, true);
+    }
+
+    fn isPseudoLegalImpl(self: *Self, move: Move, quiet_only: bool) bool {
         const color = self.board_ptr.board.move;
+        const opponent_color = if (color == .white) piece.Color.black else piece.Color.white;
         const from_sq = move.from();
+        const to_sq = move.to();
+
+        if (from_sq == to_sq) return false;
 
         // Check if we have a piece on the from square
         const piece_type = self.board_ptr.board.getPieceAt(from_sq, color) orelse return false;
 
-        // Destination must be empty (quiet move)
+        // Destination can't contain our own piece
+        const our_pieces = self.board_ptr.board.getColorBitboard(color);
+        const opponent_pieces = self.board_ptr.board.getColorBitboard(opponent_color);
         const occupied = self.board_ptr.board.occupied();
-        const to_mask = @as(u64, 1) << @intCast(move.to());
-        if ((occupied & to_mask) != 0) return false;
+        const to_mask = @as(u64, 1) << @intCast(to_sq);
+        if ((our_pieces & to_mask) != 0) return false;
 
-        // Not a promotion (killers shouldn't be promotions in quiet context)
-        if (move.promotion() != null) return false;
+        const promotion = move.promotion();
+        if (promotion) |promo| {
+            // Only proper promotion pieces are legal
+            if (promo == .pawn or promo == .king) return false;
+            if (piece_type != .pawn) return false;
+        }
 
-        _ = piece_type;
-        return true;
+        const is_en_passant = piece_type == .pawn and
+            self.board_ptr.board.en_passant_square == to_sq and
+            (opponent_pieces & to_mask) == 0;
+        const is_capture = (opponent_pieces & to_mask) != 0 or is_en_passant;
+
+        if (quiet_only and (is_capture or promotion != null)) {
+            return false;
+        }
+
+        return switch (piece_type) {
+            .pawn => blk: {
+                const from_file: i16 = @intCast(from_sq % 8);
+                const to_file: i16 = @intCast(to_sq % 8);
+                const from_rank: u8 = from_sq / 8;
+                const to_rank: u8 = to_sq / 8;
+                const file_delta = to_file - from_file;
+                const rank_delta: i16 = @as(i16, @intCast(to_rank)) - @as(i16, @intCast(from_rank));
+
+                const forward_delta: i16 = if (color == .white) 1 else -1;
+                const start_rank: u8 = if (color == .white) 1 else 6;
+                const promotion_rank: u8 = if (color == .white) 7 else 0;
+
+                // Promotions are mandatory when reaching the last rank
+                if ((to_rank == promotion_rank) != (promotion != null)) {
+                    break :blk false;
+                }
+
+                // Forward pawn pushes
+                if (file_delta == 0) {
+                    if (is_capture) break :blk false;
+
+                    // Single push
+                    if (rank_delta == forward_delta) {
+                        break :blk (occupied & to_mask) == 0;
+                    }
+
+                    // Double push from starting rank
+                    if (rank_delta == forward_delta * 2 and from_rank == start_rank) {
+                        const mid_sq: u8 = if (color == .white) from_sq + 8 else from_sq - 8;
+                        const mid_mask = @as(u64, 1) << @intCast(mid_sq);
+                        break :blk (occupied & mid_mask) == 0 and (occupied & to_mask) == 0;
+                    }
+
+                    break :blk false;
+                }
+
+                // Diagonal captures (including en passant)
+                if (@abs(file_delta) == 1 and rank_delta == forward_delta) {
+                    break :blk (opponent_pieces & to_mask) != 0 or self.board_ptr.board.en_passant_square == to_sq;
+                }
+
+                break :blk false;
+            },
+            .knight => {
+                if (promotion != null) return false;
+                return (board.getKnightAttacks(@intCast(from_sq)) & to_mask) != 0;
+            },
+            .bishop => {
+                if (promotion != null) return false;
+                return (board.getBishopAttacks(@intCast(from_sq), occupied) & to_mask) != 0;
+            },
+            .rook => {
+                if (promotion != null) return false;
+                return (board.getRookAttacks(@intCast(from_sq), occupied) & to_mask) != 0;
+            },
+            .queen => {
+                if (promotion != null) return false;
+                return (board.getQueenAttacks(@intCast(from_sq), occupied) & to_mask) != 0;
+            },
+            .king => blk: {
+                if (promotion != null) break :blk false;
+
+                // Regular king moves
+                if ((board.getKingAttacks(@intCast(from_sq)) & to_mask) != 0) {
+                    break :blk true;
+                }
+
+                // Castling (must be quiet by definition)
+                if (is_capture) break :blk false;
+
+                if (color == .white and from_sq == 4) {
+                    if (to_sq == 6) {
+                        if (!self.board_ptr.board.castle_rights.white_kingside) break :blk false;
+                        if ((occupied & ((@as(u64, 1) << 5) | (@as(u64, 1) << 6))) != 0) break :blk false;
+                        if (self.board_ptr.board.getPieceAt(7, .white) != .rook) break :blk false;
+                        if (self.isSquareAttackedBy(4, opponent_color) or self.isSquareAttackedBy(5, opponent_color)) break :blk false;
+                        break :blk true;
+                    }
+                    if (to_sq == 2) {
+                        if (!self.board_ptr.board.castle_rights.white_queenside) break :blk false;
+                        if ((occupied & ((@as(u64, 1) << 1) | (@as(u64, 1) << 2) | (@as(u64, 1) << 3))) != 0) break :blk false;
+                        if (self.board_ptr.board.getPieceAt(0, .white) != .rook) break :blk false;
+                        if (self.isSquareAttackedBy(4, opponent_color) or self.isSquareAttackedBy(3, opponent_color)) break :blk false;
+                        break :blk true;
+                    }
+                } else if (color == .black and from_sq == 60) {
+                    if (to_sq == 62) {
+                        if (!self.board_ptr.board.castle_rights.black_kingside) break :blk false;
+                        if ((occupied & ((@as(u64, 1) << 61) | (@as(u64, 1) << 62))) != 0) break :blk false;
+                        if (self.board_ptr.board.getPieceAt(63, .black) != .rook) break :blk false;
+                        if (self.isSquareAttackedBy(60, opponent_color) or self.isSquareAttackedBy(61, opponent_color)) break :blk false;
+                        break :blk true;
+                    }
+                    if (to_sq == 58) {
+                        if (!self.board_ptr.board.castle_rights.black_queenside) break :blk false;
+                        if ((occupied & ((@as(u64, 1) << 57) | (@as(u64, 1) << 58) | (@as(u64, 1) << 59))) != 0) break :blk false;
+                        if (self.board_ptr.board.getPieceAt(56, .black) != .rook) break :blk false;
+                        if (self.isSquareAttackedBy(60, opponent_color) or self.isSquareAttackedBy(59, opponent_color)) break :blk false;
+                        break :blk true;
+                    }
+                }
+
+                break :blk false;
+            },
+        };
+    }
+
+    fn isSquareAttackedBy(self: *Self, square: u6, attacker_color: piece.Color) bool {
+        const b = self.board_ptr.board;
+        const attacker_bb = b.getColorBitboard(attacker_color);
+        const occupied = b.occupied();
+
+        // Knights
+        if ((board.getKnightAttacks(square) & attacker_bb & b.getKindBitboard(.knight)) != 0) {
+            return true;
+        }
+
+        // Kings
+        if ((board.getKingAttacks(square) & attacker_bb & b.getKindBitboard(.king)) != 0) {
+            return true;
+        }
+
+        // Pawns
+        const defender_color = if (attacker_color == .white) piece.Color.black else piece.Color.white;
+        if ((board.getPawnAttacks(square, defender_color) & attacker_bb & b.getKindBitboard(.pawn)) != 0) {
+            return true;
+        }
+
+        // Diagonal sliders
+        const bishops_queens = attacker_bb & (b.getKindBitboard(.bishop) | b.getKindBitboard(.queen));
+        if (bishops_queens != 0 and (board.getBishopAttacks(square, occupied) & bishops_queens) != 0) {
+            return true;
+        }
+
+        // Orthogonal sliders
+        const rooks_queens = attacker_bb & (b.getKindBitboard(.rook) | b.getKindBitboard(.queen));
+        if (rooks_queens != 0 and (board.getRookAttacks(square, occupied) & rooks_queens) != 0) {
+            return true;
+        }
+
+        return false;
     }
 
     fn isLegal(self: *Self, move: Move) bool {

@@ -2225,7 +2225,10 @@ pub const BitBoard = struct {
     fullmove_number: u16 = 1,
 
     pub fn init() Self {
-        return Self{};
+        return Self{
+            .color_sets = [_]u64{0} ** 2,
+            .kind_sets = [_]u64{0} ** 6,
+        };
     }
 
     pub fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
