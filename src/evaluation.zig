@@ -415,7 +415,7 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
 
     // Penalize king in center in middlegame
     if (king_file >= 2 and king_file <= 5) {
-        score -= 12;
+        score -= 13;
     }
 
     return score;
@@ -459,6 +459,19 @@ fn evaluatePawnStorm(b: BitBoard, color: piece.Color) i32 {
     const enemy_king_file: i32 = @intCast(enemy_king_sq % 8);
     const enemy_king_rank: i32 = @intCast(enemy_king_sq / 8);
 
+    // Only consider true wing king attacks. If king is central, this term is too noisy.
+    if (enemy_king_file >= 3 and enemy_king_file <= 4) return 0;
+
+    const own_king_bb = b.getColorBitboard(color) & b.getKindBitboard(.king);
+    const own_king_file: i32 = if (own_king_bb != 0)
+        @intCast((@as(u8, @intCast(@ctz(own_king_bb)))) % 8)
+    else
+        4;
+
+    const attacking_kingside = enemy_king_file >= 5;
+    const same_side_kings = (attacking_kingside and own_king_file >= 5) or
+        (!attacking_kingside and own_king_file <= 2);
+
     const pawns = b.getColorBitboard(color) & b.getKindBitboard(.pawn);
     var pawn_bb = pawns;
     var score: i32 = 0;
@@ -472,22 +485,28 @@ fn evaluatePawnStorm(b: BitBoard, color: piece.Color) i32 {
         const advancement = if (color == .white) rank - 1 else 6 - rank;
         if (advancement <= 0) continue;
 
-        // Focus storms on the wing where the enemy king lives.
-        const same_wing = (enemy_king_file >= 5 and file >= 5) or
-            (enemy_king_file <= 2 and file <= 2) or
-            @abs(file - enemy_king_file) <= 1;
-        if (!same_wing) continue;
+        // Focus storms strictly on the target wing plus adjacent support file.
+        if (attacking_kingside) {
+            if (file < 4) continue;
+        } else {
+            if (file > 3) continue;
+        }
 
         score += advancement * PAWN_STORM_ADVANCE_BONUS;
 
         const file_dist: i32 = @intCast(@abs(file - enemy_king_file));
         const rank_dist: i32 = @intCast(@abs(rank - enemy_king_rank));
-        if (file_dist <= 1 and rank_dist <= 3) {
+        if (file_dist <= 2 and rank_dist <= 3) {
             const proximity_bonus = PAWN_STORM_NEAR_KING_BONUS - (file_dist * 2 + rank_dist);
             if (proximity_bonus > 0) {
                 score += proximity_bonus;
             }
         }
+    }
+
+    // Same-side king storms are often dubious unless tactically justified.
+    if (same_side_kings) {
+        score = @divTrunc(score, 2);
     }
 
     return score;
@@ -779,9 +798,9 @@ pub fn evaluate(b: *Board) i32 {
     score += evaluateOutposts(board_state, .white);
     score -= evaluateOutposts(board_state, .black);
 
-    // Wing pawn storms (mostly relevant with opposite-side king placement)
-    score += evaluatePawnStorm(board_state, .white);
-    score -= evaluatePawnStorm(board_state, .black);
+    // Wing pawn storms are primarily a middlegame concept
+    const pawn_storm_score = evaluatePawnStorm(board_state, .white) - evaluatePawnStorm(board_state, .black);
+    score += @divTrunc(pawn_storm_score * (256 - phase), 256);
 
     // Bishop pair bonus (more valuable in open positions/endgames)
     const white_bishops = @popCount(board_state.getColorBitboard(.white) & board_state.getKindBitboard(.bishop));
