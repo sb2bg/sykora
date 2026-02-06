@@ -37,6 +37,8 @@ const SAFE_PAWN_ADVANCE_BONUS: i32 = 8;
 const MOP_UP_CENTER_BONUS: i32 = 10;
 const MOP_UP_CORNER_BONUS: i32 = 20;
 const MOP_UP_KING_PROXIMITY_BONUS: i32 = 5;
+const CASTLING_RIGHTS_KINGSIDE_BONUS: i32 = 15;
+const CASTLING_RIGHTS_QUEENSIDE_BONUS: i32 = 8;
 
 // Piece-Square Tables (from white's perspective)
 // Values are in centipawns, will be mirrored for black
@@ -128,8 +130,8 @@ const KNIGHT_MOBILITY = [9]i32{ -30, -15, -5, 0, 5, 10, 15, 18, 20 };
 // Bishop mobility bonus
 const BISHOP_MOBILITY = [14]i32{ -25, -15, -5, 0, 5, 10, 15, 18, 20, 22, 24, 25, 26, 27 };
 
-// Rook mobility bonus
-const ROOK_MOBILITY = [15]i32{ -20, -10, -5, 0, 3, 6, 9, 12, 15, 17, 19, 20, 21, 22, 23 };
+// Rook mobility bonus (softened low-end: trapped rooks in the opening are normal)
+const ROOK_MOBILITY = [15]i32{ -10, -5, 0, 0, 3, 6, 9, 12, 15, 17, 19, 20, 21, 22, 23 };
 
 /// Mirror a square index for black pieces
 inline fn mirrorSquare(square: u8) u8 {
@@ -719,6 +721,15 @@ pub fn evaluate(b: *Board) i32 {
             score -= evaluateMopUp(board_state, .black);
         }
     }
+
+    // Castling rights bonus - penalize losing the right to castle
+    // Scaled by phase so it only matters in the opening/middlegame
+    var castling_score: i32 = 0;
+    if (board_state.castle_rights.white_kingside) castling_score += CASTLING_RIGHTS_KINGSIDE_BONUS;
+    if (board_state.castle_rights.white_queenside) castling_score += CASTLING_RIGHTS_QUEENSIDE_BONUS;
+    if (board_state.castle_rights.black_kingside) castling_score -= CASTLING_RIGHTS_KINGSIDE_BONUS;
+    if (board_state.castle_rights.black_queenside) castling_score -= CASTLING_RIGHTS_QUEENSIDE_BONUS;
+    score += @divTrunc(castling_score * (256 - phase), 256);
 
     // Tempo bonus - small bonus for side to move
     score += if (side_to_move == .white) TEMPO_BONUS else -TEMPO_BONUS;
