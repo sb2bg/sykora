@@ -39,6 +39,10 @@ const MOP_UP_CORNER_BONUS: i32 = 20;
 const MOP_UP_KING_PROXIMITY_BONUS: i32 = 5;
 const CASTLING_RIGHTS_KINGSIDE_BONUS: i32 = 15;
 const CASTLING_RIGHTS_QUEENSIDE_BONUS: i32 = 8;
+const PAWN_STORM_ADVANCE_BONUS: i32 = 3;
+const PAWN_STORM_NEAR_KING_BONUS: i32 = 6;
+const KING_ACTIVITY_CENTER_BONUS: i32 = 5;
+const KING_ACTIVITY_MOBILITY_BONUS: i32 = 2;
 
 // Piece-Square Tables (from white's perspective)
 // Values are in centipawns, will be mirrored for black
@@ -411,7 +415,79 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
 
     // Penalize king in center in middlegame
     if (king_file >= 2 and king_file <= 5) {
-        score -= 20;
+        score -= 12;
+    }
+
+    return score;
+}
+
+/// Evaluate king activity in endgames (centralization + mobility)
+fn evaluateKingActivity(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i32 {
+    if (!is_endgame_phase) return 0;
+
+    const king_bb = b.getColorBitboard(color) & b.getKindBitboard(.king);
+    if (king_bb == 0) return 0;
+
+    const king_sq: u8 = @intCast(@ctz(king_bb));
+    const king_file: i32 = @intCast(king_sq % 8);
+    const king_rank: i32 = @intCast(king_sq / 8);
+
+    // Distance to nearest central square (d4/e4/d5/e5)
+    const d1: i32 = @intCast(@abs(king_file - 3) + @abs(king_rank - 3));
+    const d2: i32 = @intCast(@abs(king_file - 4) + @abs(king_rank - 3));
+    const d3: i32 = @intCast(@abs(king_file - 3) + @abs(king_rank - 4));
+    const d4: i32 = @intCast(@abs(king_file - 4) + @abs(king_rank - 4));
+    const center_dist: i32 = @min(@min(d1, d2), @min(d3, d4));
+
+    var score: i32 = @max(0, 6 - center_dist) * KING_ACTIVITY_CENTER_BONUS;
+
+    // Active endgame kings should have nearby squares available
+    const friendly = b.getColorBitboard(color);
+    const attacks = board.getKingAttacks(@intCast(king_sq)) & ~friendly;
+    score += @as(i32, @intCast(@popCount(attacks))) * KING_ACTIVITY_MOBILITY_BONUS;
+
+    return score;
+}
+
+/// Evaluate wing pawn storms toward the enemy king
+fn evaluatePawnStorm(b: BitBoard, color: piece.Color) i32 {
+    const enemy = if (color == .white) piece.Color.black else piece.Color.white;
+    const enemy_king_bb = b.getColorBitboard(enemy) & b.getKindBitboard(.king);
+    if (enemy_king_bb == 0) return 0;
+
+    const enemy_king_sq: u8 = @intCast(@ctz(enemy_king_bb));
+    const enemy_king_file: i32 = @intCast(enemy_king_sq % 8);
+    const enemy_king_rank: i32 = @intCast(enemy_king_sq / 8);
+
+    const pawns = b.getColorBitboard(color) & b.getKindBitboard(.pawn);
+    var pawn_bb = pawns;
+    var score: i32 = 0;
+
+    while (pawn_bb != 0) {
+        const sq: u8 = @intCast(@ctz(pawn_bb));
+        pawn_bb &= pawn_bb - 1;
+
+        const file: i32 = @intCast(sq % 8);
+        const rank: i32 = @intCast(sq / 8);
+        const advancement = if (color == .white) rank - 1 else 6 - rank;
+        if (advancement <= 0) continue;
+
+        // Focus storms on the wing where the enemy king lives.
+        const same_wing = (enemy_king_file >= 5 and file >= 5) or
+            (enemy_king_file <= 2 and file <= 2) or
+            @abs(file - enemy_king_file) <= 1;
+        if (!same_wing) continue;
+
+        score += advancement * PAWN_STORM_ADVANCE_BONUS;
+
+        const file_dist: i32 = @intCast(@abs(file - enemy_king_file));
+        const rank_dist: i32 = @intCast(@abs(rank - enemy_king_rank));
+        if (file_dist <= 1 and rank_dist <= 3) {
+            const proximity_bonus = PAWN_STORM_NEAR_KING_BONUS - (file_dist * 2 + rank_dist);
+            if (proximity_bonus > 0) {
+                score += proximity_bonus;
+            }
+        }
     }
 
     return score;
@@ -703,6 +779,10 @@ pub fn evaluate(b: *Board) i32 {
     score += evaluateOutposts(board_state, .white);
     score -= evaluateOutposts(board_state, .black);
 
+    // Wing pawn storms (mostly relevant with opposite-side king placement)
+    score += evaluatePawnStorm(board_state, .white);
+    score -= evaluatePawnStorm(board_state, .black);
+
     // Bishop pair bonus (more valuable in open positions/endgames)
     const white_bishops = @popCount(board_state.getColorBitboard(.white) & board_state.getKindBitboard(.bishop));
     const black_bishops = @popCount(board_state.getColorBitboard(.black) & board_state.getKindBitboard(.bishop));
@@ -721,6 +801,10 @@ pub fn evaluate(b: *Board) i32 {
             score -= evaluateMopUp(board_state, .black);
         }
     }
+
+    // Active king play matters in endgames
+    score += evaluateKingActivity(board_state, .white, is_endgame_phase);
+    score -= evaluateKingActivity(board_state, .black, is_endgame_phase);
 
     // Castling rights bonus - penalize losing the right to castle
     // Scaled by phase so it only matters in the opening/middlegame
