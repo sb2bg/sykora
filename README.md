@@ -101,6 +101,11 @@ For long-term version tracking, use the history ledger:
 ~/.pyenv/shims/python utils/history.py list-engines
 ~/.pyenv/shims/python utils/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
 ~/.pyenv/shims/python utils/history.py ratings --plot
+~/.pyenv/shims/python utils/history.py sts <engine_id> --movetime-ms 100
+
+# Auto pit strongest vs weakest and render a network graph
+~/.pyenv/shims/python utils/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
+~/.pyenv/shims/python utils/history.py network --top-n 12 --min-games 10 --min-edge-games 2
 ```
 
 See `history/README.md` for folder schema and full workflow.

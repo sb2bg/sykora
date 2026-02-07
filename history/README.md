@@ -6,6 +6,7 @@ It stores three things:
 - immutable engine snapshots (`engines/`)
 - archived head-to-head matches (`matches/`)
 - computed rating/graph artifacts (`ratings/`)
+- archived STS evaluations (`sts/`)
 
 ## Layout
 
@@ -19,8 +20,12 @@ It stores three things:
 - `ratings/edges.csv`: pairwise edge data (for network graphs)
 - `ratings/timeline.csv`: cumulative rating timeline after each match
 - `ratings/timeline.png`: optional chart (if matplotlib installed)
+- `sts/<engine_id>/<timestamp>.json`: immutable STS run payload for that snapshot
+- `sts/<engine_id>/latest.json`: latest STS run for that snapshot
+- `sts/latest.csv`: latest STS totals for all snapshots (ranked by score%)
 - `index/engines.jsonl`: append-only engine snapshot log
 - `index/matches.jsonl`: append-only match log
+- `index/sts_runs.jsonl`: append-only STS run log
 
 ## Workflow
 
@@ -49,10 +54,34 @@ Run a tracked match:
 ~/.pyenv/shims/python utils/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
 ```
 
+Auto-play strongest vs weakest (by current ratings):
+
+```bash
+~/.pyenv/shims/python utils/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
+```
+
 Recompute all ratings and export graph data:
 
 ```bash
 ~/.pyenv/shims/python utils/history.py ratings --plot
+```
+
+Render a version network map (nodes=engines, edges=matchups):
+
+```bash
+~/.pyenv/shims/python utils/history.py network --top-n 12 --min-games 10 --min-edge-games 2
+```
+
+Run and persist STS for one snapshot:
+
+```bash
+~/.pyenv/shims/python utils/history.py sts <engine_id> --movetime-ms 100
+```
+
+Backfill STS for all snapshots:
+
+```bash
+~/.pyenv/shims/python utils/history.py sts --all --movetime-ms 100 --continue-on-error
 ```
 
 One-command loop (build + STS gate + self-play gate + promotion):

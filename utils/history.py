@@ -158,6 +158,7 @@ def ensure_layout(root: Path) -> None:
     (root / "engines").mkdir(parents=True, exist_ok=True)
     (root / "matches").mkdir(parents=True, exist_ok=True)
     (root / "ratings").mkdir(parents=True, exist_ok=True)
+    (root / "sts").mkdir(parents=True, exist_ok=True)
     (root / "index").mkdir(parents=True, exist_ok=True)
 
 
@@ -541,7 +542,172 @@ def write_ratings_outputs(root: Path, matches: List[MatchRecord]) -> dict:
     return summary
 
 
+def load_ratings_summary(root: Path, recompute: bool = True) -> dict:
+    if recompute:
+        matches = load_matches(root)
+        if not matches:
+            raise RuntimeError("No matches found. Run 'history.py match' first.")
+        return write_ratings_outputs(root, matches)
+
+    latest_path = root / "ratings" / "latest.json"
+    if latest_path.is_file():
+        return json.loads(latest_path.read_text())
+
+    matches = load_matches(root)
+    if not matches:
+        raise RuntimeError("No matches found. Run 'history.py match' first.")
+    return write_ratings_outputs(root, matches)
+
+
+def filter_leaderboard(leaderboard: List[dict], min_games: int) -> List[dict]:
+    return [row for row in leaderboard if int(row.get("games", 0)) >= min_games]
+
+
+def engine_label(root: Path, engine_id: str) -> str:
+    meta_path = root / "engines" / engine_id / "metadata.json"
+    try:
+        data = json.loads(meta_path.read_text())
+        label = str(data.get("label", "")).strip()
+        if label:
+            return label
+    except Exception:
+        pass
+    return engine_id
+
+
+def short_engine_name(root: Path, engine_id: str, max_len: int = 24) -> str:
+    label = engine_label(root, engine_id)
+    if len(label) <= max_len:
+        return label
+    return label[: max_len - 1] + "…"
+
+
+def parse_sts_summary(output: str) -> dict:
+    row_re = re.compile(
+        r"^([A-Za-z0-9_.-]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([0-9.]+)%\s+([0-9.]+)%\s+([0-9.]+)%\s*$"
+    )
+
+    themes: List[dict] = []
+    total: Optional[dict] = None
+
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("-"):
+            continue
+
+        m = row_re.match(line)
+        if not m:
+            continue
+
+        name = m.group(1)
+        row = {
+            "theme": name,
+            "positions": int(m.group(2)),
+            "score": int(m.group(3)),
+            "max_score": int(m.group(4)),
+            "score_pct": float(m.group(5)),
+            "top_pct": float(m.group(6)),
+            "bm_pct": float(m.group(7)),
+        }
+        if name == "TOTAL":
+            total = row
+        else:
+            themes.append(row)
+
+    if total is None:
+        raise RuntimeError("Could not parse TOTAL row from STS output.")
+
+    return {
+        "total": total,
+        "themes": themes,
+    }
+
+
+def write_sts_latest_table(root: Path) -> Path:
+    latest_rows: List[dict] = []
+
+    for latest_path in sorted((root / "sts").glob("*/latest.json")):
+        try:
+            data = json.loads(latest_path.read_text())
+        except Exception:
+            continue
+
+        summary = data.get("summary", {})
+        total = summary.get("total", {})
+        engine_id = str(data.get("engine_id", "")).strip()
+        if not engine_id:
+            continue
+
+        latest_rows.append(
+            {
+                "engine_id": engine_id,
+                "label": engine_label(root, engine_id),
+                "generated_at_utc": data.get("generated_at_utc", ""),
+                "positions": int(total.get("positions", 0)),
+                "score": int(total.get("score", 0)),
+                "max_score": int(total.get("max_score", 0)),
+                "score_pct": float(total.get("score_pct", 0.0)),
+                "top_pct": float(total.get("top_pct", 0.0)),
+                "bm_pct": float(total.get("bm_pct", 0.0)),
+                "movetime_ms": data.get("settings", {}).get("movetime_ms"),
+                "depth": data.get("settings", {}).get("depth"),
+                "themes_count": len(summary.get("themes", [])),
+            }
+        )
+
+    latest_rows.sort(key=lambda row: row["score_pct"], reverse=True)
+
+    csv_path = root / "sts" / "latest.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "rank",
+                "engine_id",
+                "label",
+                "generated_at_utc",
+                "positions",
+                "score",
+                "max_score",
+                "score_pct",
+                "top_pct",
+                "bm_pct",
+                "movetime_ms",
+                "depth",
+                "themes_count",
+            ]
+        )
+        for idx, row in enumerate(latest_rows, start=1):
+            writer.writerow(
+                [
+                    idx,
+                    row["engine_id"],
+                    row["label"],
+                    row["generated_at_utc"],
+                    row["positions"],
+                    row["score"],
+                    row["max_score"],
+                    f"{row['score_pct']:.2f}",
+                    f"{row['top_pct']:.2f}",
+                    f"{row['bm_pct']:.2f}",
+                    row["movetime_ms"],
+                    row["depth"],
+                    row["themes_count"],
+                ]
+            )
+
+    return csv_path
+
+
 def maybe_plot_timeline(root: Path, top_n: int = 8) -> Optional[Path]:
+    xdg_cache_dir = root / ".cache"
+    xdg_cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("XDG_CACHE_HOME", str(xdg_cache_dir))
+
+    mpl_config_dir = root / ".mplconfig"
+    mpl_config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
+
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except Exception:
@@ -594,6 +760,100 @@ def maybe_plot_timeline(root: Path, top_n: int = 8) -> Optional[Path]:
     return out_path
 
 
+def maybe_plot_network(
+    root: Path,
+    leaderboard: List[dict],
+    top_n: int,
+    min_edge_games: int,
+    output_name: str,
+) -> Optional[Path]:
+    xdg_cache_dir = root / ".cache"
+    xdg_cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("XDG_CACHE_HOME", str(xdg_cache_dir))
+
+    mpl_config_dir = root / ".mplconfig"
+    mpl_config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
+
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception:
+        return None
+
+    nodes = leaderboard[: max(0, top_n)]
+    if not nodes:
+        return None
+
+    node_ids = [str(row["engine_id"]) for row in nodes]
+    node_set = set(node_ids)
+    rating_map = {str(row["engine_id"]): float(row["rating"]) for row in nodes}
+    games_map = {str(row["engine_id"]): int(row["games"]) for row in nodes}
+
+    edge_rows: List[Tuple[str, str, int, float]] = []
+    edges_csv = root / "ratings" / "edges.csv"
+    if edges_csv.is_file():
+        with edges_csv.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                a = str(row["engine_a"])
+                b = str(row["engine_b"])
+                if a not in node_set or b not in node_set:
+                    continue
+                games = int(row["games"])
+                if games < min_edge_games:
+                    continue
+                elo_ab = float(row["elo_a_minus_b"])
+                edge_rows.append((a, b, games, elo_ab))
+
+    n = len(node_ids)
+    positions: Dict[str, Tuple[float, float]] = {}
+    for i, engine_id in enumerate(node_ids):
+        angle = (2.0 * math.pi * i) / n
+        positions[engine_id] = (math.cos(angle), math.sin(angle))
+
+    fig, ax = plt.subplots(figsize=(11, 8))
+
+    for a, b, games, elo_ab in edge_rows:
+        x1, y1 = positions[a]
+        x2, y2 = positions[b]
+        width = 0.4 + min(4.0, games / 16.0)
+        alpha = min(0.85, 0.20 + games / 80.0)
+        color = "#2ca02c" if elo_ab >= 0 else "#d62728"
+        ax.plot([x1, x2], [y1, y2], color=color, linewidth=width, alpha=alpha, zorder=1)
+
+    xs: List[float] = []
+    ys: List[float] = []
+    colors: List[float] = []
+    sizes: List[float] = []
+    for engine_id in node_ids:
+        x, y = positions[engine_id]
+        xs.append(x)
+        ys.append(y)
+        colors.append(rating_map[engine_id])
+        sizes.append(180.0 + min(1200.0, games_map[engine_id] * 8.0))
+
+    scatter = ax.scatter(xs, ys, c=colors, s=sizes, cmap="coolwarm", edgecolors="black", linewidths=0.8, zorder=2)
+
+    for engine_id in node_ids:
+        x, y = positions[engine_id]
+        label = short_engine_name(root, engine_id, max_len=22)
+        elo_txt = f"{rating_map[engine_id]:+.0f}"
+        ax.text(x, y, f"{label}\n{elo_txt}", fontsize=8, ha="center", va="center", zorder=3)
+
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Relative Elo")
+
+    ax.set_title("Sykora Version Network (nodes=engines, edges=matches)")
+    ax.axis("off")
+    ax.set_aspect("equal", adjustable="box")
+
+    out_path = root / "ratings" / output_name
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+    return out_path
+
+
 def cmd_match(args: argparse.Namespace) -> int:
     root = Path(args.history_root)
     ensure_layout(root)
@@ -602,6 +862,67 @@ def cmd_match(args: argparse.Namespace) -> int:
         root=root,
         engine1_id=args.engine1_id,
         engine2_id=args.engine2_id,
+        args=args,
+    )
+
+    print(f"Match stored: {match_id}")
+    print(f"  summary: {summary_path}")
+    print(f"  metadata: {meta_path}")
+
+    if not args.no_rate:
+        matches = load_matches(root)
+        rating_summary = write_ratings_outputs(root, matches)
+        if args.plot:
+            plot_path = maybe_plot_timeline(root)
+            if plot_path is not None:
+                print(f"  timeline plot: {plot_path}")
+            else:
+                print("  timeline plot: skipped (matplotlib not installed)")
+
+        print(
+            f"  ratings updated: {root / 'ratings' / 'latest.json'}"
+            f" ({rating_summary['engine_count']} engines, {rating_summary['match_count']} matches)"
+        )
+
+    return code
+
+
+def cmd_match_extremes(args: argparse.Namespace) -> int:
+    root = Path(args.history_root)
+    ensure_layout(root)
+
+    summary = load_ratings_summary(root, recompute=True)
+    leaderboard = filter_leaderboard(summary.get("leaderboard", []), args.min_games)
+    if len(leaderboard) < 2:
+        raise RuntimeError(
+            f"Need at least 2 engines with >= {args.min_games} games; found {len(leaderboard)}."
+        )
+
+    strong_idx = args.strong_rank - 1
+    weak_idx = len(leaderboard) - args.weak_rank
+    if strong_idx < 0 or strong_idx >= len(leaderboard):
+        raise RuntimeError(f"strong-rank {args.strong_rank} out of range (1..{len(leaderboard)})")
+    if weak_idx < 0 or weak_idx >= len(leaderboard):
+        raise RuntimeError(f"weak-rank {args.weak_rank} out of range (1..{len(leaderboard)})")
+
+    strong = leaderboard[strong_idx]
+    weak = leaderboard[weak_idx]
+
+    engine1_id = str(strong["engine_id"])
+    engine2_id = str(weak["engine_id"])
+    if engine1_id == engine2_id:
+        raise RuntimeError("Selected strongest and weakest are the same engine; adjust ranks/min-games.")
+
+    print(
+        "Selected extremes:"
+        f"\n  strongest #{args.strong_rank}: {engine1_id} (Elo {float(strong['rating']):+.1f}, games={int(strong['games'])})"
+        f"\n  weakest  #{args.weak_rank}: {engine2_id} (Elo {float(weak['rating']):+.1f}, games={int(weak['games'])})"
+    )
+
+    code, summary_path, meta_path, match_id = run_selfplay_for_match(
+        root=root,
+        engine1_id=engine1_id,
+        engine2_id=engine2_id,
         args=args,
     )
 
@@ -657,6 +978,187 @@ def cmd_ratings(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_network(args: argparse.Namespace) -> int:
+    root = Path(args.history_root)
+    ensure_layout(root)
+
+    summary = load_ratings_summary(root, recompute=not args.no_recompute)
+    leaderboard = filter_leaderboard(summary.get("leaderboard", []), args.min_games)
+    if not leaderboard:
+        raise RuntimeError(
+            f"No engines satisfy min-games={args.min_games}. Lower --min-games or run more matches."
+        )
+
+    out_path = maybe_plot_network(
+        root=root,
+        leaderboard=leaderboard,
+        top_n=args.top_n,
+        min_edge_games=args.min_edge_games,
+        output_name=args.output_name,
+    )
+
+    if out_path is None:
+        print("Network plot skipped (matplotlib not installed).")
+        print(f"Graph-ready edges CSV: {root / 'ratings' / 'edges.csv'}")
+        return 0
+
+    print(f"Network plot written: {out_path}")
+    print(f"Included nodes: {min(args.top_n, len(leaderboard))} (min-games={args.min_games})")
+    print(f"Edge filter: min-edge-games={args.min_edge_games}")
+    return 0
+
+
+def cmd_sts(args: argparse.Namespace) -> int:
+    root = Path(args.history_root)
+    ensure_layout(root)
+
+    if args.depth is None and args.movetime_ms <= 0:
+        raise RuntimeError("--movetime-ms must be > 0 when --depth is not set")
+    if args.depth is not None and args.depth <= 0:
+        raise RuntimeError("--depth must be > 0")
+    if args.max_positions < 0:
+        raise RuntimeError("--max-positions must be >= 0")
+
+    engine_ids: List[str] = []
+    if args.all:
+        for meta_path in sorted((root / "engines").glob("*/metadata.json")):
+            try:
+                data = json.loads(meta_path.read_text())
+                engine_id = str(data.get("engine_id", "")).strip()
+            except Exception:
+                continue
+            if engine_id:
+                engine_ids.append(engine_id)
+    else:
+        if not args.engine_id:
+            raise RuntimeError("Provide <engine_id> or use --all.")
+        engine_ids = [args.engine_id]
+
+    if not engine_ids:
+        raise RuntimeError("No engine snapshots found for STS run.")
+
+    epd_dir = Path(args.epd_dir)
+    if not epd_dir.is_dir():
+        raise RuntimeError(f"EPD directory not found: {epd_dir}")
+
+    py = args.python or sys.executable
+    had_failures = False
+
+    for engine_id in engine_ids:
+        meta = load_engine_metadata(root, engine_id)
+        engine_path = root / "engines" / engine_id / meta["binary"]["path"]
+        if not engine_path.is_file():
+            raise RuntimeError(f"Snapshot binary missing for {engine_id}: {engine_path}")
+
+        cmd = [
+            py,
+            str(REPO_ROOT / "utils" / "sts.py"),
+            "--engine",
+            str(engine_path),
+            "--epd",
+            str(epd_dir),
+            "--pattern",
+            args.pattern,
+            "--show",
+            args.show,
+        ]
+
+        if args.depth is not None:
+            cmd.extend(["--depth", str(args.depth)])
+        else:
+            cmd.extend(["--movetime-ms", str(args.movetime_ms)])
+
+        if args.max_positions and args.max_positions > 0:
+            cmd.extend(["--max-positions", str(args.max_positions)])
+        if args.threads is not None:
+            cmd.extend(["--threads", str(args.threads)])
+        if args.hash_mb is not None:
+            cmd.extend(["--hash-mb", str(args.hash_mb)])
+        if args.bm_score is not None:
+            cmd.extend(["--bm-score", str(args.bm_score)])
+
+        proc = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+        timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
+        run_dir = root / "sts" / engine_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        run_path = run_dir / f"{timestamp}.json"
+        latest_path = run_dir / "latest.json"
+
+        run_payload: dict = {
+            "engine_id": engine_id,
+            "generated_at_utc": utc_now_iso(),
+            "engine_label": engine_label(root, engine_id),
+            "settings": {
+                "epd_dir": str(epd_dir),
+                "pattern": args.pattern,
+                "show": args.show,
+                "movetime_ms": args.movetime_ms if args.depth is None else None,
+                "depth": args.depth,
+                "max_positions": args.max_positions,
+                "threads": args.threads,
+                "hash_mb": args.hash_mb,
+                "bm_score": args.bm_score,
+                "python": py,
+            },
+            "summary": None,
+            "exit_code": proc.returncode,
+            "raw_output": proc.stdout,
+        }
+
+        ok = proc.returncode == 0
+        if ok:
+            try:
+                run_payload["summary"] = parse_sts_summary(proc.stdout)
+            except Exception as exc:
+                ok = False
+                run_payload["parse_error"] = str(exc)
+
+        if not ok:
+            had_failures = True
+            run_payload["status"] = "failed"
+        else:
+            run_payload["status"] = "ok"
+
+        write_json(run_path, run_payload)
+        write_json(latest_path, run_payload)
+
+        append_jsonl(
+            root / "index" / "sts_runs.jsonl",
+            {
+                "engine_id": engine_id,
+                "generated_at_utc": run_payload["generated_at_utc"],
+                "status": run_payload["status"],
+                "summary_relpath": str(run_path.relative_to(root)),
+                "settings": run_payload["settings"],
+            },
+        )
+
+        if ok:
+            total = run_payload["summary"]["total"]
+            print(
+                f"STS saved: {engine_id} | {total['score']}/{total['max_score']}"
+                f" ({total['score_pct']:.2f}%) -> {run_path}"
+            )
+        else:
+            print(f"STS failed for {engine_id}; log saved to {run_path}")
+            if not args.continue_on_error:
+                csv_path = write_sts_latest_table(root)
+                print(f"STS table: {csv_path}")
+                return 1
+
+    csv_path = write_sts_latest_table(root)
+    print(f"STS table: {csv_path}")
+    return 1 if had_failures else 0
+
+
 def cmd_list_engines(args: argparse.Namespace) -> int:
     root = Path(args.history_root)
     ensure_layout(root)
@@ -694,6 +1196,24 @@ def cmd_list_matches(args: argparse.Namespace) -> int:
     return 0
 
 
+def add_match_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--games", type=int, default=80, help="Total games")
+    parser.add_argument("--movetime-ms", type=int, default=200, help="Per-move time in ms")
+    parser.add_argument("--depth", type=int, default=None, help="Optional fixed depth")
+    parser.add_argument("--openings", default="default", help="Opening source for selfplay.py")
+    parser.add_argument("--shuffle-openings", action="store_true", help="Shuffle opening order")
+    parser.add_argument("--seed", type=int, default=1, help="Opening shuffle seed")
+    parser.add_argument("--max-plies", type=int, default=300, help="Move-limit draw adjudication")
+    parser.add_argument("--threads", type=int, default=None, help="UCI Threads for both engines")
+    parser.add_argument("--hash-mb", type=int, default=None, help="UCI Hash MB for both engines")
+    parser.add_argument("--engine1-opt", action="append", default=[], help="Extra UCI option for engine1 (Key=Value)")
+    parser.add_argument("--engine2-opt", action="append", default=[], help="Extra UCI option for engine2 (Key=Value)")
+    parser.add_argument("--python", default=None, help="Python interpreter for selfplay.py (default: current interpreter)")
+    parser.add_argument("--no-rate", action="store_true", help="Skip automatic ratings recompute")
+    parser.add_argument("--plot", action="store_true", help="Attempt timeline plot after ratings update")
+    parser.add_argument("--quiet", action="store_true", help="Pass --quiet to selfplay runner")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Manage historical Sykora engine snapshots, matches, and ratings.",
@@ -719,27 +1239,61 @@ def build_parser() -> argparse.ArgumentParser:
     p_match = sub.add_parser("match", help="Run and archive a match between two snapshot IDs")
     p_match.add_argument("engine1_id", help="Snapshot ID for baseline engine")
     p_match.add_argument("engine2_id", help="Snapshot ID for candidate engine")
-
-    p_match.add_argument("--games", type=int, default=80, help="Total games")
-    p_match.add_argument("--movetime-ms", type=int, default=200, help="Per-move time in ms")
-    p_match.add_argument("--depth", type=int, default=None, help="Optional fixed depth")
-    p_match.add_argument("--openings", default="default", help="Opening source for selfplay.py")
-    p_match.add_argument("--shuffle-openings", action="store_true", help="Shuffle opening order")
-    p_match.add_argument("--seed", type=int, default=1, help="Opening shuffle seed")
-    p_match.add_argument("--max-plies", type=int, default=300, help="Move-limit draw adjudication")
-    p_match.add_argument("--threads", type=int, default=None, help="UCI Threads for both engines")
-    p_match.add_argument("--hash-mb", type=int, default=None, help="UCI Hash MB for both engines")
-    p_match.add_argument("--engine1-opt", action="append", default=[], help="Extra UCI option for engine1 (Key=Value)")
-    p_match.add_argument("--engine2-opt", action="append", default=[], help="Extra UCI option for engine2 (Key=Value)")
-    p_match.add_argument("--python", default=None, help="Python interpreter for selfplay.py (default: current interpreter)")
-    p_match.add_argument("--no-rate", action="store_true", help="Skip automatic ratings recompute")
-    p_match.add_argument("--plot", action="store_true", help="Attempt timeline plot after ratings update")
-    p_match.add_argument("--quiet", action="store_true", help="Pass --quiet to selfplay runner")
+    add_match_options(p_match)
     p_match.set_defaults(func=cmd_match)
+
+    p_match_ext = sub.add_parser(
+        "match-extremes",
+        help="Auto-pit strongest vs weakest engine by current ratings.",
+    )
+    p_match_ext.add_argument(
+        "--min-games",
+        type=int,
+        default=20,
+        help="Only consider engines with at least this many games (default: 20)",
+    )
+    p_match_ext.add_argument(
+        "--strong-rank",
+        type=int,
+        default=1,
+        help="Pick Nth strongest among filtered engines (default: 1)",
+    )
+    p_match_ext.add_argument(
+        "--weak-rank",
+        type=int,
+        default=1,
+        help="Pick Nth weakest among filtered engines (default: 1)",
+    )
+    add_match_options(p_match_ext)
+    p_match_ext.set_defaults(func=cmd_match_extremes)
 
     p_ratings = sub.add_parser("ratings", help="Recompute ratings from archived matches")
     p_ratings.add_argument("--plot", action="store_true", help="Attempt timeline plot generation")
     p_ratings.set_defaults(func=cmd_ratings)
+
+    p_sts = sub.add_parser("sts", help="Run and archive STS results for one or all snapshots")
+    p_sts.add_argument("engine_id", nargs="?", default=None, help="Snapshot ID to evaluate")
+    p_sts.add_argument("--all", action="store_true", help="Run STS for all snapshot IDs")
+    p_sts.add_argument("--epd-dir", default=str(REPO_ROOT / "epd"), help="Directory containing STS EPD files")
+    p_sts.add_argument("--pattern", default="STS*.epd", help="Glob pattern inside --epd-dir (default: STS*.epd)")
+    p_sts.add_argument("--max-positions", type=int, default=0, help="Optional global cap on positions (0 = no cap)")
+    p_sts.add_argument("--movetime-ms", type=int, default=100, help="Per-position movetime in ms (ignored with --depth)")
+    p_sts.add_argument("--depth", type=int, default=None, help="Fixed search depth per position")
+    p_sts.add_argument("--threads", type=int, default=None, help="UCI Threads option")
+    p_sts.add_argument("--hash-mb", type=int, default=None, help="UCI Hash option")
+    p_sts.add_argument("--bm-score", type=int, default=10, help="Fallback BM score when no weighted STS metadata")
+    p_sts.add_argument("--show", choices=("none", "misses", "all"), default="none", help="Per-position output style")
+    p_sts.add_argument("--python", default=None, help="Python interpreter for sts.py")
+    p_sts.add_argument("--continue-on-error", action="store_true", help="Continue other engines if one STS run fails")
+    p_sts.set_defaults(func=cmd_sts)
+
+    p_network = sub.add_parser("network", help="Render a version network graph from archived ratings/matches")
+    p_network.add_argument("--top-n", type=int, default=12, help="Plot top N engines by rating (default: 12)")
+    p_network.add_argument("--min-games", type=int, default=10, help="Minimum games per engine to include (default: 10)")
+    p_network.add_argument("--min-edge-games", type=int, default=2, help="Minimum games per pair edge (default: 2)")
+    p_network.add_argument("--output-name", default="network.png", help="Output filename under history/ratings/")
+    p_network.add_argument("--no-recompute", action="store_true", help="Use existing ratings/latest.json if present")
+    p_network.set_defaults(func=cmd_network)
 
     p_list_engines = sub.add_parser("list-engines", help="List snapshot IDs and metadata")
     p_list_engines.set_defaults(func=cmd_list_engines)
