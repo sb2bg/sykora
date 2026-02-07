@@ -30,6 +30,7 @@ const BISHOP_OUTPOST_BONUS: i32 = 15;
 const TEMPO_BONUS: i32 = 10;
 const KING_PAWN_SHIELD_BONUS: i32 = 12;
 const KING_OPEN_FILE_PENALTY: i32 = 25;
+const KING_CENTER_MIDDLEGAME_PENALTY: i32 = 13;
 const PAWN_CHAIN_BONUS: i32 = 5;
 const PROTECTED_PASSED_PAWN_BONUS: i32 = 20;
 const CONNECTED_PASSED_PAWN_BONUS: i32 = 25;
@@ -37,10 +38,10 @@ const SAFE_PAWN_ADVANCE_BONUS: i32 = 8;
 const MOP_UP_CENTER_BONUS: i32 = 10;
 const MOP_UP_CORNER_BONUS: i32 = 20;
 const MOP_UP_KING_PROXIMITY_BONUS: i32 = 5;
-const CASTLING_RIGHTS_KINGSIDE_BONUS: i32 = 15;
-const CASTLING_RIGHTS_QUEENSIDE_BONUS: i32 = 8;
-const PAWN_STORM_ADVANCE_BONUS: i32 = 3;
-const PAWN_STORM_NEAR_KING_BONUS: i32 = 6;
+const CASTLING_RIGHTS_KINGSIDE_BONUS: i32 = 28;
+const CASTLING_RIGHTS_QUEENSIDE_BONUS: i32 = 14;
+const PAWN_STORM_ADVANCE_BONUS: i32 = 4;
+const PAWN_STORM_NEAR_KING_BONUS: i32 = 8;
 const KING_ACTIVITY_CENTER_BONUS: i32 = 5;
 const KING_ACTIVITY_MOBILITY_BONUS: i32 = 2;
 
@@ -415,7 +416,7 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
 
     // Penalize king in center in middlegame
     if (king_file >= 2 and king_file <= 5) {
-        score -= 13;
+        score -= KING_CENTER_MIDDLEGAME_PENALTY;
     }
 
     return score;
