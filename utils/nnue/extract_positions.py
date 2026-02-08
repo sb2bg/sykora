@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import glob
+import gzip
 import json
 import random
 import sys
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, TextIO
 
 import chess
 import chess.pgn
@@ -20,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pgn-glob",
         default="history/matches/*/pgn/*.pgn",
-        help="Glob for source PGN files",
+        help="Glob for source PGN files (.pgn and .pgn.gz supported; '**' works recursively)",
     )
     parser.add_argument(
         "--output",
@@ -56,8 +57,13 @@ def game_white_score(result_header: str) -> float | None:
 
 
 def iter_pgn_games(paths: Iterable[Path]) -> Iterable[tuple[Path, chess.pgn.Game]]:
+    def open_text(path: Path) -> TextIO:
+        if path.suffix == ".gz":
+            return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+        return path.open("r", encoding="utf-8", errors="replace")
+
     for path in paths:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
+        with open_text(path) as handle:
             while True:
                 game = chess.pgn.read_game(handle)
                 if game is None:
@@ -76,7 +82,7 @@ def main() -> int:
 
     random.seed(args.seed)
 
-    pgn_paths = [Path(p) for p in sorted(glob.glob(args.pgn_glob))]
+    pgn_paths = [Path(p) for p in sorted(glob.glob(args.pgn_glob, recursive=True))]
     if not pgn_paths:
         print(f"No PGNs matched: {args.pgn_glob}", file=sys.stderr)
         return 1
@@ -127,4 +133,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
