@@ -120,6 +120,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=0.005, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-6, help="Weight decay")
     parser.add_argument("--eval-scale", type=float, default=400.0, help="Sigmoid eval scale")
+    parser.add_argument(
+        "--target-mode",
+        choices=("prob", "cp"),
+        default="prob",
+        help="Training target domain: prob=sigmoid target, cp=direct centipawn regression",
+    )
+    parser.add_argument(
+        "--cp-target-key",
+        default="teacher_cp_stm",
+        help="JSON key to read cp target from when --target-mode cp",
+    )
+    parser.add_argument(
+        "--cp-norm",
+        type=float,
+        default=400.0,
+        help="Normalization divisor for cp regression target/loss",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Max samples (0 = all)")
     parser.add_argument("--seed", type=int, default=1, help="RNG seed")
     parser.add_argument("--device", default="auto", help="auto/cpu/cuda (torch backend only)")
@@ -148,6 +165,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--weight-decay must be >= 0")
     if args.eval_scale <= 0:
         parser.error("--eval-scale must be > 0")
+    if args.cp_norm <= 0:
+        parser.error("--cp-norm must be > 0")
 
     return args
 
@@ -159,7 +178,13 @@ def choose_device(arg: str):
     return torch.device(arg)
 
 
-def load_samples(path: Path, limit: int, augment_mirror: bool) -> List[Sample]:
+def load_samples(
+    path: Path,
+    limit: int,
+    augment_mirror: bool,
+    target_mode: str,
+    cp_target_key: str,
+) -> List[Sample]:
     samples: List[Sample] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -167,7 +192,10 @@ def load_samples(path: Path, limit: int, augment_mirror: bool) -> List[Sample]:
                 continue
             row = json.loads(line)
             fen = row["fen"]
-            target = float(row.get("target_blended_stm", row.get("target_result_stm", 0.5)))
+            if target_mode == "cp":
+                target = float(row.get(cp_target_key, row.get("teacher_cp_stm", 0.0)))
+            else:
+                target = float(row.get("target_blended_stm", row.get("target_result_stm", 0.5)))
             white_feats, black_feats, stm_white = fen_feature_indices(fen)
             samples.append(
                 Sample(
@@ -248,8 +276,11 @@ def train_with_torch(args: argparse.Namespace, train_samples: List[Sample], vali
             batch = train_samples[start : start + args.batch_size]
             w, b, stm, target = to_batch_tensors(batch, device)
             cp = model(w, b, stm)
-            pred = torch.sigmoid(cp / float(args.eval_scale))
-            loss = F.binary_cross_entropy(pred, target)
+            if args.target_mode == "cp":
+                loss = F.smooth_l1_loss(cp / float(args.cp_norm), target / float(args.cp_norm))
+            else:
+                pred = torch.sigmoid(cp / float(args.eval_scale))
+                loss = F.binary_cross_entropy(pred, target)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -267,8 +298,11 @@ def train_with_torch(args: argparse.Namespace, train_samples: List[Sample], vali
                 batch = valid_samples[start : start + args.batch_size]
                 w, b, stm, target = to_batch_tensors(batch, device)
                 cp = model(w, b, stm)
-                pred = torch.sigmoid(cp / float(args.eval_scale))
-                loss = F.binary_cross_entropy(pred, target)
+                if args.target_mode == "cp":
+                    loss = F.smooth_l1_loss(cp / float(args.cp_norm), target / float(args.cp_norm))
+                else:
+                    pred = torch.sigmoid(cp / float(args.eval_scale))
+                    loss = F.binary_cross_entropy(pred, target)
                 valid_loss += float(loss.item()) * len(batch)
                 valid_count += len(batch)
 
@@ -302,6 +336,7 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
     opp_out = output_weights[hidden:]
 
     raw_to_sigmoid = float(SCALE) / float(args.eval_scale)
+    cp_to_norm = float(SCALE) / float(args.cp_norm)
 
     for epoch in range(1, args.epochs + 1):
         random.shuffle(train_samples)
@@ -339,10 +374,16 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
                 them = np.clip(them_acc, 0.0, 1.0)
 
                 raw = float(np.dot(us, own_out) + np.dot(them, opp_out) + output_bias)
-                pred = sigmoid_scalar(raw * raw_to_sigmoid)
-                batch_loss += bce_loss_scalar(pred, sample.target)
-
-                d_raw = (pred - sample.target) * raw_to_sigmoid
+                if args.target_mode == "cp":
+                    pred = raw * cp_to_norm
+                    target = sample.target / float(args.cp_norm)
+                    diff = pred - target
+                    batch_loss += 0.5 * diff * diff
+                    d_raw = diff * cp_to_norm
+                else:
+                    pred = sigmoid_scalar(raw * raw_to_sigmoid)
+                    batch_loss += bce_loss_scalar(pred, sample.target)
+                    d_raw = (pred - sample.target) * raw_to_sigmoid
 
                 g_output_weights[:hidden] += us * d_raw
                 g_output_weights[hidden:] += them * d_raw
@@ -410,8 +451,14 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
             them = np.clip(them_acc, 0.0, 1.0)
 
             raw = float(np.dot(us, own_out) + np.dot(them, opp_out) + output_bias)
-            pred = sigmoid_scalar(raw * raw_to_sigmoid)
-            valid_loss += bce_loss_scalar(pred, sample.target)
+            if args.target_mode == "cp":
+                pred = raw * cp_to_norm
+                target = sample.target / float(args.cp_norm)
+                diff = pred - target
+                valid_loss += 0.5 * diff * diff
+            else:
+                pred = sigmoid_scalar(raw * raw_to_sigmoid)
+                valid_loss += bce_loss_scalar(pred, sample.target)
             valid_count += 1
 
         print(
@@ -436,7 +483,13 @@ def main() -> int:
         print(f"Input not found: {input_path}", file=sys.stderr)
         return 1
 
-    samples = load_samples(input_path, args.limit, args.augment_mirror)
+    samples = load_samples(
+        input_path,
+        args.limit,
+        args.augment_mirror,
+        args.target_mode,
+        args.cp_target_key,
+    )
     if not samples:
         print("No samples loaded.", file=sys.stderr)
         return 1
@@ -478,6 +531,7 @@ def main() -> int:
     )
 
     print(f"Backend: {args.backend}")
+    print(f"Target mode: {args.target_mode}")
     print(f"Samples: {len(samples)} (train={len(train_samples)}, valid={len(valid_samples)})")
     print(f"Wrote {out_net}")
     return 0

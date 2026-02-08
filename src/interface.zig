@@ -57,7 +57,7 @@ pub const Uci = struct {
             .use_nnue = false,
             .eval_file_path = null,
             .nnue_network = null,
-            .nnue_blend = 100,
+            .nnue_blend = 2,
             .nnue_scale = 100,
         };
 
@@ -86,7 +86,7 @@ pub const Uci = struct {
         try uci_ptr.options.items.append(allocator, Option{
             .name = "NnueBlend",
             .type = .spin,
-            .default_value = "100",
+            .default_value = "2",
             .min_value = 0,
             .max_value = 100,
             .on_changed = handleNnueBlendChange,

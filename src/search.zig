@@ -551,6 +551,8 @@ pub const SearchResult = struct {
 
 const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
+const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
+const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
@@ -855,6 +857,8 @@ pub const SearchEngine = struct {
     nnue_net: ?*const nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
+    eval_cache_keys: [EVAL_CACHE_SIZE]u64,
+    eval_cache_values: [EVAL_CACHE_SIZE]i32,
 
     pub fn init(
         board_ptr: *Board,
@@ -888,6 +892,8 @@ pub const SearchEngine = struct {
             .nnue_net = nnue_net,
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
+            .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
+            .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
         };
     }
 
@@ -895,23 +901,60 @@ pub const SearchEngine = struct {
         self.tt.deinit();
     }
 
+    inline fn evalCacheIndex(hash: u64) usize {
+        return @intCast(hash & (EVAL_CACHE_SIZE - 1));
+    }
+
+    inline fn evalCacheGet(self: *Self, hash: u64) ?i32 {
+        const idx = evalCacheIndex(hash);
+        if (self.eval_cache_keys[idx] == hash) {
+            return self.eval_cache_values[idx];
+        }
+        return null;
+    }
+
+    inline fn evalCachePut(self: *Self, hash: u64, value: i32) void {
+        const idx = evalCacheIndex(hash);
+        self.eval_cache_keys[idx] = hash;
+        self.eval_cache_values[idx] = value;
+    }
+
     inline fn evaluatePosition(self: *Self) i32 {
+        // Cache static evals only when NNUE is enabled, since NNUE eval is much costlier.
+        const hash = self.board.zobrist_hasher.zobrist_hash;
+        if (self.use_nnue) {
+            if (self.evalCacheGet(hash)) |cached| {
+                return cached;
+            }
+        }
+
+        var score: i32 = undefined;
         if (self.use_nnue) {
             if (self.nnue_net) |net| {
                 const nn_raw = nnue.evaluate(net, self.board);
                 const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
-                    return nn;
+                    score = nn;
+                    self.evalCachePut(hash, score);
+                    return score;
                 }
                 if (self.nnue_blend <= 0) {
-                    return eval.evaluate(self.board);
+                    score = eval.evaluate(self.board);
+                    self.evalCachePut(hash, score);
+                    return score;
                 }
 
                 const cl = eval.evaluate(self.board);
-                return @divTrunc(nn * self.nnue_blend + cl * (100 - self.nnue_blend), 100);
+                score = @divTrunc(nn * self.nnue_blend + cl * (100 - self.nnue_blend), 100);
+                self.evalCachePut(hash, score);
+                return score;
             }
         }
-        return eval.evaluate(self.board);
+        score = eval.evaluate(self.board);
+        if (self.use_nnue) {
+            self.evalCachePut(hash, score);
+        }
+        return score;
     }
 
     /// Set the game history from prior positions (for repetition detection)
