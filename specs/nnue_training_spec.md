@@ -53,9 +53,9 @@ Output rows include:
   --input nnue/data/positions.jsonl \
   --output nnue/data/labeled.jsonl \
   --stockfish /opt/homebrew/bin/stockfish \
-  --eval-file nnue/nn-49c1193b131c.nnue \
   --depth 12 \
-  --result-mix 0.2 \
+  --result-mix 0.0 \
+  --cp-clip 2000 \
   --eval-scale 400
 ```
 
@@ -80,6 +80,7 @@ If `--eval-file` is incompatible with the selected Stockfish binary, labeling wi
   --weight-decay 1e-6 \
   --eval-scale 400 \
   --backend numpy \
+  --augment-mirror \
   --seed 1
 ```
 
@@ -101,6 +102,7 @@ Sykora should be configured via UCI:
 ```text
 setoption name EvalFile value /absolute/path/to/net.sknnue
 setoption name UseNNUE value true
+setoption name NnueBlend value 10
 isready
 ```
 
