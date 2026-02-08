@@ -1,0 +1,18 @@
+# Generated cache/config
+.cache/
+.mplconfig/
+
+# History data is local by default
+current_baseline.txt
+engines/*
+index/*
+matches/*
+ratings/*
+sts/*
+
+# Keep directory placeholders
+!engines/.gitkeep
+!index/.gitkeep
+!matches/.gitkeep
+!ratings/.gitkeep
+!sts/.gitkeep

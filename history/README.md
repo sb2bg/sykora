@@ -12,7 +12,7 @@ It stores three things:
 
 - `engines/<engine_id>/engine`: frozen engine binary for that snapshot
 - `engines/<engine_id>/metadata.json`: snapshot metadata (git state, hash, notes, UCI id)
-- `matches/<match_id>/summary.json`: machine-readable match summary from `utils/selfplay.py`
+- `matches/<match_id>/summary.json`: machine-readable match summary from `utils/match/selfplay.py`
 - `matches/<match_id>/metadata.json`: reproducibility metadata (command, ids, timestamps)
 - `matches/<match_id>/pgn/`: one PGN per game
 - `ratings/latest.json`: current leaderboard from all archived matches
@@ -32,66 +32,66 @@ It stores three things:
 Initialize once:
 
 ```bash
-~/.pyenv/shims/python utils/history.py init
+~/.pyenv/shims/python utils/history/history.py init
 ```
 
 Snapshot the current build:
 
 ```bash
 zig build -Doptimize=ReleaseFast
-~/.pyenv/shims/python utils/history.py snapshot --label "tune-castling" --notes "castling rights tweak"
+~/.pyenv/shims/python utils/history/history.py snapshot --label "tune-castling" --notes "castling rights tweak"
 ```
 
 List snapshot IDs:
 
 ```bash
-~/.pyenv/shims/python utils/history.py list-engines
+~/.pyenv/shims/python utils/history/history.py list-engines
 ```
 
 Run a tracked match:
 
 ```bash
-~/.pyenv/shims/python utils/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
+~/.pyenv/shims/python utils/history/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
 ```
 
 Auto-play strongest vs weakest (by current ratings):
 
 ```bash
-~/.pyenv/shims/python utils/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
+~/.pyenv/shims/python utils/history/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
 ```
 
 Recompute all ratings and export graph data:
 
 ```bash
-~/.pyenv/shims/python utils/history.py ratings --plot
+~/.pyenv/shims/python utils/history/history.py ratings --plot
 ```
 
 Render a version network map (nodes=engines, edges=matchups):
 
 ```bash
-~/.pyenv/shims/python utils/history.py network --top-n 12 --min-games 10 --min-edge-games 2
+~/.pyenv/shims/python utils/history/history.py network --top-n 12 --min-games 10 --min-edge-games 2
 ```
 
 Run and persist STS for one snapshot:
 
 ```bash
-~/.pyenv/shims/python utils/history.py sts <engine_id> --movetime-ms 100
+~/.pyenv/shims/python utils/history/history.py sts <engine_id> --movetime-ms 100
 ```
 
 Backfill STS for all snapshots:
 
 ```bash
-~/.pyenv/shims/python utils/history.py sts --all --movetime-ms 100 --continue-on-error
+~/.pyenv/shims/python utils/history/history.py sts --all --movetime-ms 100 --continue-on-error
 ```
 
 One-command loop (build + STS gate + self-play gate + promotion):
 
 ```bash
 # Bootstrap baseline once
-~/.pyenv/shims/python utils/tune_loop.py --bootstrap-baseline-engine old_versions/old_sykora --candidate-label "bootstrap"
+~/.pyenv/shims/python utils/tuning/tune_loop.py --bootstrap-baseline-engine old_versions/old_sykora --candidate-label "bootstrap"
 
 # Regular iteration
-~/.pyenv/shims/python utils/tune_loop.py --candidate-label "tweak-name" --candidate-notes "what changed"
+~/.pyenv/shims/python utils/tuning/tune_loop.py --candidate-label "tweak-name" --candidate-notes "what changed"
 ```
 
 ## Notes

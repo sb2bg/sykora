@@ -1,28 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Simple test script for move generation
-echo "Testing Sykora move generation"
-echo ""
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$ROOT/utils/test/test_movegen.sh" "$@"
 
-# Test commands
-{
-    echo "uci"
-    sleep 0.1
-    echo "debug on"
-    sleep 0.1
-    echo "isready"
-    sleep 0.1
-    echo "position startpos"
-    sleep 0.1
-    echo "display"
-    sleep 0.1
-    echo "go movetime 100"
-    sleep 0.5
-    echo "position startpos moves e2e4"
-    sleep 0.1
-    echo "display"
-    sleep 0.1
-    echo "go movetime 100"
-    sleep 0.5
-    echo "quit"
-} | ./zig-out/bin/sykora
