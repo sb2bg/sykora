@@ -36,6 +36,7 @@ pub const Uci = struct {
     eval_file_path: ?[]u8,
     nnue_network: ?nnue.Network,
     nnue_blend: i32,
+    nnue_scale: i32,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -57,6 +58,7 @@ pub const Uci = struct {
             .eval_file_path = null,
             .nnue_network = null,
             .nnue_blend = 100,
+            .nnue_scale = 100,
         };
 
         // Add logging option
@@ -88,6 +90,15 @@ pub const Uci = struct {
             .min_value = 0,
             .max_value = 100,
             .on_changed = handleNnueBlendChange,
+            .context = uci_ptr,
+        });
+        try uci_ptr.options.items.append(allocator, Option{
+            .name = "NnueScale",
+            .type = .spin,
+            .default_value = "100",
+            .min_value = 10,
+            .max_value = 400,
+            .on_changed = handleNnueScaleChange,
             .context = uci_ptr,
         });
 
@@ -354,6 +365,7 @@ pub const Uci = struct {
             use_nnue_for_search,
             net_ptr,
             self.nnue_blend,
+            self.nnue_scale,
         );
         defer search_engine.deinit();
 
@@ -480,5 +492,13 @@ pub const Uci = struct {
             return UciError.InvalidArgument;
         }
         self.nnue_blend = parsed;
+    }
+
+    fn handleNnueScaleChange(self: *Self, value: []const u8) UciError!void {
+        const parsed = std.fmt.parseInt(i32, value, 10) catch return UciError.InvalidArgument;
+        if (parsed < 10 or parsed > 400) {
+            return UciError.InvalidArgument;
+        }
+        self.nnue_scale = parsed;
     }
 };

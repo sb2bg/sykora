@@ -854,6 +854,7 @@ pub const SearchEngine = struct {
     use_nnue: bool,
     nnue_net: ?*const nnue.Network,
     nnue_blend: i32,
+    nnue_scale: i32,
 
     pub fn init(
         board_ptr: *Board,
@@ -862,6 +863,7 @@ pub const SearchEngine = struct {
         use_nnue: bool,
         nnue_net: ?*const nnue.Network,
         nnue_blend: i32,
+        nnue_scale: i32,
     ) !Self {
         const tt = try TranspositionTable.init(allocator, 64); // 64MB TT
 
@@ -885,6 +887,7 @@ pub const SearchEngine = struct {
             .use_nnue = use_nnue,
             .nnue_net = nnue_net,
             .nnue_blend = nnue_blend,
+            .nnue_scale = nnue_scale,
         };
     }
 
@@ -895,7 +898,8 @@ pub const SearchEngine = struct {
     inline fn evaluatePosition(self: *Self) i32 {
         if (self.use_nnue) {
             if (self.nnue_net) |net| {
-                const nn = nnue.evaluate(net, self.board);
+                const nn_raw = nnue.evaluate(net, self.board);
+                const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
                     return nn;
                 }
