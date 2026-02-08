@@ -55,6 +55,10 @@ To run Strategic Test Suite (STS) EPD files (requires `python-chess`):
 
 ```bash
 utils/sts/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-out/bin/sykora --movetime-ms 300
+
+# Example with NNUE options
+utils/sts/sts.py --epd /path/to/sts --engine ./zig-out/bin/sykora --movetime-ms 300 \
+  --engine-opt UseNNUE=true --engine-opt EvalFile=nnue/syk_nnue_v11_h128_d10.sknnue --engine-opt NnueBlend=2
 ```
 
 To run engine-vs-engine self-play (also requires `python-chess`):
@@ -157,6 +161,16 @@ Starter training pipeline:
 ~/.pyenv/shims/python utils/nnue/extract_positions.py --output nnue/data/positions.jsonl
 ~/.pyenv/shims/python utils/nnue/label_with_stockfish.py --input nnue/data/positions.jsonl --output nnue/data/labeled.jsonl --depth 8 --result-mix 0.0 --cp-clip 2000
 ~/.pyenv/shims/python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue --augment-mirror
+```
+
+Fishtest PGN ingestion example:
+
+```bash
+# Download .pgn.gz runs (network required)
+~/.pyenv/shims/python utils/data/download_fishtest_pgns.py --path datasets/fishtest --time-delta 720 --ltc-only true
+
+# Extract positions directly from .pgn.gz (recursive glob supported)
+~/.pyenv/shims/python utils/nnue/extract_positions.py --pgn-glob "datasets/fishtest/**/*.pgn.gz" --output nnue/data/positions.jsonl
 ```
 
 Optional cp-regression training mode:
