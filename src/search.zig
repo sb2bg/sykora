@@ -556,6 +556,8 @@ const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
+const REPETITION_CONTEMPT_CP: i32 = 20;
+const REPETITION_CONTEMPT_EVAL_THRESHOLD_CP: i32 = 30;
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
@@ -1179,7 +1181,7 @@ pub const SearchEngine = struct {
 
         // Check for draw by repetition
         if (ply > 0 and self.isRepetition()) {
-            return DRAW_SCORE;
+            return self.repetitionScore();
         }
 
         // Check for draw by 50 move rule
@@ -1503,6 +1505,20 @@ pub const SearchEngine = struct {
         }
 
         return false;
+    }
+
+    /// Return a contempt-adjusted score for repetition draws.
+    /// Positive means draw is attractive for side-to-move (typically when worse),
+    /// negative means avoid draw when better.
+    fn repetitionScore(self: *Self) i32 {
+        const static_eval = self.evaluatePosition();
+        if (static_eval > REPETITION_CONTEMPT_EVAL_THRESHOLD_CP) {
+            return -REPETITION_CONTEMPT_CP;
+        }
+        if (static_eval < -REPETITION_CONTEMPT_EVAL_THRESHOLD_CP) {
+            return REPETITION_CONTEMPT_CP;
+        }
+        return DRAW_SCORE;
     }
 
     fn countMaterial(b: board.BitBoard, color: piece.Color) i32 {
