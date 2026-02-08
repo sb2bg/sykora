@@ -144,6 +144,7 @@ Example UCI sequence:
 ```text
 setoption name EvalFile value /absolute/path/to/net.sknnue
 setoption name UseNNUE value true
+setoption name NnueBlend value 10
 isready
 ```
 
@@ -154,8 +155,8 @@ Starter training pipeline:
 
 ```bash
 ~/.pyenv/shims/python utils/nnue/extract_positions.py --output nnue/data/positions.jsonl
-~/.pyenv/shims/python utils/nnue/label_with_stockfish.py --input nnue/data/positions.jsonl --output nnue/data/labeled.jsonl --eval-file nnue/nn-49c1193b131c.nnue
-~/.pyenv/shims/python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue
+~/.pyenv/shims/python utils/nnue/label_with_stockfish.py --input nnue/data/positions.jsonl --output nnue/data/labeled.jsonl --depth 8 --result-mix 0.0 --cp-clip 2000
+~/.pyenv/shims/python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue --augment-mirror
 ```
 
 To compare Sykora against Stockfish running a specific net:
@@ -167,6 +168,7 @@ To compare Sykora against Stockfish running a specific net:
 Some Stockfish builds reject external `EvalFile`; in that case use the default embedded net or a matching Stockfish build.
 
 `train_syknnue.py` defaults to a portable NumPy backend; use `--backend torch` on machines with a stable PyTorch/OpenMP setup.
+`NnueBlend` lets you blend NNUE with classical eval (0 = classical only, 100 = pure NNUE).
 
 Full process spec: `specs/nnue_training_spec.md`.
 
