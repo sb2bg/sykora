@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         default=400.0,
         help="Scale used by sigmoid(cp / scale)",
     )
+    parser.add_argument(
+        "--cp-clip",
+        type=int,
+        default=2000,
+        help="Clip teacher cp to +/- this value before target conversion",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +105,9 @@ def main() -> int:
     if args.hash_mb is not None and args.hash_mb <= 0:
         print("--hash-mb must be > 0.", file=sys.stderr)
         return 2
+    if args.cp_clip <= 0:
+        print("--cp-clip must be > 0.", file=sys.stderr)
+        return 2
 
     in_path = Path(args.input)
     if not in_path.is_file():
@@ -148,6 +157,7 @@ def main() -> int:
                 cp = score_obj.score(mate_score=100000)
                 if cp is None:
                     continue
+                cp = max(-args.cp_clip, min(args.cp_clip, int(cp)))
 
                 teacher_target = sigmoid(float(cp) / args.eval_scale)
                 result_target = float(row.get("target_result_stm", 0.5))

@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+import chess
+
 from common import INPUT_SIZE, QA, QB, SCALE, fen_feature_indices, write_syk_nnue
 
 
@@ -95,14 +97,14 @@ def create_model(hidden_size: int):
             us_acc = torch.where(stm_mask, white_acc, black_acc)
             them_acc = torch.where(stm_mask, black_acc, white_acc)
 
-            us = torch.clamp(us_acc, 0.0, float(QA))
-            them = torch.clamp(them_acc, 0.0, float(QA))
+            us = torch.clamp(us_acc, 0.0, 1.0)
+            them = torch.clamp(them_acc, 0.0, 1.0)
 
             own_out = self.output_weights[: self.hidden_size]
             opp_out = self.output_weights[self.hidden_size :]
             raw = (us * own_out).sum(dim=1) + (them * opp_out).sum(dim=1) + self.output_bias
 
-            cp = raw * float(SCALE) / float(QA * QB)
+            cp = raw * float(SCALE)
             return cp
 
     return SykNnueModel(hidden_size)
@@ -121,6 +123,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Max samples (0 = all)")
     parser.add_argument("--seed", type=int, default=1, help="RNG seed")
     parser.add_argument("--device", default="auto", help="auto/cpu/cuda (torch backend only)")
+    parser.add_argument(
+        "--augment-mirror",
+        action="store_true",
+        help="Add board-mirrored samples during data load to reduce color/orientation bias",
+    )
     parser.add_argument(
         "--backend",
         choices=("numpy", "torch"),
@@ -152,7 +159,7 @@ def choose_device(arg: str):
     return torch.device(arg)
 
 
-def load_samples(path: Path, limit: int) -> List[Sample]:
+def load_samples(path: Path, limit: int, augment_mirror: bool) -> List[Sample]:
     samples: List[Sample] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -170,6 +177,19 @@ def load_samples(path: Path, limit: int) -> List[Sample]:
                     target=target,
                 )
             )
+            if augment_mirror:
+                board = chess.Board(fen)
+                mirrored = board.mirror()
+                mfen = mirrored.fen(en_passant="fen")
+                m_white_feats, m_black_feats, m_stm_white = fen_feature_indices(mfen)
+                samples.append(
+                    Sample(
+                        white_features=m_white_feats,
+                        black_features=m_black_feats,
+                        stm_white=m_stm_white,
+                        target=target,
+                    )
+                )
             if limit > 0 and len(samples) >= limit:
                 break
     return samples
@@ -259,12 +279,12 @@ def train_with_torch(args: argparse.Namespace, train_samples: List[Sample], vali
         )
 
     model = model.cpu()
-    input_bias_i16 = quantize_i16_torch(model.input_bias.data)
-    input_weights_i16 = quantize_i16_torch(model.input_weights.data.reshape(-1))
-    output_weights_i16 = quantize_i16_torch(model.output_weights.data)
-    output_bias_i32 = int(round(float(model.output_bias.data.item())))
-
-    return input_bias_i16, input_weights_i16, output_weights_i16, output_bias_i32
+    return (
+        model.input_bias.data.tolist(),
+        model.input_weights.data.reshape(-1).tolist(),
+        model.output_weights.data.tolist(),
+        float(model.output_bias.data.item()),
+    )
 
 
 def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], valid_samples: List[Sample]):
@@ -281,7 +301,7 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
     own_out = output_weights[:hidden]
     opp_out = output_weights[hidden:]
 
-    raw_to_sigmoid = float(SCALE) / float(QA * QB * args.eval_scale)
+    raw_to_sigmoid = float(SCALE) / float(args.eval_scale)
 
     for epoch in range(1, args.epochs + 1):
         random.shuffle(train_samples)
@@ -315,8 +335,8 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
                     us_acc = black_acc
                     them_acc = white_acc
 
-                us = np.clip(us_acc, 0.0, float(QA))
-                them = np.clip(them_acc, 0.0, float(QA))
+                us = np.clip(us_acc, 0.0, 1.0)
+                them = np.clip(them_acc, 0.0, 1.0)
 
                 raw = float(np.dot(us, own_out) + np.dot(them, opp_out) + output_bias)
                 pred = sigmoid_scalar(raw * raw_to_sigmoid)
@@ -328,8 +348,8 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
                 g_output_weights[hidden:] += them * d_raw
                 g_output_bias += d_raw
 
-                us_mask = ((us_acc > 0.0) & (us_acc < float(QA))).astype(np.float32)
-                them_mask = ((them_acc > 0.0) & (them_acc < float(QA))).astype(np.float32)
+                us_mask = ((us_acc > 0.0) & (us_acc < 1.0)).astype(np.float32)
+                them_mask = ((them_acc > 0.0) & (them_acc < 1.0)).astype(np.float32)
 
                 g_us_acc = own_out * d_raw * us_mask
                 g_them_acc = opp_out * d_raw * them_mask
@@ -386,8 +406,8 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
                 us_acc = black_acc
                 them_acc = white_acc
 
-            us = np.clip(us_acc, 0.0, float(QA))
-            them = np.clip(them_acc, 0.0, float(QA))
+            us = np.clip(us_acc, 0.0, 1.0)
+            them = np.clip(them_acc, 0.0, 1.0)
 
             raw = float(np.dot(us, own_out) + np.dot(them, opp_out) + output_bias)
             pred = sigmoid_scalar(raw * raw_to_sigmoid)
@@ -400,12 +420,12 @@ def train_with_numpy(args: argparse.Namespace, train_samples: List[Sample], vali
             f"valid_loss={valid_loss / max(valid_count, 1):.6f}"
         )
 
-    input_bias_i16 = quantize_i16_numpy(input_bias, np)
-    input_weights_i16 = quantize_i16_numpy(input_weights.reshape(-1), np)
-    output_weights_i16 = quantize_i16_numpy(output_weights, np)
-    output_bias_i32 = int(round(float(output_bias)))
-
-    return input_bias_i16, input_weights_i16, output_weights_i16, output_bias_i32
+    return (
+        input_bias,
+        input_weights.reshape(-1),
+        output_weights,
+        float(output_bias),
+    )
 
 
 def main() -> int:
@@ -416,7 +436,7 @@ def main() -> int:
         print(f"Input not found: {input_path}", file=sys.stderr)
         return 1
 
-    samples = load_samples(input_path, args.limit)
+    samples = load_samples(input_path, args.limit, args.augment_mirror)
     if not samples:
         print("No samples loaded.", file=sys.stderr)
         return 1
@@ -437,7 +457,15 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    input_bias_i16, input_weights_i16, output_weights_i16, output_bias_i32 = params
+    input_bias_f, input_weights_f, output_weights_f, output_bias_f = params
+
+    # Quantize float-domain weights into the engine's integer-domain NNUE format.
+    # input layer is scaled by QA, output layer by QB, output bias by QA*QB.
+    np = require_numpy()
+    input_bias_i16 = quantize_i16_numpy(np.asarray(input_bias_f, dtype=np.float32) * float(QA), np)
+    input_weights_i16 = quantize_i16_numpy(np.asarray(input_weights_f, dtype=np.float32) * float(QA), np)
+    output_weights_i16 = quantize_i16_numpy(np.asarray(output_weights_f, dtype=np.float32) * float(QB), np)
+    output_bias_i32 = int(round(float(output_bias_f) * float(QA * QB)))
 
     out_net = Path(args.output_net)
     write_syk_nnue(
