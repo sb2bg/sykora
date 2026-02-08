@@ -84,6 +84,25 @@ If `--eval-file` is incompatible with the selected Stockfish binary, labeling wi
   --seed 1
 ```
 
+Optional cp-regression mode (direct centipawn target):
+
+```bash
+~/.pyenv/shims/python utils/nnue/train_syknnue.py \
+  --input nnue/data/labeled.jsonl \
+  --output-net nnue/syk_v0_cp.sknnue \
+  --target-mode cp \
+  --cp-target-key teacher_cp_stm \
+  --cp-norm 400 \
+  --hidden-size 512 \
+  --epochs 4 \
+  --batch-size 128 \
+  --lr 0.005 \
+  --weight-decay 1e-6 \
+  --backend numpy \
+  --augment-mirror \
+  --seed 1
+```
+
 Export format:
 
 - magic: `SYKNNUE1`
@@ -102,7 +121,7 @@ Sykora should be configured via UCI:
 ```text
 setoption name EvalFile value /absolute/path/to/net.sknnue
 setoption name UseNNUE value true
-setoption name NnueBlend value 10
+setoption name NnueBlend value 2
 isready
 ```
 
