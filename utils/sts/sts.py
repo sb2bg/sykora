@@ -126,6 +126,12 @@ def parse_args() -> argparse.Namespace:
         help="Engine Hash option in MB, if supported.",
     )
     parser.add_argument(
+        "--engine-opt",
+        action="append",
+        default=[],
+        help="Extra UCI option, format Key=Value (repeatable)",
+    )
+    parser.add_argument(
         "--bm-score",
         type=int,
         default=DEFAULT_BM_SCORE,
@@ -150,6 +156,36 @@ def parse_args() -> argparse.Namespace:
     if args.hash_mb is not None and args.hash_mb <= 0:
         parser.error("--hash-mb must be > 0")
     return args
+
+
+def parse_option_value(raw: str):
+    lower = raw.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+def parse_uci_options(entries: Sequence[str]) -> Dict[str, object]:
+    options: Dict[str, object] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ValueError(f"Invalid --engine-opt '{entry}' (expected Key=Value)")
+        key, raw_value = entry.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid option key in '{entry}'")
+        options[key] = parse_option_value(raw_value.strip())
+    return options
 
 
 def find_epd_files(path: str, pattern: str) -> List[str]:
@@ -327,12 +363,18 @@ def configure_engine(
     engine: chess.engine.SimpleEngine,
     threads: Optional[int],
     hash_mb: Optional[int],
+    extra_options: Dict[str, object],
 ) -> None:
-    config: Dict[str, int] = {}
+    config: Dict[str, object] = {}
     if threads is not None and "Threads" in engine.options:
         config["Threads"] = threads
     if hash_mb is not None and "Hash" in engine.options:
         config["Hash"] = hash_mb
+    for key, value in extra_options.items():
+        if key in engine.options:
+            config[key] = value
+        else:
+            print(f"Warning: engine does not expose option '{key}', skipping", file=sys.stderr)
     if config:
         engine.configure(config)
 
@@ -417,6 +459,11 @@ def print_summary(by_theme: Dict[str, ScoreTally], overall: ScoreTally) -> None:
 
 def main() -> int:
     args = parse_args()
+    try:
+        extra_options = parse_uci_options(args.engine_opt)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
 
     try:
         epd_files = find_epd_files(args.epd, args.pattern)
@@ -432,6 +479,8 @@ def main() -> int:
     limit_desc = f"depth={args.depth}" if args.depth is not None else f"movetime={args.movetime_ms}ms"
     print(f"Engine: {args.engine}")
     print(f"Files: {len(epd_files)} | Positions: {len(positions)} | Limit: {limit_desc}")
+    if extra_options:
+        print(f"Extra engine options: {extra_options}")
 
     try:
         engine = chess.engine.SimpleEngine.popen_uci(args.engine)
@@ -443,7 +492,7 @@ def main() -> int:
         return 1
 
     try:
-        configure_engine(engine, args.threads, args.hash_mb)
+        configure_engine(engine, args.threads, args.hash_mb, extra_options)
         by_theme, overall = evaluate_positions(
             engine=engine,
             positions=positions,

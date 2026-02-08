@@ -144,7 +144,7 @@ Example UCI sequence:
 ```text
 setoption name EvalFile value /absolute/path/to/net.sknnue
 setoption name UseNNUE value true
-setoption name NnueBlend value 10
+setoption name NnueBlend value 2
 isready
 ```
 
@@ -159,6 +159,12 @@ Starter training pipeline:
 ~/.pyenv/shims/python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue --augment-mirror
 ```
 
+Optional cp-regression training mode:
+
+```bash
+~/.pyenv/shims/python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0_cp.sknnue --target-mode cp --cp-target-key teacher_cp_stm --cp-norm 400 --augment-mirror
+```
+
 To compare Sykora against Stockfish running a specific net:
 
 ```bash
@@ -168,7 +174,7 @@ To compare Sykora against Stockfish running a specific net:
 Some Stockfish builds reject external `EvalFile`; in that case use the default embedded net or a matching Stockfish build.
 
 `train_syknnue.py` defaults to a portable NumPy backend; use `--backend torch` on machines with a stable PyTorch/OpenMP setup.
-`NnueBlend` lets you blend NNUE with classical eval (0 = classical only, 100 = pure NNUE).
+`NnueBlend` lets you blend NNUE with classical eval (0 = classical only, 100 = pure NNUE). Current default is `2`.
 
 Full process spec: `specs/nnue_training_spec.md`.
 
