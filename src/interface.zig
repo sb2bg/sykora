@@ -37,6 +37,7 @@ pub const Uci = struct {
     nnue_network: ?nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
+    nnue_screlu: bool,
     position_hash_history: [512]u64,
     position_hash_count: usize,
 
@@ -61,6 +62,7 @@ pub const Uci = struct {
             .nnue_network = null,
             .nnue_blend = 2,
             .nnue_scale = 100,
+            .nnue_screlu = false,
             .position_hash_history = undefined,
             .position_hash_count = 0,
         };
@@ -105,6 +107,13 @@ pub const Uci = struct {
             .min_value = 10,
             .max_value = 400,
             .on_changed = handleNnueScaleChange,
+            .context = uci_ptr,
+        });
+        try uci_ptr.options.items.append(allocator, Option{
+            .name = "NnueSCReLU",
+            .type = .check,
+            .default_value = "false",
+            .on_changed = handleNnueScReluChange,
             .context = uci_ptr,
         });
 
@@ -376,6 +385,7 @@ pub const Uci = struct {
             net_ptr,
             self.nnue_blend,
             self.nnue_scale,
+            self.nnue_screlu,
         );
         defer search_engine.deinit();
 
@@ -517,6 +527,18 @@ pub const Uci = struct {
             return UciError.InvalidArgument;
         }
         self.nnue_scale = parsed;
+    }
+
+    fn handleNnueScReluChange(self: *Self, value: []const u8) UciError!void {
+        if (std.mem.eql(u8, value, "true")) {
+            self.nnue_screlu = true;
+            return;
+        }
+        if (std.mem.eql(u8, value, "false")) {
+            self.nnue_screlu = false;
+            return;
+        }
+        return UciError.InvalidArgument;
     }
 
     fn resetPositionHistory(self: *Self) void {

@@ -161,7 +161,7 @@ inline fn clampToQa(v: i32) i32 {
 }
 
 /// Returns score from the side-to-move perspective, same convention as classical eval.
-pub fn evaluate(net: *const Network, b: *Board) i32 {
+pub fn evaluate(net: *const Network, b: *Board, use_screlu: bool) i32 {
     const state = b.board;
     const hidden_size: usize = @intCast(net.hidden_size);
 
@@ -197,7 +197,7 @@ pub fn evaluate(net: *const Network, b: *Board) i32 {
     }
 
     const stm_is_white = state.move == .white;
-    var sum: i64 = net.output_bias;
+    var sum: i64 = 0;
 
     for (0..hidden_size) |h| {
         const us_raw = if (stm_is_white) white_acc[h] else black_acc[h];
@@ -206,9 +206,22 @@ pub fn evaluate(net: *const Network, b: *Board) i32 {
         const us = clampToQa(us_raw);
         const them = clampToQa(them_raw);
 
-        sum += @as(i64, us) * @as(i64, net.output_weights[h]);
-        sum += @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
+        if (use_screlu) {
+            // SCReLU(x) = clamp(x, 0, QA)^2. Matches Bullet simple/progression nets.
+            sum += @as(i64, us) * @as(i64, us) * @as(i64, net.output_weights[h]);
+            sum += @as(i64, them) * @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
+        } else {
+            // CReLU(x) = clamp(x, 0, QA). Legacy SYK nets used this.
+            sum += @as(i64, us) * @as(i64, net.output_weights[h]);
+            sum += @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
+        }
     }
+
+    if (use_screlu) {
+        // SCReLU accumulates an extra QA factor relative to CReLU.
+        sum = @divTrunc(sum, QA);
+    }
+    sum += net.output_bias;
 
     const score = @divTrunc(sum * SCALE, QA * QB);
     return @intCast(score);

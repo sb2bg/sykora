@@ -859,6 +859,7 @@ pub const SearchEngine = struct {
     nnue_net: ?*const nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
+    nnue_screlu: bool,
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
 
@@ -870,6 +871,7 @@ pub const SearchEngine = struct {
         nnue_net: ?*const nnue.Network,
         nnue_blend: i32,
         nnue_scale: i32,
+        nnue_screlu: bool,
     ) !Self {
         const tt = try TranspositionTable.init(allocator, 64); // 64MB TT
 
@@ -894,6 +896,7 @@ pub const SearchEngine = struct {
             .nnue_net = nnue_net,
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
+            .nnue_screlu = nnue_screlu,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
         };
@@ -933,7 +936,7 @@ pub const SearchEngine = struct {
         var score: i32 = undefined;
         if (self.use_nnue) {
             if (self.nnue_net) |net| {
-                const nn_raw = nnue.evaluate(net, self.board);
+                const nn_raw = nnue.evaluate(net, self.board, self.nnue_screlu);
                 const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
                     score = nn;
