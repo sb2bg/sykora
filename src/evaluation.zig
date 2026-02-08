@@ -31,6 +31,8 @@ const TEMPO_BONUS: i32 = 10;
 const KING_PAWN_SHIELD_BONUS: i32 = 12;
 const KING_OPEN_FILE_PENALTY: i32 = 25;
 const KING_CENTER_MIDDLEGAME_PENALTY: i32 = 13;
+const KING_CASTLED_BONUS: i32 = 20;
+const KING_EARLY_WALK_PENALTY: i32 = 24;
 const PAWN_CHAIN_BONUS: i32 = 5;
 const PROTECTED_PASSED_PAWN_BONUS: i32 = 20;
 const CONNECTED_PASSED_PAWN_BONUS: i32 = 25;
@@ -44,6 +46,7 @@ const PAWN_STORM_ADVANCE_BONUS: i32 = 4;
 const PAWN_STORM_NEAR_KING_BONUS: i32 = 8;
 const KING_ACTIVITY_CENTER_BONUS: i32 = 5;
 const KING_ACTIVITY_MOBILITY_BONUS: i32 = 2;
+const ENDGAME_PHASE_THRESHOLD: i32 = 160;
 
 // Piece-Square Tables (from white's perspective)
 // Values are in centipawns, will be mirrored for black
@@ -184,24 +187,13 @@ fn countMaterial(b: BitBoard, color: piece.Color) i32 {
 }
 
 /// Determine if we're in the endgame phase
-/// Endgame is defined as: both sides have no queens, or every side which has a queen has additionally no other pieces or one minorpiece maximum
+/// Use phase-based detection so queenless middlegames are not misclassified
+/// as endgames while many major/minor pieces remain.
 fn isEndgame(b: BitBoard) bool {
-    const white_queens = @popCount(b.getColorBitboard(.white) & b.getKindBitboard(.queen));
-    const black_queens = @popCount(b.getColorBitboard(.black) & b.getKindBitboard(.queen));
-
-    // No queens on board
-    if (white_queens == 0 and black_queens == 0) {
-        return true;
-    }
-
-    // Check if material is low (simple heuristic: total non-pawn pieces <= 6)
-    const white_pieces = @popCount(b.getColorBitboard(.white) & ~b.getKindBitboard(.pawn) & ~b.getKindBitboard(.king));
-    const black_pieces = @popCount(b.getColorBitboard(.black) & ~b.getKindBitboard(.pawn) & ~b.getKindBitboard(.king));
-
-    return (white_pieces + black_pieces) <= 6;
+    return getGamePhase(b) >= ENDGAME_PHASE_THRESHOLD;
 }
 
-/// Calculate game phase (0 = endgame, 256 = opening)
+/// Calculate game phase (0 = opening, 256 = endgame)
 /// Used for tapered evaluation
 fn getGamePhase(b: BitBoard) i32 {
     const knight_phase: i32 = 1;
@@ -417,6 +409,27 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
     // Penalize king in center in middlegame
     if (king_file >= 2 and king_file <= 5) {
         score -= KING_CENTER_MIDDLEGAME_PENALTY;
+    }
+
+    const is_castled = if (color == .white)
+        (king_sq == 6 or king_sq == 2)
+    else
+        (king_sq == 62 or king_sq == 58);
+
+    const home_sq: u8 = if (color == .white) 4 else 60;
+    const king_has_moved = king_sq != home_sq;
+
+    // Encourage keeping the king sheltered via castling and discourage
+    // premature king walks in middlegames.
+    if (is_castled) {
+        score += KING_CASTLED_BONUS;
+    } else if (king_has_moved) {
+        score -= KING_EARLY_WALK_PENALTY;
+
+        const advanced_rank = if (color == .white) king_rank >= 2 else king_rank <= 5;
+        if (advanced_rank) {
+            score -= @divTrunc(KING_EARLY_WALK_PENALTY, 2);
+        }
     }
 
     return score;
