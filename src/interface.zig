@@ -37,6 +37,8 @@ pub const Uci = struct {
     nnue_network: ?nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
+    position_hash_history: [512]u64,
+    position_hash_count: usize,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -59,7 +61,11 @@ pub const Uci = struct {
             .nnue_network = null,
             .nnue_blend = 2,
             .nnue_scale = 100,
+            .position_hash_history = undefined,
+            .position_hash_count = 0,
         };
+
+        uci_ptr.resetPositionHistory();
 
         // Add logging option
         try uci_ptr.options.items.append(allocator, Option{
@@ -211,6 +217,7 @@ pub const Uci = struct {
             .ucinewgame => {
                 try self.terminateSearch();
                 self.board = Board.startpos();
+                self.resetPositionHistory();
             },
             .position => |pos_opts| {
                 switch (pos_opts.value) {
@@ -223,11 +230,14 @@ pub const Uci = struct {
                     },
                 }
 
+                self.resetPositionHistory();
+
                 if (pos_opts.moves) |moves| {
                     defer self.allocator.free(moves);
 
                     for (moves) |move| {
                         try self.board.makeStrMove(move);
+                        self.pushCurrentHashToPositionHistory();
                     }
                 }
             },
@@ -371,6 +381,13 @@ pub const Uci = struct {
 
         // Set UCI writer for info output at each depth
         search_engine.uci_output = self.stdout;
+        if (self.position_hash_count > 0) {
+            // Pass prior game positions (exclude current position at the end).
+            const prior_count = self.position_hash_count - 1;
+            search_engine.setGameHistory(self.position_hash_history[0..prior_count]);
+        } else {
+            search_engine.setGameHistory(&.{});
+        }
 
         // Convert UCI go options to search options
         const search_opts = SearchOptions{
@@ -500,5 +517,27 @@ pub const Uci = struct {
             return UciError.InvalidArgument;
         }
         self.nnue_scale = parsed;
+    }
+
+    fn resetPositionHistory(self: *Self) void {
+        self.position_hash_count = 0;
+        self.pushCurrentHashToPositionHistory();
+    }
+
+    fn pushCurrentHashToPositionHistory(self: *Self) void {
+        const hash = self.board.zobrist_hasher.zobrist_hash;
+        if (self.position_hash_count < self.position_hash_history.len) {
+            self.position_hash_history[self.position_hash_count] = hash;
+            self.position_hash_count += 1;
+            return;
+        }
+
+        // Keep the most recent positions if history grows beyond fixed capacity.
+        std.mem.copyForwards(
+            u64,
+            self.position_hash_history[0 .. self.position_hash_history.len - 1],
+            self.position_hash_history[1..self.position_hash_history.len],
+        );
+        self.position_hash_history[self.position_hash_history.len - 1] = hash;
     }
 };

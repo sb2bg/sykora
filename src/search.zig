@@ -1468,46 +1468,40 @@ pub const SearchEngine = struct {
         return best_score;
     }
 
-    /// Check if current position is a repetition
+    inline fn combinedHistoryCount(self: *Self) usize {
+        return self.game_history_count + self.history_count;
+    }
+
+    inline fn hashAtCombinedIndex(self: *Self, idx: usize) u64 {
+        if (idx < self.game_history_count) {
+            return self.game_history[idx];
+        }
+        return self.position_history[idx - self.game_history_count];
+    }
+
+    /// Check if current position is a true threefold repetition.
+    /// We require two prior matches of the current hash with the same side to move.
     fn isRepetition(self: *Self) bool {
         const current_hash = self.board.zobrist_hasher.zobrist_hash;
-        var count: u32 = 0;
+        const total = self.combinedHistoryCount();
+        if (total < 3) return false;
 
-        // First check game history (positions before search started)
-        // Check every other position (same side to move) going backwards from most recent
-        if (self.game_history_count > 0) {
-            var i: usize = self.game_history_count - 1;
-            var moves_checked: usize = 0;
-            const max_check = @min(self.game_history_count, self.board.board.halfmove_clock + 1);
-
-            while (moves_checked < max_check) {
-                if (i % 2 == (self.game_history_count - 1) % 2) { // Same side to move
-                    if (self.game_history[i] == current_hash) {
-                        count += 1;
-                        if (count >= 1) return true; // One prior occurrence = draw
-                    }
-                }
-                if (i == 0) break;
-                i -= 1;
-                moves_checked += 1;
-            }
-        }
-
-        // Then check search history (positions during current search)
-        // Only need to check positions since last irreversible move
+        // 50-move clock bounds how far back a repetition can exist.
         const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
-        const start = if (self.history_count > halfmove)
-            self.history_count - halfmove
-        else
-            0;
+        const max_back = @min(halfmove, total - 1);
 
-        // Check every other position (same side to move)
-        var i = start;
-        while (i + 2 < self.history_count) : (i += 2) {
-            if (self.position_history[i] == current_hash) {
-                return true; // Found repetition in search
+        var matches: u32 = 0;
+        var plies_back: usize = 2; // same side to move only
+        while (plies_back <= max_back) : (plies_back += 2) {
+            const idx = total - 1 - plies_back;
+            if (self.hashAtCombinedIndex(idx) == current_hash) {
+                matches += 1;
+                if (matches >= 2) {
+                    return true;
+                }
             }
         }
+
         return false;
     }
 
