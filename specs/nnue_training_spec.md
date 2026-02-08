@@ -1,122 +1,123 @@
-# Sykora NNUE Training Spec (v0)
+# Sykora NNUE Training Spec (v1, Bullet-First)
 
 ## Scope
 
-This spec defines a practical first NNUE training pipeline for Sykora:
+This spec defines the target NNUE workflow for Sykora:
 
-- Train a Sykora-native NNUE file (`SYKNNUE1`) from archived game data.
-- Keep every dataset/model artifact reproducible and versioned by metadata.
-- Gate promotions using STS + self-play instead of STS-only decisions.
-
-This is intentionally an initial implementation, not a final production trainer.
+- Use high-quality large datasets (Leela/lc0 + self-play data) instead of tiny ad-hoc samples.
+- Train with Bullet on stronger hardware.
+- Export into Sykora's native `SYKNNUE1` format for engine use.
+- Archive every run with reproducible metadata and promotion gates.
 
 ## Repository Layout
 
-Training utilities live in `utils/nnue/`:
+Core utilities:
 
-- `utils/nnue/extract_positions.py`: build raw position dataset from PGNs.
-- `utils/nnue/label_with_stockfish.py`: add teacher eval labels.
-- `utils/nnue/train_syknnue.py`: train and export `SYKNNUE1`.
-- `utils/nnue/common.py`: shared feature indexing + binary export helpers.
+- `utils/nnue/extract_positions.py`: PGN -> JSONL extractor (fallback pipeline).
+- `utils/nnue/label_with_stockfish.py`: Stockfish teacher labels for fallback pipeline.
+- `utils/nnue/train_syknnue.py`: in-repo baseline trainer.
+- `utils/nnue/common.py`: `SYKNNUE1` constants + writer.
 
-Local NNUE artifacts live under `nnue/` (gitignored except keep files):
+Bullet pipeline helpers:
 
-- `nnue/data/positions.jsonl`: extracted raw training rows.
-- `nnue/data/labeled.jsonl`: teacher-labeled rows.
-- `nnue/models/`: optional checkpoints/metadata.
-- `nnue/*.sknnue`: exported Sykora-ready nets.
+- `utils/nnue/bullet/prepare_lc0_dataset.py`: validate/manifest lc0 shard sets.
+- `utils/nnue/bullet/inspect_lc0_v6.py`: sample-inspect lc0 v6 records.
+- `utils/nnue/bullet/export_npz_to_sknnue.py`: convert float checkpoint (`.npz`) -> `SYKNNUE1`.
 
-## Data Pipeline
+Artifacts live under `nnue/`:
 
-### 1) Extract Positions
+- `nnue/data/bullet/*`: manifests and dataset summaries.
+- `nnue/models/*`: training metadata/checkpoints (if kept locally).
+- `nnue/*.sknnue`: Sykora-ready nets.
+
+## Data Sources
+
+### A) Leela/lc0 training chunks (preferred scale)
+
+The provided `training.*.gz` files are lc0 binary chunks with fixed 8356-byte records (v6 format).
+
+Prepare and validate:
+
+```bash
+~/.pyenv/shims/python utils/nnue/bullet/prepare_lc0_dataset.py \
+  --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
+  --output-dir nnue/data/bullet/leela_run3 \
+  --manifest-name shards.txt
+```
+
+Optional deep inspection on a sample:
+
+```bash
+~/.pyenv/shims/python utils/nnue/bullet/inspect_lc0_v6.py \
+  --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
+  --max-files 32 \
+  --records-per-file 8 \
+  --output-json nnue/data/bullet/leela_run3/inspect.json
+```
+
+### B) Fishtest/engine PGNs (fallback + augmentation)
 
 ```bash
 ~/.pyenv/shims/python utils/nnue/extract_positions.py \
-  --pgn-glob "history/matches/*/pgn/*.pgn" \
-  --output nnue/data/positions.jsonl \
-  --min-ply 8 \
-  --max-ply 180 \
-  --sample-rate 0.30 \
-  --seed 1
-```
+  --pgn-glob "datasets/fishtest/**/*.pgn.gz" \
+  --output nnue/data/positions.jsonl
 
-Output rows include:
-
-- `fen`
-- `target_result_stm` (game-result target from side to move perspective)
-- provenance (`source_pgn`, `event`, `ply`)
-
-### 2) Label With Teacher
-
-```bash
 ~/.pyenv/shims/python utils/nnue/label_with_stockfish.py \
   --input nnue/data/positions.jsonl \
   --output nnue/data/labeled.jsonl \
   --stockfish /opt/homebrew/bin/stockfish \
   --depth 12 \
   --result-mix 0.0 \
-  --cp-clip 2000 \
-  --eval-scale 400
+  --cp-clip 2000
 ```
 
-Targets are blended:
+## Bullet Training Pipeline
 
-- teacher target: `sigmoid(cp / eval_scale)`
-- result target: `target_result_stm`
-- blended: `result_mix * result + (1 - result_mix) * teacher`
+### Step 1: Ensure dataset format compatibility
 
-If `--eval-file` is incompatible with the selected Stockfish binary, labeling will fail fast with an explicit error.
+Bullet commonly trains from `sfbinpack`, `bulletformat`, `montyformat`, or `viriformat` datasets.
+If your Bullet build cannot ingest lc0 v6 chunks directly, convert lc0 shards first using your chosen converter.
 
-### 3) Train + Export Sykora Net
+Store conversion outputs and metadata under:
+
+- `nnue/data/bullet/<dataset_id>/`
+
+### Step 2: Train with Bullet (external trainer repo/tooling)
+
+Run training on your stronger machine using the prepared dataset manifest. Keep run artifacts under:
+
+- `nnue/models/bullet/<run_id>/`
+
+Required run metadata (JSON sidecar):
+
+- trainer commit/version
+- dataset ID and manifest path
+- architecture definition (inputs/layers/activations)
+- optimizer + LR schedule
+- batch size, epochs/steps, hardware
+- loss curves and final validation metrics
+- exported checkpoint path and sha256
+
+### Step 3: Export to Sykora format
+
+Once Bullet (or your export script) emits float parameters in NPZ form:
+
+- `input_weights` shape `[768, hidden]`
+- `input_bias` shape `[hidden]`
+- `output_weights` shape `[2*hidden]` or `[2, hidden]`
+- `output_bias` scalar
+
+Convert to engine net:
 
 ```bash
-~/.pyenv/shims/python utils/nnue/train_syknnue.py \
-  --input nnue/data/labeled.jsonl \
-  --output-net nnue/syk_v0.sknnue \
-  --hidden-size 512 \
-  --epochs 4 \
-  --batch-size 128 \
-  --lr 0.005 \
-  --weight-decay 1e-6 \
-  --eval-scale 400 \
-  --backend numpy \
-  --augment-mirror \
-  --seed 1
+~/.pyenv/shims/python utils/nnue/bullet/export_npz_to_sknnue.py \
+  --input nnue/models/bullet/<run_id>/checkpoint.npz \
+  --output-net nnue/syk_nnue_<run_id>.sknnue
 ```
-
-Optional cp-regression mode (direct centipawn target):
-
-```bash
-~/.pyenv/shims/python utils/nnue/train_syknnue.py \
-  --input nnue/data/labeled.jsonl \
-  --output-net nnue/syk_v0_cp.sknnue \
-  --target-mode cp \
-  --cp-target-key teacher_cp_stm \
-  --cp-norm 400 \
-  --hidden-size 512 \
-  --epochs 4 \
-  --batch-size 128 \
-  --lr 0.005 \
-  --weight-decay 1e-6 \
-  --backend numpy \
-  --augment-mirror \
-  --seed 1
-```
-
-Export format:
-
-- magic: `SYKNNUE1`
-- version: `1`
-- quantized params for accumulator/output layers
-
-Backend notes:
-
-- `numpy` (default): portable baseline backend.
-- `torch`: faster option on machines with stable PyTorch/OpenMP runtime.
 
 ## Engine Integration Contract
 
-Sykora should be configured via UCI:
+UCI setup:
 
 ```text
 setoption name EvalFile value /absolute/path/to/net.sknnue
@@ -125,41 +126,32 @@ setoption name NnueBlend value 2
 isready
 ```
 
-Note: Sykora does not execute Stockfish `.nnue` files directly. Use Stockfish as a teacher during data labeling, then train/export a `SYKNNUE1` net for Sykora.
+Notes:
 
-For direct comparison against Stockfish with a specific net, run self-play with Stockfish as the opponent and pass `EvalFile` through engine options.
+- Sykora does not load Stockfish `.nnue` directly.
+- `NnueBlend=100` means pure NNUE; keep this for final strength checks.
+- For development, test both hybrid (`1..10`) and pure (`100`) to separate eval quality from search-speed effects.
 
 ## Acceptance Gates
 
-A new NNUE net is a promotion candidate only if all pass:
+Promote a net only if all pass:
 
-1. STS non-regression on selected themes at fixed time/depth.
-2. Archived self-play win-rate advantage over current baseline.
-3. Statistically acceptable p-value threshold (configurable in tune loop).
+1. STS non-regression on fixed subset and full suite sanity pass.
+2. Self-play win-rate vs current baseline with confidence interval.
+3. Pure NNUE (`NnueBlend=100`) does not collapse vs classical baseline.
 
-Suggested first gate:
+Suggested minimum confirmation:
 
-- STS themes: `STS1,STS2,STS4,STS8,STS9,STS15`
-- self-play: at least 80 games at fixed movetime
+- STS full suite at fixed budget.
+- 200+ game self-play at one short TC and one longer TC.
 
-## Experiment Metadata (Required)
+## Historical Logging (Required)
 
-Each trained net should have a sidecar metadata JSON, e.g.:
+Every candidate must be archived through `utils/history/history.py`:
 
-`nnue/models/syk_v0.meta.json`
+- snapshot engine
+- run match(es)
+- recompute ratings
+- archive STS output
 
-Required keys:
-
-- data source glob
-- extraction params (`min_ply`, `max_ply`, `sample_rate`, `seed`)
-- teacher params (`stockfish`, `depth`, `result_mix`, `eval_scale`)
-- training params (`hidden_size`, `epochs`, `batch_size`, `lr`, `weight_decay`, `seed`)
-- output net path + sha256
-- benchmark links (`history` match IDs, STS summary)
-
-## Near-Term Next Steps
-
-1. Add a script to generate the metadata sidecar automatically.
-2. Add a history command to archive NNUE runs and connect them to match IDs.
-3. Add quick ablation runner (material-only vs NNUE vs hybrid).
-4. Expand trainer to SCReLU and/or deeper head once baseline pipeline is stable.
+This keeps a connected graph of versions, Elo estimates, and eval progress over time.

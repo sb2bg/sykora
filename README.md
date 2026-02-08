@@ -155,7 +155,29 @@ isready
 Current implementation uses a simple Sykora-specific NNUE format (`SYKNNUE1`), not Stockfish `.nnue`.
 To use pretrained weights immediately, use a net trained/exported for this format.
 
-Starter training pipeline:
+Bullet-first dataset prep (for large Leela/lc0 chunk sets):
+
+```bash
+~/.pyenv/shims/python utils/nnue/bullet/prepare_lc0_dataset.py \
+  --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
+  --output-dir nnue/data/bullet/leela_run3 \
+  --manifest-name shards.txt
+
+~/.pyenv/shims/python utils/nnue/bullet/inspect_lc0_v6.py \
+  --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
+  --max-files 32 --records-per-file 8 \
+  --output-json nnue/data/bullet/leela_run3/inspect.json
+```
+
+If your Bullet build exports float checkpoints (`.npz`), convert to Sykora net:
+
+```bash
+~/.pyenv/shims/python utils/nnue/bullet/export_npz_to_sknnue.py \
+  --input nnue/models/bullet/<run_id>/checkpoint.npz \
+  --output-net nnue/syk_nnue_<run_id>.sknnue
+```
+
+Fallback in-repo trainer pipeline:
 
 ```bash
 ~/.pyenv/shims/python utils/nnue/extract_positions.py --output nnue/data/positions.jsonl
