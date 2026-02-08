@@ -62,6 +62,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pick a random online bot and challenge it.",
     )
     parser.add_argument(
+        "--random-team-bot",
+        default=None,
+        help=(
+            "Pick a random online bot from a team and challenge it. "
+            "Accepts team id (e.g. selfmade-bots) or full team URL."
+        ),
+    )
+    parser.add_argument(
         "--exclude",
         action="append",
         default=[],
@@ -159,6 +167,15 @@ def _extract_username(entry: object) -> str | None:
     return None
 
 
+def _extract_title(entry: object) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    title = entry.get("title")
+    if not title:
+        return ""
+    return str(title).strip().upper()
+
+
 def _is_busy(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -229,6 +246,115 @@ def _pick_random_online_bot(
 
     if not candidates:
         raise RuntimeError("No eligible online bots found.")
+
+    chooser = random.Random(seed)
+    return chooser.choice(candidates)
+
+
+def _normalize_team_id(value: str) -> str:
+    text = value.strip()
+    if not text:
+        raise ValueError("Team id/url is empty.")
+
+    if "://" in text:
+        parsed = urllib.parse.urlparse(text)
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) >= 2 and path_parts[0] == "team":
+            return path_parts[1]
+        raise ValueError(f"Could not extract team id from URL: {value!r}")
+
+    return text
+
+
+def _iter_team_users(
+    *,
+    base_url: str,
+    token: str,
+    team_id: str,
+    max_entries: int = 3000,
+) -> list[object]:
+    req = urllib.request.Request(
+        url=f"{base_url.rstrip('/')}/api/team/{team_id}/users",
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/x-ndjson, application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            entries: list[object] = []
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if isinstance(payload, list):
+                    for item in payload:
+                        entries.append(item)
+                        if len(entries) >= max_entries:
+                            return entries
+                    continue
+
+                entries.append(payload)
+                if len(entries) >= max_entries:
+                    return entries
+            return entries
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error: {exc.reason}") from exc
+
+
+def _pick_random_team_bot(
+    *,
+    base_url: str,
+    token: str,
+    team: str,
+    exclude: set[str],
+    seed: int | None,
+) -> str:
+    team_id = _normalize_team_id(team)
+    team_entries = _iter_team_users(base_url=base_url, token=token, team_id=team_id)
+    if not team_entries:
+        raise RuntimeError(f"Team {team_id!r} has no members or could not be read.")
+
+    team_bot_usernames: set[str] = set()
+    for entry in team_entries:
+        username = _extract_username(entry)
+        if not username:
+            continue
+        if _extract_title(entry) not in {"", "BOT"}:
+            continue
+        team_bot_usernames.add(username.lower())
+
+    if not team_bot_usernames:
+        raise RuntimeError(f"No bot accounts found in team {team_id!r}.")
+
+    online_entries = _iter_online_bot_entries(base_url=base_url, token=token)
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for entry in online_entries:
+        username = _extract_username(entry)
+        if not username:
+            continue
+        key = username.lower()
+        if key in seen or key in exclude:
+            continue
+        if key not in team_bot_usernames:
+            continue
+        if _is_busy(entry):
+            continue
+        seen.add(key)
+        candidates.append(username)
+
+    if not candidates:
+        raise RuntimeError(f"No eligible online bots found in team {team_id!r}.")
 
     chooser = random.Random(seed)
     return chooser.choice(candidates)
@@ -306,20 +432,37 @@ def main() -> int:
 
     try:
         token = _resolve_token(args.token)
-        if args.random_online_bot and args.username:
-            raise ValueError("Provide a username or --random-online-bot, not both.")
-        if not args.random_online_bot and not args.username:
-            raise ValueError("Provide a username or pass --random-online-bot.")
+        mode_count = sum(
+            [
+                1 if args.username else 0,
+                1 if args.random_online_bot else 0,
+                1 if args.random_team_bot else 0,
+            ]
+        )
+        if mode_count != 1:
+            raise ValueError(
+                "Choose exactly one target mode: username, --random-online-bot, "
+                "or --random-team-bot."
+            )
 
         username = args.username
+        exclude = {name.strip().lower() for name in args.exclude if name.strip()}
+        self_username = _fetch_account_username(base_url=args.base_url, token=token)
+        if self_username:
+            exclude.add(self_username.lower())
+
         if args.random_online_bot:
-            exclude = {name.strip().lower() for name in args.exclude if name.strip()}
-            self_username = _fetch_account_username(base_url=args.base_url, token=token)
-            if self_username:
-                exclude.add(self_username.lower())
             username = _pick_random_online_bot(
                 base_url=args.base_url,
                 token=token,
+                exclude=exclude,
+                seed=args.seed,
+            )
+        elif args.random_team_bot:
+            username = _pick_random_team_bot(
+                base_url=args.base_url,
+                token=token,
+                team=args.random_team_bot,
                 exclude=exclude,
                 seed=args.seed,
             )
