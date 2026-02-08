@@ -13,6 +13,7 @@ const ZobristHasher = @import("zobrist.zig").ZobristHasher;
 const search_module = @import("search.zig");
 const SearchEngine = search_module.SearchEngine;
 const SearchOptions = search_module.SearchOptions;
+const nnue = @import("nnue.zig");
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
@@ -31,6 +32,9 @@ pub const Uci = struct {
     search_thread: ?std.Thread,
     best_move: board.Move,
     log_file: ?std.fs.File,
+    use_nnue: bool,
+    eval_file_path: ?[]u8,
+    nnue_network: ?nnue.Network,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -48,6 +52,9 @@ pub const Uci = struct {
             .search_thread = null,
             .best_move = board.Move.init(0, 0, null), // null move
             .log_file = null,
+            .use_nnue = false,
+            .eval_file_path = null,
+            .nnue_network = null,
         };
 
         // Add logging option
@@ -56,6 +63,20 @@ pub const Uci = struct {
             .type = .string,
             .default_value = "<empty>",
             .on_changed = handleLogFileChange,
+            .context = uci_ptr,
+        });
+        try uci_ptr.options.items.append(allocator, Option{
+            .name = "UseNNUE",
+            .type = .check,
+            .default_value = "false",
+            .on_changed = handleUseNnueChange,
+            .context = uci_ptr,
+        });
+        try uci_ptr.options.items.append(allocator, Option{
+            .name = "EvalFile",
+            .type = .string,
+            .default_value = "<empty>",
+            .on_changed = handleEvalFileChange,
             .context = uci_ptr,
         });
 
@@ -73,6 +94,12 @@ pub const Uci = struct {
 
         if (self.log_file) |file| {
             file.close();
+        }
+        if (self.eval_file_path) |path| {
+            self.allocator.free(path);
+        }
+        if (self.nnue_network) |*network| {
+            network.deinit();
         }
         self.options.deinit();
         self.allocator.destroy(self);
@@ -305,8 +332,17 @@ pub const Uci = struct {
         // Create a copy of the board for the search thread
         var search_board = self.board;
 
+        const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
+        const use_nnue_for_search = self.use_nnue and net_ptr != null;
+
         // Create search engine
-        var search_engine = try SearchEngine.init(&search_board, self.allocator, &self.stop_search);
+        var search_engine = try SearchEngine.init(
+            &search_board,
+            self.allocator,
+            &self.stop_search,
+            use_nnue_for_search,
+            net_ptr,
+        );
         defer search_engine.deinit();
 
         // Set UCI writer for info output at each depth
@@ -358,7 +394,7 @@ pub const Uci = struct {
         try self.writeStdout("info string {s}", .{line});
     }
 
-    fn handleLogFileChange(self: *Self, value: []const u8) !void {
+    fn handleLogFileChange(self: *Self, value: []const u8) UciError!void {
         if (self.log_file) |file| {
             file.close();
             self.log_file = null;
@@ -372,5 +408,57 @@ pub const Uci = struct {
             std.fs.cwd().createFile(value, .{}) catch return UciError.IOError;
 
         self.log_file.?.seekFromEnd(0) catch return UciError.IOError;
+    }
+
+    fn handleUseNnueChange(self: *Self, value: []const u8) UciError!void {
+        if (std.mem.eql(u8, value, "true")) {
+            self.use_nnue = true;
+            return;
+        }
+        if (std.mem.eql(u8, value, "false")) {
+            self.use_nnue = false;
+            return;
+        }
+        return UciError.InvalidArgument;
+    }
+
+    fn handleEvalFileChange(self: *Self, value: []const u8) UciError!void {
+        if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
+            if (self.nnue_network) |*network| {
+                network.deinit();
+                self.nnue_network = null;
+            }
+            if (self.eval_file_path) |old_path| {
+                self.allocator.free(old_path);
+                self.eval_file_path = null;
+            }
+            return;
+        }
+
+        var loaded = nnue.Network.loadFromFile(self.allocator, value) catch |err| {
+            return switch (err) {
+                nnue.LoadError.OutOfMemory => UciError.OutOfMemory,
+                nnue.LoadError.InvalidNetwork,
+                nnue.LoadError.UnsupportedVersion,
+                nnue.LoadError.NetworkTooLarge,
+                => UciError.InvalidArgument,
+                else => UciError.IOError,
+            };
+        };
+
+        const dup_path = self.allocator.dupe(u8, value) catch {
+            loaded.deinit();
+            return UciError.OutOfMemory;
+        };
+
+        if (self.nnue_network) |*old_network| {
+            old_network.deinit();
+        }
+        if (self.eval_file_path) |old_path| {
+            self.allocator.free(old_path);
+        }
+
+        self.nnue_network = loaded;
+        self.eval_file_path = dup_path;
     }
 };

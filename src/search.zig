@@ -7,6 +7,7 @@ const piece = @import("piece.zig");
 const UciError = @import("uci_error.zig").UciError;
 const eval = @import("evaluation.zig");
 const zobrist = @import("zobrist.zig");
+const nnue = @import("nnue.zig");
 
 /// Staged move picker for efficient move ordering
 /// Generates moves lazily in stages: TT move -> Good captures -> Killers -> Quiet moves -> Bad captures
@@ -850,11 +851,15 @@ pub const SearchEngine = struct {
     // Game history (positions before search started) - for proper repetition detection
     game_history: [512]u64,
     game_history_count: usize,
+    use_nnue: bool,
+    nnue_net: ?*const nnue.Network,
 
     pub fn init(
         board_ptr: *Board,
         allocator: std.mem.Allocator,
         stop_search: *std.atomic.Value(bool),
+        use_nnue: bool,
+        nnue_net: ?*const nnue.Network,
     ) !Self {
         const tt = try TranspositionTable.init(allocator, 64); // 64MB TT
 
@@ -875,11 +880,22 @@ pub const SearchEngine = struct {
             .history_count = 0,
             .game_history = undefined,
             .game_history_count = 0,
+            .use_nnue = use_nnue,
+            .nnue_net = nnue_net,
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.tt.deinit();
+    }
+
+    inline fn evaluatePosition(self: *Self) i32 {
+        if (self.use_nnue) {
+            if (self.nnue_net) |net| {
+                return nnue.evaluate(net, self.board);
+            }
+        }
+        return eval.evaluate(self.board);
     }
 
     /// Set the game history from prior positions (for repetition detection)
@@ -1156,7 +1172,7 @@ pub const SearchEngine = struct {
         }
 
         // Static evaluation for pruning decisions
-        const static_eval = if (!in_check) eval.evaluate(self.board) else -INF;
+        const static_eval = if (!in_check) self.evaluatePosition() else -INF;
 
         // Reverse futility pruning (static null move pruning)
         // If static eval is far above beta at shallow depths, prune immediately
@@ -1466,7 +1482,7 @@ pub const SearchEngine = struct {
         // Stand pat - but only when not in check
         var stand_pat: i32 = -INF;
         if (!in_check) {
-            stand_pat = eval.evaluate(self.board);
+            stand_pat = self.evaluatePosition();
 
             if (stand_pat >= beta) {
                 return beta;
