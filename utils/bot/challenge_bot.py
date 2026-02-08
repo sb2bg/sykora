@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 import urllib.error
 import urllib.parse
@@ -50,7 +51,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Challenge a Lichess user/bot account.",
     )
-    parser.add_argument("username", help="Target Lichess username to challenge.")
+    parser.add_argument(
+        "username",
+        nargs="?",
+        help="Target Lichess username to challenge.",
+    )
+    parser.add_argument(
+        "--random-online-bot",
+        action="store_true",
+        help="Pick a random online bot and challenge it.",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Username to exclude from random selection (repeatable).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed for deterministic random choice.",
+    )
     parser.add_argument(
         "--token",
         default=None,
@@ -90,6 +112,126 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Variant key (default: standard).",
     )
     return parser
+
+
+def _api_get_json(*, base_url: str, token: str, path: str) -> dict[str, object]:
+    req = urllib.request.Request(
+        url=f"{base_url.rstrip('/')}{path}",
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            if not raw.strip():
+                return {}
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error: {exc.reason}") from exc
+
+
+def _fetch_account_username(*, base_url: str, token: str) -> str | None:
+    account = _api_get_json(base_url=base_url, token=token, path="/api/account")
+    username = account.get("username")
+    return str(username).strip() if username else None
+
+
+def _extract_username(entry: object) -> str | None:
+    if isinstance(entry, str):
+        value = entry.strip()
+        return value if value else None
+    if not isinstance(entry, dict):
+        return None
+
+    for key in ("username", "name", "id"):
+        value = entry.get(key)
+        if value:
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
+def _is_busy(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return bool(entry.get("playing"))
+
+
+def _iter_online_bot_entries(*, base_url: str, token: str, max_entries: int = 1000) -> list[object]:
+    req = urllib.request.Request(
+        url=f"{base_url.rstrip('/')}/api/bot/online",
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/x-ndjson, application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            entries: list[object] = []
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if isinstance(payload, list):
+                    for item in payload:
+                        entries.append(item)
+                        if len(entries) >= max_entries:
+                            return entries
+                    continue
+
+                entries.append(payload)
+                if len(entries) >= max_entries:
+                    return entries
+            return entries
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error: {exc.reason}") from exc
+
+
+def _pick_random_online_bot(
+    *,
+    base_url: str,
+    token: str,
+    exclude: set[str],
+    seed: int | None,
+) -> str:
+    entries = _iter_online_bot_entries(base_url=base_url, token=token)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        username = _extract_username(entry)
+        if not username:
+            continue
+        key = username.lower()
+        if key in exclude or key in seen:
+            continue
+        if _is_busy(entry):
+            continue
+        seen.add(key)
+        candidates.append(username)
+
+    if not candidates:
+        raise RuntimeError("No eligible online bots found.")
+
+    chooser = random.Random(seed)
+    return chooser.choice(candidates)
 
 
 def _post_challenge(
@@ -164,10 +306,29 @@ def main() -> int:
 
     try:
         token = _resolve_token(args.token)
+        if args.random_online_bot and args.username:
+            raise ValueError("Provide a username or --random-online-bot, not both.")
+        if not args.random_online_bot and not args.username:
+            raise ValueError("Provide a username or pass --random-online-bot.")
+
+        username = args.username
+        if args.random_online_bot:
+            exclude = {name.strip().lower() for name in args.exclude if name.strip()}
+            self_username = _fetch_account_username(base_url=args.base_url, token=token)
+            if self_username:
+                exclude.add(self_username.lower())
+            username = _pick_random_online_bot(
+                base_url=args.base_url,
+                token=token,
+                exclude=exclude,
+                seed=args.seed,
+            )
+
+        assert username is not None
         response = _post_challenge(
             base_url=args.base_url,
             token=token,
-            username=args.username,
+            username=username,
             minutes=args.minutes,
             increment=args.increment,
             rated=args.rated,
@@ -179,7 +340,7 @@ def main() -> int:
         return 1
 
     challenge_id, challenge_url = _extract_challenge_info(response)
-    print(f"Challenged {args.username}.")
+    print(f"Challenged {username}.")
     if challenge_id:
         print(f"Challenge ID: {challenge_id}")
     if challenge_url:
