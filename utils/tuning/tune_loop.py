@@ -109,8 +109,11 @@ def get_engine_binary(snapshot_id: str) -> Path:
 def read_current_baseline() -> Optional[str]:
     if not CURRENT_BASELINE_FILE.is_file():
         return None
-    value = CURRENT_BASELINE_FILE.read_text().strip()
-    return value or None
+    for raw in CURRENT_BASELINE_FILE.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            return line
+    return None
 
 
 def write_current_baseline(snapshot_id: str) -> None:

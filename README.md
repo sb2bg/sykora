@@ -83,14 +83,19 @@ utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 80 --output-di
 
 The script prints an estimated Elo difference (`candidate - baseline`), a 95% confidence interval, and a p-value versus equal strength.
 
-To compare current working tree against a git ref in one command:
+To compare current working tree against your configured baseline in one command:
 
 ```bash
-utils/match/selfplay_vs_ref.sh HEAD~1 --games 120 --movetime-ms 200
-utils/match/selfplay_vs_ref.sh v0.2.0 --games 200 --depth 8
+# history/current_baseline.txt can contain either:
+# 1) a snapshot id (history/engines/<id>/engine), or
+# 2) a direct path to a baseline binary
+utils/match/selfplay_vs_ref.sh --games 120 --movetime-ms 200
+
+# or override baseline at runtime
+utils/match/selfplay_vs_ref.sh --baseline history/engines/<snapshot_id>/engine --games 200 --depth 8
 ```
 
-This wrapper builds both versions in `ReleaseFast`, runs self-play, and prints the same Elo/confidence summary.
+This wrapper builds only the current working tree in `ReleaseFast`, runs self-play vs the baseline, and prints the same Elo/confidence summary.
 
 For long-term version tracking, use the history ledger:
 
