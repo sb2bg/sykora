@@ -564,6 +564,7 @@ const REPETITION_HUGE_ADV_CP: i32 = 260;
 const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
 const REPETITION_CYCLE_EVAL_THRESHOLD_CP: i32 = 80;
 const REPETITION_CYCLE_PENALTY_CP: i32 = 200;
+const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
@@ -589,6 +590,12 @@ fn scoreFromTT(score: i32, ply: u32) i32 {
         return score + @as(i32, @intCast(ply));
     }
     return score;
+}
+
+inline fn isPurePawnEndgame(b: board.BitBoard) bool {
+    const kings = b.getKindBitboard(.king);
+    const pawns = b.getKindBitboard(.pawn);
+    return b.occupied() == (kings | pawns);
 }
 
 // Late Move Reduction parameters
@@ -1369,6 +1376,13 @@ pub const SearchEngine = struct {
                 self.history_count += 1;
             }
             const repetition_matches_after_move = self.repetitionMatchCount();
+            const extension: u32 = if (ply == 0 and
+                search_depth >= 2 and
+                isPurePawnEndgame(old_board))
+                PAWN_ENDGAME_ROOT_EXTENSION
+            else
+                0;
+            const next_depth = search_depth - 1 + extension;
 
             var score: i32 = undefined;
 
@@ -1390,16 +1404,16 @@ pub const SearchEngine = struct {
                 reduction = @min(reduction, search_depth - 1);
 
                 // Search with reduced depth
-                score = -try self.alphaBeta(-alpha - 1, -alpha, search_depth - 1 - reduction, ply + 1, true);
+                score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - reduction, ply + 1, true);
 
                 // If LMR found something good, re-search at full depth
                 if (score > alpha) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, search_depth - 1, ply + 1, true);
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
                 }
             } else {
                 // PVS - search with null window first if not first move
                 if (moves_searched > 0) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, search_depth - 1, ply + 1, true);
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
                 } else {
                     // First move always searched with full window
                     score = alpha + 1; // Force full search
@@ -1408,7 +1422,7 @@ pub const SearchEngine = struct {
 
             // Full window search if PVS failed high or first move
             if (score > alpha) {
-                score = -try self.alphaBeta(-beta, -alpha, search_depth - 1, ply + 1, true);
+                score = -try self.alphaBeta(-beta, -alpha, next_depth, ply + 1, true);
             }
 
             // Unmake move
