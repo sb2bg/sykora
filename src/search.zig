@@ -1339,23 +1339,22 @@ pub const SearchEngine = struct {
         var quiets_tried: [64]Move = undefined;
         var quiets_tried_count: usize = 0;
         const color = self.board.board.move;
+        const root_pawn_endgame = ply == 0 and search_depth >= 2 and isPurePawnEndgame(self.board.board);
 
         while (move_picker.next()) |move| {
-            // Save state
-            const old_board = self.board.board;
-            const old_hash = self.board.zobrist_hasher.zobrist_hash;
             const old_previous = self.previous_move;
 
-            const is_capture = old_board.getPieceAt(move.to(), if (old_board.move == .white) .black else .white) != null;
+            const move_color = self.board.board.move;
+            const opponent_color = if (move_color == .white) piece.Color.black else piece.Color.white;
+            const is_capture = self.board.board.getPieceAt(move.to(), opponent_color) != null;
             const is_promotion = move.promotion() != null;
 
             // Futility pruning - skip quiet moves if futile (but not if move gives check)
             if (futile and !is_capture and !is_promotion and moves_searched > 0) {
                 // Make the move temporarily to check if it gives check
-                self.board.makeMoveUnchecked(move);
+                const probe_undo = self.board.makeMoveWithUndoUnchecked(move);
                 const gives_check = self.board.isInCheck(self.board.board.move);
-                self.board.board = old_board;
-                self.board.zobrist_hasher.zobrist_hash = old_hash;
+                self.board.unmakeMoveUnchecked(move, probe_undo);
 
                 if (!gives_check and !self.killer_moves.isKiller(move, ply)) {
                     continue;
@@ -1363,7 +1362,7 @@ pub const SearchEngine = struct {
             }
 
             // Make move
-            self.board.makeMoveUnchecked(move);
+            const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.previous_move = move;
             self.nodes_searched += 1;
 
@@ -1376,7 +1375,7 @@ pub const SearchEngine = struct {
             const repetition_matches_after_move = self.repetitionMatchCount();
             const extension: u32 = if (ply == 0 and
                 search_depth >= 2 and
-                isPurePawnEndgame(old_board))
+                root_pawn_endgame)
                 PAWN_ENDGAME_ROOT_EXTENSION
             else
                 0;
@@ -1424,8 +1423,7 @@ pub const SearchEngine = struct {
             }
 
             // Unmake move
-            self.board.board = old_board;
-            self.board.zobrist_hasher.zobrist_hash = old_hash;
+            self.board.unmakeMoveUnchecked(move, undo);
             self.previous_move = old_previous;
             self.history_count = old_hist_count; // Restore history count
 
@@ -1661,19 +1659,14 @@ pub const SearchEngine = struct {
                 }
             }
 
-            // Save state
-            const old_board = self.board.board;
-            const old_hash = self.board.zobrist_hasher.zobrist_hash;
-
             // Make move
-            self.board.makeMoveUnchecked(move);
+            const undo = self.board.makeMoveWithUndoUnchecked(move);
 
             // Recursive search
             const score = -try self.quiescence(-beta, -alpha, ply + 1);
 
             // Unmake move
-            self.board.board = old_board;
-            self.board.zobrist_hasher.zobrist_hash = old_hash;
+            self.board.unmakeMoveUnchecked(move, undo);
 
             if (score >= beta) {
                 return beta;

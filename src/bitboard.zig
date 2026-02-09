@@ -540,6 +540,20 @@ pub const Board = struct {
     board: BitBoard,
     zobrist_hasher: ZobristHasher = ZobristHasher.init(),
 
+    pub const Undo = struct {
+        prev_hash: u64,
+        prev_castle_rights: CastleRights,
+        prev_en_passant_square: ?u8,
+        prev_halfmove_clock: u8,
+        prev_fullmove_number: u16,
+        mover_color: pieceInfo.Color,
+        moved_piece: pieceInfo.Type,
+        captured_piece: ?pieceInfo.Type,
+        captured_square: ?u8,
+        castle_rook_from: ?u8,
+        castle_rook_to: ?u8,
+    };
+
     pub fn init() Self {
         const board = BitBoard.init();
         var self = Self{ .board = board };
@@ -629,19 +643,125 @@ pub const Board = struct {
         }
     }
 
+    /// Make a pseudo-legal move and return undo data for fast unmake.
+    pub inline fn makeMoveWithUndoUnchecked(self: *Self, move: Move) Undo {
+        const color = self.board.move;
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+        const from_sq = move.from();
+        const to_sq = move.to();
+        const moved_piece = self.board.getPieceAt(from_sq, color).?;
+
+        const prev_hash = self.zobrist_hasher.zobrist_hash;
+        const prev_castle_rights = self.board.castle_rights;
+        const prev_en_passant_square = self.board.en_passant_square;
+        const prev_halfmove_clock = self.board.halfmove_clock;
+        const prev_fullmove_number = self.board.fullmove_number;
+        const old_ep_file = epFileForHash(self.board);
+
+        var castle_rook_from: ?u8 = null;
+        var castle_rook_to: ?u8 = null;
+        if (moved_piece == .king) {
+            const from_file = from_sq % 8;
+            const to_file = to_sq % 8;
+            if (from_file == 4 and to_file == 6) {
+                castle_rook_from = from_sq + 3;
+                castle_rook_to = from_sq + 1;
+            } else if (from_file == 4 and to_file == 2) {
+                castle_rook_from = from_sq - 4;
+                castle_rook_to = from_sq - 1;
+            }
+        }
+
+        var captured_piece = self.board.getPieceAt(to_sq, opponent_color);
+        var captured_square: ?u8 = if (captured_piece != null) to_sq else null;
+        if (moved_piece == .pawn and prev_en_passant_square != null and prev_en_passant_square.? == to_sq and captured_piece == null) {
+            captured_piece = .pawn;
+            captured_square = if (color == .white) to_sq - 8 else to_sq + 8;
+        }
+
+        self.applyMoveUnchecked(move);
+
+        var hash = prev_hash;
+        hash ^= zobrist.RandomTurn;
+        hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(moved_piece, color, from_sq)];
+        const final_piece = if (move.promotion()) |promo| promo else moved_piece;
+        hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(final_piece, color, to_sq)];
+
+        if (captured_piece) |cp| {
+            hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(cp, opponent_color, captured_square.?)];
+        }
+
+        if (castle_rook_from) |rook_from| {
+            hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(.rook, color, rook_from)];
+            hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(.rook, color, castle_rook_to.?)];
+        }
+
+        const new_castle = self.board.castle_rights;
+        if (prev_castle_rights.white_kingside != new_castle.white_kingside) hash ^= zobrist.RandomCastle[0];
+        if (prev_castle_rights.white_queenside != new_castle.white_queenside) hash ^= zobrist.RandomCastle[1];
+        if (prev_castle_rights.black_kingside != new_castle.black_kingside) hash ^= zobrist.RandomCastle[2];
+        if (prev_castle_rights.black_queenside != new_castle.black_queenside) hash ^= zobrist.RandomCastle[3];
+
+        const new_ep_file = epFileForHash(self.board);
+        if (old_ep_file != new_ep_file) {
+            if (old_ep_file) |f| hash ^= zobrist.RandomEnPassant[f];
+            if (new_ep_file) |f| hash ^= zobrist.RandomEnPassant[f];
+        }
+
+        self.zobrist_hasher.zobrist_hash = hash;
+        self.verifyHashDebug();
+
+        return Undo{
+            .prev_hash = prev_hash,
+            .prev_castle_rights = prev_castle_rights,
+            .prev_en_passant_square = prev_en_passant_square,
+            .prev_halfmove_clock = prev_halfmove_clock,
+            .prev_fullmove_number = prev_fullmove_number,
+            .mover_color = color,
+            .moved_piece = moved_piece,
+            .captured_piece = captured_piece,
+            .captured_square = captured_square,
+            .castle_rook_from = castle_rook_from,
+            .castle_rook_to = castle_rook_to,
+        };
+    }
+
+    /// Restore board state from undo data produced by `makeMoveWithUndoUnchecked`.
+    pub inline fn unmakeMoveUnchecked(self: *Self, move: Move, undo: Undo) void {
+        const from_sq = move.from();
+        const to_sq = move.to();
+        const color = undo.mover_color;
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+        self.board.clearSquare(to_sq);
+        self.board.setPieceAt(from_sq, color, undo.moved_piece);
+
+        if (undo.castle_rook_from) |rook_from| {
+            const rook_to = undo.castle_rook_to.?;
+            self.board.clearSquare(rook_to);
+            self.board.setPieceAt(rook_from, color, .rook);
+        }
+
+        if (undo.captured_piece) |cp| {
+            self.board.setPieceAt(undo.captured_square.?, opponent_color, cp);
+        }
+
+        self.board.move = color;
+        self.board.castle_rights = undo.prev_castle_rights;
+        self.board.en_passant_square = undo.prev_en_passant_square;
+        self.board.halfmove_clock = undo.prev_halfmove_clock;
+        self.board.fullmove_number = undo.prev_fullmove_number;
+        self.zobrist_hasher.zobrist_hash = undo.prev_hash;
+        self.verifyHashDebug();
+    }
+
     /// Make a move on the board using a Move structure.
     /// This updates the board state and zobrist hash.
     /// Note: This does NOT validate that the move is legal. Use with caution.
     pub fn makeMove(self: *Self, move: Move) UciError!void {
         const color = self.getTurn();
         _ = self.board.getPieceAt(move.from(), color) orelse return error.InvalidMove;
-        const old_board = self.board;
-
-        // Apply the move unchecked
-        self.applyMoveUnchecked(move);
-
-        self.updateIncrementalHash(old_board);
-        self.verifyHashDebug();
+        _ = self.makeMoveWithUndoUnchecked(move);
     }
 
     /// Make a move and update the hash, assuming the move is pseudo-legal.
@@ -650,13 +770,7 @@ pub const Board = struct {
         const color = self.board.move;
         // We assume the move is valid so piece must exist
         _ = self.board.getPieceAt(move.from(), color).?;
-        const old_board = self.board;
-
-        // Apply the move
-        self.applyMoveUnchecked(move);
-
-        self.updateIncrementalHash(old_board);
-        self.verifyHashDebug();
+        _ = self.makeMoveWithUndoUnchecked(move);
     }
 
     /// Make a move from string notation (e.g., "e2e4").

@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  utils/match/selfplay_vs_ref.sh [--baseline <spec>] [--archive] [selfplay.py args...]
+  utils/match/selfplay_vs_ref.sh [--baseline <spec>] [--no-archive] [selfplay.py args...]
 
 Description:
   Builds the current working tree (candidate) in ReleaseFast and runs
@@ -22,14 +22,15 @@ Description:
     - path to an engine binary
     - snapshot ID under history/engines/<id>/engine
 
-  With --archive:
+  By default this script archives:
     - snapshots baseline/candidate binaries into history/engines/
     - runs an archived match via utils/history/history.py match
     - updates ratings/network inputs under history/
 
 Examples:
   utils/match/selfplay_vs_ref.sh --games 120 --movetime-ms 200
-  utils/match/selfplay_vs_ref.sh --archive --games 200 --movetime-ms 60
+  utils/match/selfplay_vs_ref.sh --games 200 --movetime-ms 60
+  utils/match/selfplay_vs_ref.sh --no-archive --games 40 --movetime-ms 30
   utils/match/selfplay_vs_ref.sh --baseline history/engines/<snapshot_id>/engine --games 200 --depth 8
 EOF
 }
@@ -40,7 +41,7 @@ BASE_BIN="$TMP_DIR/sykora_baseline"
 CAND_BIN="$TMP_DIR/sykora_working"
 BASELINE_FILE="$ROOT/history/current_baseline.txt"
 BASELINE_SPEC=""
-ARCHIVE_MODE=0
+ARCHIVE_MODE=1
 SELFPLAY_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --archive)
       ARCHIVE_MODE=1
+      shift
+      ;;
+    --no-archive)
+      ARCHIVE_MODE=0
       shift
       ;;
     -h|--help)
