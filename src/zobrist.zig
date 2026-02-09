@@ -133,11 +133,17 @@ pub const ZobristHasher = struct {
         var hash_value: u64 = 0;
 
         // piece positions
-        for (0..64) |sq| {
-            if (board.getPieceAt(@intCast(sq), .white)) |piece_type| {
-                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .white) + sq];
-            } else if (board.getPieceAt(@intCast(sq), .black)) |piece_type| {
-                hash_value ^= RandomPiece[64 * getPieceValue(piece_type, .black) + sq];
+        const colors = [_]Color{ .white, .black };
+        const piece_types = [_]PieceType{ .pawn, .knight, .bishop, .rook, .queen, .king };
+        inline for (colors) |color| {
+            const color_bb = board.getColorBitboard(color);
+            inline for (piece_types) |piece_type| {
+                var pieces = color_bb & board.getKindBitboard(piece_type);
+                while (pieces != 0) {
+                    const sq: u8 = @intCast(@ctz(pieces));
+                    pieces &= pieces - 1;
+                    hash_value ^= RandomPiece[pieceRandomIndex(piece_type, color, sq)];
+                }
             }
         }
 
@@ -200,6 +206,11 @@ pub const ZobristHasher = struct {
         };
     }
 
+    /// Compute the index inside `RandomPiece` for a piece on a square.
+    pub inline fn pieceRandomIndex(piece_type: PieceType, color: Color, square: u8) usize {
+        return 64 * getPieceValue(piece_type, color) + square;
+    }
+
     /// Incrementally update the Zobrist hash after a move is made.
     /// This is more efficient than recomputing the entire hash, as it only updates
     /// the parts of the hash that changed due to the move.
@@ -231,8 +242,8 @@ pub const ZobristHasher = struct {
 
         // XOR-out the piece on its origin square,
         // XOR-in the same piece on its destination.
-        const moved_idx_from = 64 * getPieceValue(moved_piece, color) + from;
-        const moved_idx_to = 64 * getPieceValue(moved_piece, color) + to;
+        const moved_idx_from = pieceRandomIndex(moved_piece, color, from);
+        const moved_idx_to = pieceRandomIndex(moved_piece, color, to);
 
         self.zobrist_hash ^= RandomPiece[moved_idx_from]; // gone
         self.zobrist_hash ^= RandomPiece[moved_idx_to]; // arrived
@@ -240,7 +251,7 @@ pub const ZobristHasher = struct {
         // captured piece (if any)
         if (captured_piece) |cp| {
             const captured_color: Color = if (color == .white) .black else .white;
-            const captured_idx = 64 * getPieceValue(cp, captured_color) + to;
+            const captured_idx = pieceRandomIndex(cp, captured_color, to);
             self.zobrist_hash ^= RandomPiece[captured_idx]; // removed
         }
 

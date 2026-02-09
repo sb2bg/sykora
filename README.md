@@ -51,6 +51,13 @@ To run perft validation:
 utils/test/test_perft_suite.sh
 ```
 
+To benchmark search speed (NPS):
+
+```bash
+~/.pyenv/shims/python utils/bench/nps.py --engine ./zig-out/bin/sykora --depth 10
+~/.pyenv/shims/python utils/bench/nps.py --engine ./zig-out/bin/sykora --movetime-ms 500 --runs 2
+```
+
 To run Strategic Test Suite (STS) EPD files (requires `python-chess`):
 
 ```bash

@@ -515,7 +515,6 @@ pub const MovePicker = struct {
 
         // Save state
         const old_board = self.board_ptr.board;
-        const old_hash = self.board_ptr.zobrist_hasher.zobrist_hash;
 
         // Make move
         self.board_ptr.applyMoveUnchecked(move);
@@ -525,7 +524,6 @@ pub const MovePicker = struct {
 
         // Restore state
         self.board_ptr.board = old_board;
-        self.board_ptr.zobrist_hasher.zobrist_hash = old_hash;
 
         return legal;
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const UciError = @import("uci_error.zig").UciError;
 const pieceInfo = @import("piece.zig");
 const fen = @import("fen.zig");
@@ -557,18 +558,90 @@ pub const Board = struct {
         return self;
     }
 
+    inline fn epFileForHash(b: BitBoard) ?u8 {
+        if (b.en_passant_square) |ep_sq| {
+            if (b.hasAdjacentPawn(ep_sq, b.move)) {
+                return ep_sq % 8;
+            }
+        }
+        return null;
+    }
+
+    fn updateIncrementalHash(self: *Self, old_board: BitBoard) void {
+        // Side to move always flips.
+        self.zobrist_hasher.zobrist_hash ^= zobrist.RandomTurn;
+
+        const colors = [_]pieceInfo.Color{ .white, .black };
+        const piece_types = [_]pieceInfo.Type{ .pawn, .knight, .bishop, .rook, .queen, .king };
+
+        inline for (colors) |color| {
+            const old_color_bb = old_board.getColorBitboard(color);
+            const new_color_bb = self.board.getColorBitboard(color);
+
+            inline for (piece_types) |piece_type| {
+                const old_set = old_color_bb & old_board.getKindBitboard(piece_type);
+                const new_set = new_color_bb & self.board.getKindBitboard(piece_type);
+
+                var removed = old_set & ~new_set;
+                while (removed != 0) {
+                    const sq: u8 = @intCast(@ctz(removed));
+                    removed &= removed - 1;
+                    self.zobrist_hasher.zobrist_hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(piece_type, color, sq)];
+                }
+
+                var added = new_set & ~old_set;
+                while (added != 0) {
+                    const sq: u8 = @intCast(@ctz(added));
+                    added &= added - 1;
+                    self.zobrist_hasher.zobrist_hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(piece_type, color, sq)];
+                }
+            }
+        }
+
+        // Toggle castling flags that changed.
+        if (old_board.castle_rights.white_kingside != self.board.castle_rights.white_kingside) {
+            self.zobrist_hasher.zobrist_hash ^= zobrist.RandomCastle[0];
+        }
+        if (old_board.castle_rights.white_queenside != self.board.castle_rights.white_queenside) {
+            self.zobrist_hasher.zobrist_hash ^= zobrist.RandomCastle[1];
+        }
+        if (old_board.castle_rights.black_kingside != self.board.castle_rights.black_kingside) {
+            self.zobrist_hasher.zobrist_hash ^= zobrist.RandomCastle[2];
+        }
+        if (old_board.castle_rights.black_queenside != self.board.castle_rights.black_queenside) {
+            self.zobrist_hasher.zobrist_hash ^= zobrist.RandomCastle[3];
+        }
+
+        // Handle en passant hash when applicable under Polyglot rules.
+        const old_ep_file = epFileForHash(old_board);
+        const new_ep_file = epFileForHash(self.board);
+        if (old_ep_file != new_ep_file) {
+            if (old_ep_file) |f| self.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[f];
+            if (new_ep_file) |f| self.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[f];
+        }
+    }
+
+    inline fn verifyHashDebug(self: *Self) void {
+        if (builtin.mode == .Debug) {
+            var verifier = ZobristHasher.init();
+            verifier.hash(self.board);
+            std.debug.assert(verifier.zobrist_hash == self.zobrist_hasher.zobrist_hash);
+        }
+    }
+
     /// Make a move on the board using a Move structure.
     /// This updates the board state and zobrist hash.
     /// Note: This does NOT validate that the move is legal. Use with caution.
     pub fn makeMove(self: *Self, move: Move) UciError!void {
         const color = self.getTurn();
         _ = self.board.getPieceAt(move.from(), color) orelse return error.InvalidMove;
+        const old_board = self.board;
 
         // Apply the move unchecked
         self.applyMoveUnchecked(move);
 
-        // Recompute hash to avoid incremental edge-case bugs (EP/castle/promo).
-        self.zobrist_hasher.hash(self.board);
+        self.updateIncrementalHash(old_board);
+        self.verifyHashDebug();
     }
 
     /// Make a move and update the hash, assuming the move is pseudo-legal.
@@ -577,12 +650,13 @@ pub const Board = struct {
         const color = self.board.move;
         // We assume the move is valid so piece must exist
         _ = self.board.getPieceAt(move.from(), color).?;
+        const old_board = self.board;
 
         // Apply the move
         self.applyMoveUnchecked(move);
 
-        // Recompute hash to avoid incremental edge-case bugs (EP/castle/promo).
-        self.zobrist_hasher.hash(self.board);
+        self.updateIncrementalHash(old_board);
+        self.verifyHashDebug();
     }
 
     /// Make a move from string notation (e.g., "e2e4").
@@ -618,7 +692,6 @@ pub const Board = struct {
         for (pseudo_legal.slice()) |move| {
             // Save state
             const old_board = self.board;
-            const old_hash = self.zobrist_hasher.zobrist_hash;
 
             // Make move
             self.applyMoveUnchecked(move);
@@ -628,7 +701,6 @@ pub const Board = struct {
 
             // Restore state
             self.board = old_board;
-            self.zobrist_hasher.zobrist_hash = old_hash;
 
             if (legal) {
                 moves.append(move);
@@ -678,7 +750,6 @@ pub const Board = struct {
         for (pseudo_legal.slice()) |move| {
             // Save state
             const old_board = self.board;
-            const old_hash = self.zobrist_hasher.zobrist_hash;
 
             // Make move
             self.applyMoveUnchecked(move);
@@ -687,7 +758,6 @@ pub const Board = struct {
             if (self.isInCheck(color)) {
                 // Illegal move, restore and skip
                 self.board = old_board;
-                self.zobrist_hasher.zobrist_hash = old_hash;
                 continue;
             }
 
@@ -702,7 +772,6 @@ pub const Board = struct {
 
             // Restore state
             self.board = old_board;
-            self.zobrist_hasher.zobrist_hash = old_hash;
         }
 
         return nodes;
@@ -727,7 +796,6 @@ pub const Board = struct {
             for (pseudo_legal.slice()) |move| {
                 // Save state
                 const old_board = self.board;
-                const old_hash = self.zobrist_hasher.zobrist_hash;
 
                 // Make move
                 self.applyMoveUnchecked(move);
@@ -736,7 +804,6 @@ pub const Board = struct {
                 if (self.isInCheck(moving_color)) {
                     // Illegal move, restore and skip
                     self.board = old_board;
-                    self.zobrist_hasher.zobrist_hash = old_hash;
                     continue;
                 }
 
@@ -799,7 +866,6 @@ pub const Board = struct {
 
                 // Restore state
                 self.board = old_board;
-                self.zobrist_hasher.zobrist_hash = old_hash;
             }
             return;
         }
@@ -808,7 +874,6 @@ pub const Board = struct {
         for (pseudo_legal.slice()) |move| {
             // Save state
             const old_board = self.board;
-            const old_hash = self.zobrist_hasher.zobrist_hash;
 
             // Make move
             self.applyMoveUnchecked(move);
@@ -817,7 +882,6 @@ pub const Board = struct {
             if (self.isInCheck(moving_color)) {
                 // Illegal move, restore and skip
                 self.board = old_board;
-                self.zobrist_hasher.zobrist_hash = old_hash;
                 continue;
             }
 
@@ -828,7 +892,6 @@ pub const Board = struct {
 
             // Restore state
             self.board = old_board;
-            self.zobrist_hasher.zobrist_hash = old_hash;
         }
     }
 
@@ -939,7 +1002,6 @@ pub const Board = struct {
         for (moves.slice()) |move| {
             // Save state
             const old_board = self.board;
-            const old_hash = self.zobrist_hasher.zobrist_hash;
 
             // Make move
             self.applyMoveUnchecked(move);
@@ -953,7 +1015,6 @@ pub const Board = struct {
 
             // Restore state
             self.board = old_board;
-            self.zobrist_hasher.zobrist_hash = old_hash;
         }
 
         writer.print("\nTotal nodes: {d}\n", .{total_nodes}) catch return UciError.IOError;
@@ -1204,7 +1265,6 @@ pub const Board = struct {
         for (pseudo_captures.slice()) |move| {
             // Save state
             const old_board = self.board;
-            const old_hash = self.zobrist_hasher.zobrist_hash;
 
             // Make move
             self.applyMoveUnchecked(move);
@@ -1214,7 +1274,6 @@ pub const Board = struct {
 
             // Restore state
             self.board = old_board;
-            self.zobrist_hasher.zobrist_hash = old_hash;
 
             if (legal) {
                 moves.append(move);
@@ -1258,7 +1317,6 @@ pub const Board = struct {
         for (pseudo_quiets.slice()) |move| {
             // Save state
             const old_board = self.board;
-            const old_hash = self.zobrist_hasher.zobrist_hash;
 
             // Make move
             self.applyMoveUnchecked(move);
@@ -1268,7 +1326,6 @@ pub const Board = struct {
 
             // Restore state
             self.board = old_board;
-            self.zobrist_hasher.zobrist_hash = old_hash;
 
             if (legal) {
                 moves.append(move);
