@@ -517,7 +517,7 @@ pub const MovePicker = struct {
         const old_board = self.board_ptr.board;
 
         // Make move
-        self.board_ptr.applyMoveUnchecked(move);
+        self.board_ptr.applyMoveUncheckedForLegality(move);
 
         // Check legality
         const legal = !self.board_ptr.isInCheck(color);

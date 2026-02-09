@@ -694,7 +694,7 @@ pub const Board = struct {
             const old_board = self.board;
 
             // Make move
-            self.applyMoveUnchecked(move);
+            self.applyMoveUncheckedForLegality(move);
 
             // Check if our king is in check after the move (illegal)
             const legal = !self.isInCheck(color);
@@ -1202,6 +1202,50 @@ pub const Board = struct {
         self.board.move = opponent_color;
     }
 
+    /// Lightweight move application used only for one-ply legality filtering.
+    /// Skips en-passant/castling-rights bookkeeping because callers restore `old_board` immediately.
+    pub inline fn applyMoveUncheckedForLegality(self: *Self, move: Move) void {
+        const color = self.board.move;
+        const from_sq = move.from();
+        const to_sq = move.to();
+        const piece_type = self.board.getPieceAt(from_sq, color) orelse return;
+        const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+        // Handle captures.
+        self.board.clearSquare(to_sq);
+
+        // Handle en passant capture.
+        if (piece_type == .pawn and self.board.en_passant_square == to_sq) {
+            const ep_capture_square = if (color == .white) to_sq - 8 else to_sq + 8;
+            self.board.clearSquare(ep_capture_square);
+        }
+
+        // Handle castling rook move.
+        if (piece_type == .king) {
+            const from_file = from_sq % 8;
+            const to_file = to_sq % 8;
+            if (from_file == 4 and to_file == 6) {
+                const rook_from = from_sq + 3;
+                const rook_to = from_sq + 1;
+                self.board.clearSquare(rook_from);
+                self.board.setPieceAt(rook_to, color, .rook);
+            } else if (from_file == 4 and to_file == 2) {
+                const rook_from = from_sq - 4;
+                const rook_to = from_sq - 1;
+                self.board.clearSquare(rook_from);
+                self.board.setPieceAt(rook_to, color, .rook);
+            }
+        }
+
+        // Move the piece.
+        self.board.clearSquare(from_sq);
+        const final_piece = if (move.promotion()) |promo| promo else piece_type;
+        self.board.setPieceAt(to_sq, color, final_piece);
+
+        // Only side-to-move matters for check detection after this tentative move.
+        self.board.move = opponent_color;
+    }
+
     /// Generate all pseudo-legal moves (may leave king in check)
     fn generatePseudoLegalMoves(self: *Self, moves: *MoveList) !void {
         const color = self.board.move;
@@ -1267,7 +1311,7 @@ pub const Board = struct {
             const old_board = self.board;
 
             // Make move
-            self.applyMoveUnchecked(move);
+            self.applyMoveUncheckedForLegality(move);
 
             // Check legality
             const legal = !self.isInCheck(color);
@@ -1319,7 +1363,7 @@ pub const Board = struct {
             const old_board = self.board;
 
             // Make move
-            self.applyMoveUnchecked(move);
+            self.applyMoveUncheckedForLegality(move);
 
             // Check legality
             const legal = !self.isInCheck(color);
