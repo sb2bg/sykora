@@ -556,8 +556,14 @@ const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
-const REPETITION_CONTEMPT_CP: i32 = 20;
-const REPETITION_CONTEMPT_EVAL_THRESHOLD_CP: i32 = 30;
+const REPETITION_BASE_CONTEMPT_CP: i32 = 20;
+const REPETITION_SMALL_ADV_CP: i32 = 40;
+const REPETITION_MEDIUM_ADV_CP: i32 = 80;
+const REPETITION_LARGE_ADV_CP: i32 = 160;
+const REPETITION_HUGE_ADV_CP: i32 = 260;
+const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
+const REPETITION_CYCLE_EVAL_THRESHOLD_CP: i32 = 80;
+const REPETITION_CYCLE_PENALTY_CP: i32 = 200;
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
@@ -1362,6 +1368,7 @@ pub const SearchEngine = struct {
                 self.position_history[self.history_count] = self.board.zobrist_hasher.zobrist_hash;
                 self.history_count += 1;
             }
+            const repetition_matches_after_move = self.repetitionMatchCount();
 
             var score: i32 = undefined;
 
@@ -1411,6 +1418,15 @@ pub const SearchEngine = struct {
             self.history_count = old_hist_count; // Restore history count
 
             moves_searched += 1;
+
+            // Avoid entering obvious twofold cycles when we're already clearly better.
+            if (repetition_matches_after_move == 1 and !is_capture and !is_promotion) {
+                if (static_eval >= REPETITION_CYCLE_EVAL_THRESHOLD_CP) {
+                    score -= REPETITION_CYCLE_PENALTY_CP;
+                } else if (static_eval <= -REPETITION_CYCLE_EVAL_THRESHOLD_CP) {
+                    score += REPETITION_CYCLE_PENALTY_CP;
+                }
+            }
 
             // Track quiet moves for history updates
             if (!is_capture and !is_promotion and quiets_tried_count < 64) {
@@ -1484,12 +1500,10 @@ pub const SearchEngine = struct {
         return self.position_history[idx - self.game_history_count];
     }
 
-    /// Check if current position is a true threefold repetition.
-    /// We require two prior matches of the current hash with the same side to move.
-    fn isRepetition(self: *Self) bool {
+    inline fn repetitionMatchCount(self: *Self) u32 {
         const current_hash = self.board.zobrist_hasher.zobrist_hash;
         const total = self.combinedHistoryCount();
-        if (total < 3) return false;
+        if (total < 3) return 0;
 
         // 50-move clock bounds how far back a repetition can exist.
         const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
@@ -1501,13 +1515,16 @@ pub const SearchEngine = struct {
             const idx = total - 1 - plies_back;
             if (self.hashAtCombinedIndex(idx) == current_hash) {
                 matches += 1;
-                if (matches >= 2) {
-                    return true;
-                }
             }
         }
 
-        return false;
+        return matches;
+    }
+
+    /// Check if current position is a true threefold repetition.
+    /// We require two prior matches of the current hash with the same side to move.
+    fn isRepetition(self: *Self) bool {
+        return self.repetitionMatchCount() >= 2;
     }
 
     /// Return a contempt-adjusted score for repetition draws.
@@ -1515,11 +1532,37 @@ pub const SearchEngine = struct {
     /// negative means avoid draw when better.
     fn repetitionScore(self: *Self) i32 {
         const static_eval = self.evaluatePosition();
-        if (static_eval > REPETITION_CONTEMPT_EVAL_THRESHOLD_CP) {
-            return -REPETITION_CONTEMPT_CP;
+        const stm = self.board.board.move;
+        const opp = if (stm == .white) piece.Color.black else piece.Color.white;
+
+        const stm_material = countMaterial(self.board.board, stm);
+        const opp_material = countMaterial(self.board.board, opp);
+        const material_adv = stm_material - opp_material;
+
+        var contempt: i32 = REPETITION_BASE_CONTEMPT_CP;
+        const abs_eval = @abs(static_eval);
+        const abs_material_adv = @abs(material_adv);
+
+        if (abs_eval >= 80 or abs_material_adv >= eval.PAWN_VALUE) {
+            contempt = REPETITION_SMALL_ADV_CP;
         }
-        if (static_eval < -REPETITION_CONTEMPT_EVAL_THRESHOLD_CP) {
-            return REPETITION_CONTEMPT_CP;
+        if (abs_eval >= 160 or abs_material_adv >= 2 * eval.PAWN_VALUE) {
+            contempt = REPETITION_MEDIUM_ADV_CP;
+        }
+        if (abs_eval >= 280 or abs_material_adv >= eval.ROOK_VALUE) {
+            contempt = REPETITION_LARGE_ADV_CP;
+        }
+        if (abs_eval >= 500 or abs_material_adv >= eval.QUEEN_VALUE) {
+            contempt = REPETITION_HUGE_ADV_CP;
+        }
+
+        // Side to move appears better: avoid repetition draw.
+        if (static_eval > REPETITION_ADV_EVAL_THRESHOLD_CP or material_adv > eval.PAWN_VALUE / 2) {
+            return -contempt;
+        }
+        // Side to move appears worse: prefer repetition draw.
+        if (static_eval < -REPETITION_ADV_EVAL_THRESHOLD_CP or material_adv < -(eval.PAWN_VALUE / 2)) {
+            return contempt;
         }
         return DRAW_SCORE;
     }
