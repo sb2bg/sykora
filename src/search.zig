@@ -1276,6 +1276,7 @@ pub const SearchEngine = struct {
                 // Save state
                 const old_board = self.board.board;
                 const old_hash = self.board.zobrist_hasher.zobrist_hash;
+                const old_move = self.board.board.move;
 
                 // Make null move (just flip side to move)
                 self.board.board.move = if (self.board.board.move == .white) .black else .white;
@@ -1285,6 +1286,14 @@ pub const SearchEngine = struct {
                 if (self.board.board.en_passant_square) |ep_sq| {
                     self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[ep_sq % 8];
                     self.board.board.en_passant_square = null;
+                }
+
+                // Null move is a quiet move for clock purposes.
+                if (self.board.board.halfmove_clock < std.math.maxInt(u8)) {
+                    self.board.board.halfmove_clock += 1;
+                }
+                if (old_move == .black and self.board.board.fullmove_number < std.math.maxInt(u16)) {
+                    self.board.board.fullmove_number += 1;
                 }
 
                 // Search with reduced depth - adaptive reduction based on depth and eval margin

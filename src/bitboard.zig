@@ -1212,6 +1212,7 @@ pub const Board = struct {
     /// - Pawn promotions
     /// - En passant square updates (for double pawn pushes)
     /// - Castling rights updates
+    /// - Halfmove/fullmove clocks
     /// - Turn switching
     ///
     /// IMPORTANT: This does NOT:
@@ -1234,12 +1235,14 @@ pub const Board = struct {
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
         const captured_piece = self.board.getPieceAt(to_sq, opponent_color);
+        const is_en_passant_capture = piece_type == .pawn and self.board.en_passant_square == to_sq and captured_piece == null;
+        const is_capture = captured_piece != null or is_en_passant_capture;
 
         // Handle captures - must clear the destination square first
         self.board.clearSquare(to_sq);
 
         // Handle en passant capture
-        if (piece_type == .pawn and self.board.en_passant_square == to_sq) {
+        if (is_en_passant_capture) {
             const ep_capture_square = if (color == .white) to_sq - 8 else to_sq + 8;
             self.board.clearSquare(ep_capture_square);
         }
@@ -1310,6 +1313,16 @@ pub const Board = struct {
                     if (to_sq == 63) self.board.castle_rights.black_kingside = false;
                 }
             }
+        }
+
+        // Update move clocks.
+        if (piece_type == .pawn or is_capture) {
+            self.board.halfmove_clock = 0;
+        } else if (self.board.halfmove_clock < std.math.maxInt(u8)) {
+            self.board.halfmove_clock += 1;
+        }
+        if (color == .black and self.board.fullmove_number < std.math.maxInt(u16)) {
+            self.board.fullmove_number += 1;
         }
 
         // Switch turn
@@ -2527,3 +2540,45 @@ pub const BitBoard = struct {
         return ~self.occupied();
     }
 };
+
+test "makeMove updates halfmove and fullmove clocks" {
+    var b = Board.startpos();
+
+    try b.makeStrMove("g1f3");
+    try std.testing.expectEqual(@as(u8, 1), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 1), b.board.fullmove_number);
+
+    try b.makeStrMove("g8f6");
+    try std.testing.expectEqual(@as(u8, 2), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 2), b.board.fullmove_number);
+
+    try b.makeStrMove("e2e4");
+    try std.testing.expectEqual(@as(u8, 0), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 2), b.board.fullmove_number);
+
+    try b.makeStrMove("d7d5");
+    try std.testing.expectEqual(@as(u8, 0), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 3), b.board.fullmove_number);
+
+    try b.makeStrMove("e4d5");
+    try std.testing.expectEqual(@as(u8, 0), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 3), b.board.fullmove_number);
+
+    try b.makeStrMove("f6d5");
+    try std.testing.expectEqual(@as(u8, 0), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 4), b.board.fullmove_number);
+}
+
+test "repetition shuffle sequence increments clocks from fen" {
+    var b = try Board.fromFen("r3k1n1/1R1b4/2p2pp1/8/1BP1PP2/P6p/2PK3P/5B2 w - - 2 35");
+
+    try b.makeStrMove("b4c5");
+    try b.makeStrMove("a8a5");
+    try b.makeStrMove("c5b4");
+    try b.makeStrMove("a5a8");
+    try b.makeStrMove("b4c5");
+    try b.makeStrMove("a8a5");
+
+    try std.testing.expectEqual(@as(u8, 8), b.board.halfmove_clock);
+    try std.testing.expectEqual(@as(u16, 38), b.board.fullmove_number);
+}
