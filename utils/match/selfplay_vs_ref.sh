@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  utils/match/selfplay_vs_ref.sh [--baseline <spec>] [selfplay.py args...]
+  utils/match/selfplay_vs_ref.sh [--baseline <spec>] [--archive] [selfplay.py args...]
 
 Description:
   Builds the current working tree (candidate) in ReleaseFast and runs
@@ -22,8 +22,14 @@ Description:
     - path to an engine binary
     - snapshot ID under history/engines/<id>/engine
 
+  With --archive:
+    - snapshots baseline/candidate binaries into history/engines/
+    - runs an archived match via utils/history/history.py match
+    - updates ratings/network inputs under history/
+
 Examples:
   utils/match/selfplay_vs_ref.sh --games 120 --movetime-ms 200
+  utils/match/selfplay_vs_ref.sh --archive --games 200 --movetime-ms 60
   utils/match/selfplay_vs_ref.sh --baseline history/engines/<snapshot_id>/engine --games 200 --depth 8
 EOF
 }
@@ -34,6 +40,7 @@ BASE_BIN="$TMP_DIR/sykora_baseline"
 CAND_BIN="$TMP_DIR/sykora_working"
 BASELINE_FILE="$ROOT/history/current_baseline.txt"
 BASELINE_SPEC=""
+ARCHIVE_MODE=0
 SELFPLAY_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       fi
       BASELINE_SPEC="$2"
       shift 2
+      ;;
+    --archive)
+      ARCHIVE_MODE=1
+      shift
       ;;
     -h|--help)
       usage
@@ -89,6 +100,47 @@ resolve_baseline_binary() {
   printf '%s\n' "$candidate"
 }
 
+detect_baseline_snapshot_id() {
+  local baseline_path="$1"
+  local prefix="$ROOT/history/engines/"
+  if [[ "$baseline_path" == "$prefix"*/engine ]]; then
+    local rel="${baseline_path#"$prefix"}"
+    printf '%s\n' "${rel%%/*}"
+    return 0
+  fi
+  return 1
+}
+
+validate_archive_args() {
+  local disallowed=("--name1" "--name2" "--output-dir" "--summary-json")
+  for arg in "${SELFPLAY_ARGS[@]}"; do
+    for flag in "${disallowed[@]}"; do
+      if [[ "$arg" == "$flag" || "$arg" == "$flag="* ]]; then
+        echo "error: $flag is not supported with --archive (history.py sets this automatically)" >&2
+        exit 2
+      fi
+    done
+  done
+}
+
+snapshot_engine() {
+  local engine_path="$1"
+  local label="$2"
+  local notes="$3"
+  local out
+
+  out="$("$PYTHON_BIN" "$ROOT/utils/history/history.py" snapshot --engine "$engine_path" --label "$label" --notes "$notes")"
+  printf '%s\n' "$out" >&2
+
+  local id
+  id="$(printf '%s\n' "$out" | sed -n 's/^Snapshot created: //p' | head -n1)"
+  if [[ -z "$id" ]]; then
+    echo "error: could not parse snapshot id from history.py output" >&2
+    exit 1
+  fi
+  printf '%s\n' "$id"
+}
+
 cleanup() {
   rm -rf "$TMP_DIR"
 }
@@ -104,7 +156,7 @@ if [[ -z "$BASELINE_SPEC" ]]; then
 fi
 
 BASELINE_PATH="$(resolve_baseline_binary "$BASELINE_SPEC")"
-cp "$BASELINE_PATH" "$BASE_BIN"
+PYTHON_BIN="${PYTHON_BIN:-$HOME/.pyenv/shims/python}"
 
 has_name1=0
 has_name2=0
@@ -121,14 +173,31 @@ echo "==> Building candidate (current working tree)"
 (cd "$ROOT" && zig build -Doptimize=ReleaseFast >/dev/null)
 cp "$ROOT/zig-out/bin/sykora" "$CAND_BIN"
 
-if [[ $has_name1 -eq 0 ]]; then
-  SELFPLAY_ARGS+=(--name1 "baseline:$BASELINE_SPEC")
-fi
-if [[ $has_name2 -eq 0 ]]; then
-  SELFPLAY_ARGS+=(--name2 "working")
-fi
+if [[ $ARCHIVE_MODE -eq 1 ]]; then
+  validate_archive_args
+  echo "==> Archiving snapshots + match under history/"
+  "$PYTHON_BIN" "$ROOT/utils/history/history.py" init >/dev/null
 
-PYTHON_BIN="${PYTHON_BIN:-$HOME/.pyenv/shims/python}"
+  baseline_id="$(detect_baseline_snapshot_id "$BASELINE_PATH" || true)"
+  if [[ -z "$baseline_id" ]]; then
+    baseline_id="$(snapshot_engine "$BASELINE_PATH" "baseline-ref" "selfplay_vs_ref baseline: $BASELINE_SPEC")"
+  else
+    echo "Using existing baseline snapshot: $baseline_id"
+  fi
 
-echo "==> Running self-play"
-"$PYTHON_BIN" "$ROOT/utils/match/selfplay.py" "$BASE_BIN" "$CAND_BIN" "${SELFPLAY_ARGS[@]}"
+  candidate_id="$(snapshot_engine "$CAND_BIN" "working" "selfplay_vs_ref candidate from current working tree")"
+
+  "$PYTHON_BIN" "$ROOT/utils/history/history.py" match "$baseline_id" "$candidate_id" --python "$PYTHON_BIN" "${SELFPLAY_ARGS[@]}"
+else
+  cp "$BASELINE_PATH" "$BASE_BIN"
+
+  if [[ $has_name1 -eq 0 ]]; then
+    SELFPLAY_ARGS+=(--name1 "baseline:$BASELINE_SPEC")
+  fi
+  if [[ $has_name2 -eq 0 ]]; then
+    SELFPLAY_ARGS+=(--name2 "working")
+  fi
+
+  echo "==> Running self-play"
+  "$PYTHON_BIN" "$ROOT/utils/match/selfplay.py" "$BASE_BIN" "$CAND_BIN" "${SELFPLAY_ARGS[@]}"
+fi
