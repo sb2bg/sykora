@@ -537,6 +537,7 @@ pub const SearchOptions = struct {
     winc: ?u64 = null,
     binc: ?u64 = null,
     depth: ?u64 = null,
+    start_depth: u32 = 1,
 };
 
 pub const SearchResult = struct {
@@ -614,13 +615,13 @@ const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
 const RAZOR_MARGIN: i32 = 400;
 
 // Transposition table entry
-const TTEntryBound = enum(u8) {
+pub const TTEntryBound = enum(u8) {
     exact,
     lower_bound,
     upper_bound,
 };
 
-const TTEntry = struct {
+pub const TTEntry = struct {
     hash: u64,
     depth: u8,
     score: i32,
@@ -628,7 +629,7 @@ const TTEntry = struct {
     best_move: Move,
     age: u8,
 
-    fn init() TTEntry {
+    pub fn init() TTEntry {
         return TTEntry{
             .hash = 0,
             .depth = 0,
@@ -641,7 +642,7 @@ const TTEntry = struct {
 };
 
 // Transposition table
-const TranspositionTable = struct {
+pub const TranspositionTable = struct {
     const Self = @This();
 
     entries: []TTEntry,
@@ -649,7 +650,7 @@ const TranspositionTable = struct {
     current_age: u8,
     allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator, size_mb: usize) !Self {
+    pub fn init(allocator: std.mem.Allocator, size_mb: usize) !Self {
         const entry_size = @sizeOf(TTEntry);
         const num_entries = (size_mb * 1024 * 1024) / entry_size;
         const entries = try allocator.alloc(TTEntry, num_entries);
@@ -666,26 +667,39 @@ const TranspositionTable = struct {
         };
     }
 
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
         self.allocator.free(self.entries);
     }
 
-    fn clear(self: *Self) void {
+    pub fn clear(self: *Self) void {
         for (self.entries) |*entry| {
             entry.* = TTEntry.init();
         }
         self.current_age = 0;
     }
 
-    fn nextAge(self: *Self) void {
+    pub fn nextAge(self: *Self) void {
         self.current_age +%= 1;
     }
 
-    fn index(self: *Self, hash: u64) usize {
+    pub fn resize(self: *Self, new_size_mb: usize) !void {
+        self.allocator.free(self.entries);
+        const entry_size = @sizeOf(TTEntry);
+        const num_entries = (new_size_mb * 1024 * 1024) / entry_size;
+        const entries = try self.allocator.alloc(TTEntry, num_entries);
+        for (entries) |*entry| {
+            entry.* = TTEntry.init();
+        }
+        self.entries = entries;
+        self.size = num_entries;
+        self.current_age = 0;
+    }
+
+    pub fn index(self: *Self, hash: u64) usize {
         return @as(usize, @intCast(hash % @as(u64, @intCast(self.size))));
     }
 
-    fn probe(self: *Self, hash: u64) ?*TTEntry {
+    pub fn probe(self: *Self, hash: u64) ?*TTEntry {
         const idx = self.index(hash);
         if (self.entries[idx].hash == hash) {
             return &self.entries[idx];
@@ -693,7 +707,7 @@ const TranspositionTable = struct {
         return null;
     }
 
-    fn store(self: *Self, hash: u64, depth: u8, score: i32, bound: TTEntryBound, best_move: Move) void {
+    pub fn store(self: *Self, hash: u64, depth: u8, score: i32, bound: TTEntryBound, best_move: Move) void {
         const idx = self.index(hash);
         const entry = &self.entries[idx];
 
@@ -853,7 +867,7 @@ pub const SearchEngine = struct {
     root_best_move: Move,
 
     // Search state
-    tt: TranspositionTable,
+    tt: *TranspositionTable,
     killer_moves: KillerMoves,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
@@ -878,14 +892,13 @@ pub const SearchEngine = struct {
         board_ptr: *Board,
         allocator: std.mem.Allocator,
         stop_search: *std.atomic.Value(bool),
+        tt: *TranspositionTable,
         use_nnue: bool,
         nnue_net: ?*const nnue.Network,
         nnue_blend: i32,
         nnue_scale: i32,
         nnue_screlu: bool,
-    ) !Self {
-        const tt = try TranspositionTable.init(allocator, 64); // 64MB TT
-
+    ) Self {
         return Self{
             .board = board_ptr,
             .allocator = allocator,
@@ -911,10 +924,6 @@ pub const SearchEngine = struct {
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
         };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.tt.deinit();
     }
 
     inline fn evalCacheIndex(hash: u64) usize {
@@ -1001,7 +1010,6 @@ pub const SearchEngine = struct {
         self.killer_moves = KillerMoves.init();
         self.history.age(); // Age history instead of clearing
         self.counter_moves.clear();
-        self.tt.nextAge(); // Age TT entries between root searches
         self.previous_move = null;
         // Initialize position history
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
@@ -1041,7 +1049,7 @@ pub const SearchEngine = struct {
         const max_depth: u32 = if (options.depth) |d| @intCast(d) else 64;
 
         // Iterative deepening
-        var depth: u32 = 1;
+        var depth: u32 = options.start_depth;
         while (depth <= max_depth) : (depth += 1) {
             if (self.stop_search.load(.seq_cst)) break;
 
