@@ -572,7 +572,7 @@ pub const Board = struct {
         return self;
     }
 
-    inline fn epFileForHash(b: BitBoard) ?u8 {
+    pub inline fn epFileForHash(b: BitBoard) ?u8 {
         if (b.en_passant_square) |ep_sq| {
             if (b.hasAdjacentPawn(ep_sq, b.move)) {
                 return ep_sq % 8;

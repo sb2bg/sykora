@@ -1286,15 +1286,18 @@ pub const SearchEngine = struct {
                 const old_hash = self.board.zobrist_hasher.zobrist_hash;
                 const old_move = self.board.board.move;
 
+                // Compute EP file contribution BEFORE flipping side (hash was built with old side)
+                const old_ep_file = Board.epFileForHash(self.board.board);
+
                 // Make null move (just flip side to move)
                 self.board.board.move = if (self.board.board.move == .white) .black else .white;
                 self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomTurn;
 
-                // Clear en passant
-                if (self.board.board.en_passant_square) |ep_sq| {
-                    self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[ep_sq % 8];
-                    self.board.board.en_passant_square = null;
+                // Clear en passant — only XOR if it was actually in the hash
+                if (old_ep_file) |f| {
+                    self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[f];
                 }
+                self.board.board.en_passant_square = null;
 
                 // Null move is a quiet move for clock purposes.
                 if (self.board.board.halfmove_clock < std.math.maxInt(u8)) {
