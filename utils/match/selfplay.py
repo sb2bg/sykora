@@ -22,6 +22,7 @@ import math
 import os
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -82,6 +83,12 @@ class EloEstimate:
     elo_lo: float
     elo_hi: float
     p_value_two_sided: float
+
+
+@dataclass(frozen=True)
+class ClockConfig:
+    game_time_ms: int
+    increment_ms: int
 
 
 def parse_option_value(raw: str):
@@ -217,7 +224,8 @@ def play_single_game(
     black_engine: chess.engine.SimpleEngine,
     white_name: str,
     black_name: str,
-    limit: chess.engine.Limit,
+    fixed_limit: Optional[chess.engine.Limit],
+    clock: Optional[ClockConfig],
     opening_moves: List[str],
     round_number: int,
     max_plies: int,
@@ -238,6 +246,8 @@ def play_single_game(
 
     plies_played = 0
     termination = "Normal"
+    white_time_ms = float(clock.game_time_ms) if clock is not None else 0.0
+    black_time_ms = float(clock.game_time_ms) if clock is not None else 0.0
 
     while not board.is_game_over(claim_draw=True):
         if plies_played >= max_plies:
@@ -250,9 +260,24 @@ def play_single_game(
 
         engine = white_engine if board.turn == chess.WHITE else black_engine
         side = "White" if board.turn == chess.WHITE else "Black"
+        mover_is_white = board.turn == chess.WHITE
+
+        if clock is None:
+            if fixed_limit is None:
+                raise RuntimeError("missing fixed_limit for movetime/depth mode")
+            limit = fixed_limit
+        else:
+            limit = chess.engine.Limit(
+                white_clock=max(0.001, white_time_ms / 1000.0),
+                black_clock=max(0.001, black_time_ms / 1000.0),
+                white_inc=clock.increment_ms / 1000.0,
+                black_inc=clock.increment_ms / 1000.0,
+            )
 
         try:
+            start_time = time.monotonic()
             play_result = engine.play(board, limit)
+            elapsed_ms = (time.monotonic() - start_time) * 1000.0
         except chess.engine.EngineTerminatedError:
             termination = f"{side} engine crashed"
             winner = chess.BLACK if board.turn == chess.WHITE else chess.WHITE
@@ -278,6 +303,28 @@ def play_single_game(
             if verbose:
                 print(f"  {termination}")
             return game, winner, termination
+
+        if clock is not None:
+            if mover_is_white:
+                white_time_ms = white_time_ms - elapsed_ms + float(clock.increment_ms)
+                if white_time_ms <= 0.0:
+                    termination = "Time forfeit"
+                    winner = chess.BLACK
+                    game.headers["Result"] = "0-1"
+                    game.headers["Termination"] = termination
+                    if verbose:
+                        print("  White flagged")
+                    return game, winner, termination
+            else:
+                black_time_ms = black_time_ms - elapsed_ms + float(clock.increment_ms)
+                if black_time_ms <= 0.0:
+                    termination = "Time forfeit"
+                    winner = chess.WHITE
+                    game.headers["Result"] = "1-0"
+                    game.headers["Termination"] = termination
+                    if verbose:
+                        print("  Black flagged")
+                    return game, winner, termination
 
         board.push(play_result.move)
         node = node.add_variation(play_result.move)
@@ -392,6 +439,8 @@ def make_summary(
             "games": args.games,
             "movetime_ms": args.movetime_ms,
             "depth": args.depth,
+            "game_time_ms": args.game_time_ms,
+            "inc_ms": args.inc_ms,
             "openings": args.openings,
             "shuffle_openings": bool(args.shuffle_openings),
             "seed": args.seed,
@@ -437,6 +486,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Per-move time in milliseconds (default: 200)",
+    )
+    parser.add_argument(
+        "--game-time-ms",
+        type=int,
+        default=None,
+        help="Per-side game clock in milliseconds (if set, uses wtime/btime mode)",
+    )
+    parser.add_argument(
+        "--inc-ms",
+        type=int,
+        default=0,
+        help="Per-move increment in milliseconds (used with --game-time-ms)",
     )
     parser.add_argument(
         "-d",
@@ -493,6 +554,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--depth must be > 0")
     if args.max_plies <= 0:
         parser.error("--max-plies must be > 0")
+    if args.game_time_ms is not None and args.game_time_ms <= 0:
+        parser.error("--game-time-ms must be > 0")
+    if args.inc_ms < 0:
+        parser.error("--inc-ms must be >= 0")
+    if args.game_time_ms is not None and args.depth is not None:
+        parser.error("--game-time-ms and --depth cannot be used together")
     if args.threads is not None and args.threads <= 0:
         parser.error("--threads must be > 0")
     if args.hash_mb is not None and args.hash_mb <= 0:
@@ -509,7 +576,12 @@ def parse_args() -> argparse.Namespace:
 def run_match(args: argparse.Namespace) -> MatchResult:
     verbose = not args.quiet
     openings = load_openings(args.openings, args.shuffle_openings, args.seed)
-    limit = build_limit(args.movetime_ms, args.depth)
+    clock = (
+        ClockConfig(game_time_ms=args.game_time_ms, increment_ms=args.inc_ms)
+        if args.game_time_ms is not None
+        else None
+    )
+    limit = None if clock is not None else build_limit(args.movetime_ms, args.depth)
 
     engine1_opts = parse_uci_options(args.engine1_opt)
     engine2_opts = parse_uci_options(args.engine2_opt)
@@ -528,7 +600,16 @@ def run_match(args: argparse.Namespace) -> MatchResult:
     if verbose:
         print("=" * 68)
         print(f"Self-play: {args.name1} vs {args.name2}")
-        print(f"Games: {args.games} | movetime: {args.movetime_ms}ms" + (f" | depth: {args.depth}" if args.depth else ""))
+        if clock is None:
+            print(
+                f"Games: {args.games} | movetime: {args.movetime_ms}ms"
+                + (f" | depth: {args.depth}" if args.depth else "")
+            )
+        else:
+            print(
+                f"Games: {args.games} | game clock: {clock.game_time_ms}ms"
+                f" | increment: {clock.increment_ms}ms"
+            )
         print(f"Openings: {args.openings} ({len(openings)} lines)")
         print("Pairing: same opening twice, colors swapped")
         print("=" * 68)
@@ -573,7 +654,8 @@ def run_match(args: argparse.Namespace) -> MatchResult:
                 black_engine=black_engine,
                 white_name=white_name,
                 black_name=black_name,
-                limit=limit,
+                fixed_limit=limit,
+                clock=clock,
                 opening_moves=opening_moves,
                 round_number=round_number,
                 max_plies=args.max_plies,
