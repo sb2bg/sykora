@@ -306,7 +306,8 @@ pub const Uci = struct {
                 self.stop_search.store(false, .seq_cst);
                 self.best_move = board.Move.init(0, 0, null);
 
-                self.search_thread = std.Thread.spawn(.{}, Uci.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
+                // Use larger stack size (8MB) for search thread due to large SearchEngine struct
+                self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, Uci.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
             },
             .stop => {
                 try self.terminateSearch();
