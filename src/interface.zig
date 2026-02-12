@@ -462,6 +462,7 @@ pub const Uci = struct {
             .btime = go_opts.btime,
             .winc = go_opts.winc,
             .binc = go_opts.binc,
+            .moves_to_go = go_opts.moves_to_go,
             .depth = go_opts.depth,
         };
 
@@ -531,6 +532,7 @@ pub const Uci = struct {
             .btime = go_opts.btime,
             .winc = go_opts.winc,
             .binc = go_opts.binc,
+            .moves_to_go = go_opts.moves_to_go,
             .depth = go_opts.depth,
             .start_depth = start_depth,
         };

@@ -1202,15 +1202,15 @@ pub const SearchEngine = struct {
         moves_to_go = @max(moves_to_go, 2);
 
         // Keep a small reserve for move transmission / scheduling jitter.
-        var reserve_ms = @max(@as(u64, 10), @min(time_remaining / 20, @as(u64, 250)));
+        var reserve_ms: u64 = @max(@as(u64, 10), @min(time_remaining / 20, @as(u64, 250)));
         if (time_remaining < 2000) {
             reserve_ms = @max(@as(u64, 5), time_remaining / 10);
         }
         if (reserve_ms + 5 >= time_remaining) {
             reserve_ms = time_remaining / 2;
         }
-        var usable_ms = time_remaining -| reserve_ms;
-        usable_ms = @max(usable_ms, 1);
+        var usable_ms: u64 = time_remaining -| reserve_ms;
+        usable_ms = @max(usable_ms, @as(u64, 1));
 
         // Baseline: remaining / (moves_to_go + safety) + most of increment.
         const base_ms = usable_ms / (moves_to_go + 3);
