@@ -536,7 +536,6 @@ pub const SearchOptions = struct {
     btime: ?u64 = null,
     winc: ?u64 = null,
     binc: ?u64 = null,
-    moves_to_go: ?u64 = null,
     depth: ?u64 = null,
     start_depth: u32 = 1,
 };
@@ -547,11 +546,6 @@ pub const SearchResult = struct {
     nodes: usize,
     time_ms: i64,
     depth: u32,
-};
-
-const TimeBudget = struct {
-    soft_ms: u64,
-    hard_ms: u64,
 };
 
 const MAX_PLY = 64;
@@ -570,7 +564,6 @@ const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
 const REPETITION_CYCLE_EVAL_THRESHOLD_CP: i32 = 80;
 const REPETITION_CYCLE_PENALTY_CP: i32 = 200;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
-const TIME_CHECK_NODE_INTERVAL_MASK: usize = 2047; // Check hard deadline every 2048 counted nodes.
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
@@ -894,9 +887,6 @@ pub const SearchEngine = struct {
     nnue_screlu: bool,
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
-    search_start_time: ?std.time.Instant,
-    soft_time_limit_ms: ?u64,
-    hard_time_limit_ms: ?u64,
 
     pub fn init(
         board_ptr: *Board,
@@ -933,9 +923,6 @@ pub const SearchEngine = struct {
             .nnue_screlu = nnue_screlu,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
-            .search_start_time = null,
-            .soft_time_limit_ms = null,
-            .hard_time_limit_ms = null,
         };
     }
 
@@ -1028,11 +1015,8 @@ pub const SearchEngine = struct {
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
         self.history_count = 1;
 
-        // Calculate time budget (soft/hard limits) for clocked search.
-        const time_budget = self.calculateTimeBudget(options);
-        self.search_start_time = start_time;
-        self.soft_time_limit_ms = if (time_budget) |b| b.soft_ms else null;
-        self.hard_time_limit_ms = if (time_budget) |b| b.hard_ms else null;
+        // Calculate time limit
+        const time_limit = self.calculateTimeLimit(options);
 
         // Generate legal moves
         var legal_moves = MoveList.init();
@@ -1125,16 +1109,12 @@ pub const SearchEngine = struct {
                 });
             }
 
-            // Check soft/hard time limits at iteration boundary.
-            if (time_budget) |budget| {
+            // Check time limit
+            if (time_limit) |limit| {
                 const total_time_ms: u64 = @intCast(@max(total_time, 0));
                 const iter_time_ms: u64 = @intCast(@max(iter_time, 0));
-                // Stop on soft deadline after a completed iteration.
-                if (total_time_ms >= budget.soft_ms) {
-                    break;
-                }
-                // Hard cap: do not start another iteration if it's unlikely to finish in time.
-                if (total_time_ms >= budget.hard_ms or total_time_ms + (iter_time_ms * 2) >= budget.hard_ms) {
+                // Stop if we've used most of our time or if next iteration unlikely to finish
+                if (total_time_ms >= limit or total_time_ms + (iter_time_ms * 2) >= limit) {
                     break;
                 }
             }
@@ -1146,9 +1126,6 @@ pub const SearchEngine = struct {
         }
 
         const elapsed = elapsedMs(start_time);
-        self.search_start_time = null;
-        self.soft_time_limit_ms = null;
-        self.hard_time_limit_ms = null;
 
         return SearchResult{
             .best_move = best_move,
@@ -1159,13 +1136,11 @@ pub const SearchEngine = struct {
         };
     }
 
-    fn calculateTimeBudget(self: *Self, options: SearchOptions) ?TimeBudget {
+    fn calculateTimeLimit(self: *Self, options: SearchOptions) ?u64 {
         if (options.infinite) {
             return null;
         } else if (options.move_time) |move_time| {
-            const hard = @max(@as(u64, 1), move_time);
-            const soft = @max(@as(u64, 1), hard * 9 / 10);
-            return .{ .soft_ms = soft, .hard_ms = hard };
+            return move_time;
         }
 
         // Determine which color we are and get our time/increment
@@ -1184,79 +1159,33 @@ pub const SearchEngine = struct {
         }
 
         const time_remaining = our_time.?;
-        if (time_remaining == 0) {
-            return .{ .soft_ms = 1, .hard_ms = 1 };
+
+        // Calculate moves played and estimate moves remaining
+        const moves_played = self.board.board.fullmove_number;
+        const estimated_moves_remaining = @max(20, 40 - @min(moves_played, 40));
+
+        // Base time allocation: divide remaining time by estimated moves
+        // Use a slightly larger divisor for safety margin
+        const divisor = estimated_moves_remaining + 5;
+        const base_time = time_remaining / divisor;
+
+        // Add most of the increment since we get it back after the move
+        const time_budget = base_time + (our_increment * 9 / 10);
+
+        // Apply min/max bounds
+        const min_time: u64 = 100; // Minimum 100ms
+        var max_time = @min(time_remaining / 5, 30000); // Max 20% of remaining or 30s
+
+        // If low on time, be more conservative
+        if (time_remaining < 5000) {
+            max_time = @min(time_remaining / 10, max_time);
+        } else if (time_remaining < 10000) {
+            max_time = @min(time_remaining * 15 / 100, max_time);
         }
 
-        // Use GUI-provided movestogo when available; otherwise estimate by phase.
-        var moves_to_go: u64 = options.moves_to_go orelse 0;
-        if (moves_to_go == 0) {
-            const fullmove_no: u64 = @intCast(self.board.board.fullmove_number);
-            moves_to_go = if (fullmove_no < 20)
-                30
-            else if (fullmove_no < 40)
-                24
-            else
-                18;
-        }
-        moves_to_go = @max(moves_to_go, 2);
+        const time_for_move = @max(min_time, @min(time_budget, max_time));
 
-        // Keep a small reserve for move transmission / scheduling jitter.
-        var reserve_ms = @max(@as(u64, 10), @min(time_remaining / 20, @as(u64, 250)));
-        if (time_remaining < 2000) {
-            reserve_ms = @max(@as(u64, 5), time_remaining / 10);
-        }
-        if (reserve_ms + 5 >= time_remaining) {
-            reserve_ms = time_remaining / 2;
-        }
-        var usable_ms = time_remaining -| reserve_ms;
-        usable_ms = @max(usable_ms, 1);
-
-        // Baseline: remaining / (moves_to_go + safety) + most of increment.
-        const base_ms = usable_ms / (moves_to_go + 3);
-        var soft_ms = base_ms + (our_increment * 3 / 4);
-
-        // Fractional cap to avoid over-spending a move.
-        var cap_divisor: u64 = 8; // 12.5% of usable time
-        if (moves_to_go <= 10) cap_divisor = 5; // 20%
-        if (moves_to_go <= 5) cap_divisor = 4; // 25%
-        if (time_remaining < 5000) cap_divisor = @max(cap_divisor, @as(u64, 12)); // ~8.3%
-        if (time_remaining < 2000) cap_divisor = @max(cap_divisor, @as(u64, 18)); // ~5.6%
-
-        var soft_cap_ms = usable_ms / cap_divisor;
-        soft_cap_ms = @max(soft_cap_ms, 10);
-        soft_cap_ms = @min(soft_cap_ms, 30_000);
-
-        const min_soft_ms: u64 = if (time_remaining < 1500) 5 else 20;
-        if (soft_ms < min_soft_ms) soft_ms = min_soft_ms;
-        if (soft_ms > soft_cap_ms) soft_ms = soft_cap_ms;
-        if (soft_ms > usable_ms) soft_ms = usable_ms;
-
-        // Hard deadline is above soft, but still bounded by usable time.
-        const hard_extra_ms = @max(@as(u64, 25), soft_ms / 2);
-        var hard_ms = soft_ms + hard_extra_ms;
-        if (hard_ms > usable_ms) hard_ms = usable_ms;
-        if (hard_ms < soft_ms) hard_ms = soft_ms;
-        hard_ms = @max(hard_ms, 1);
-        soft_ms = @max(@as(u64, 1), @min(soft_ms, hard_ms));
-
-        return .{ .soft_ms = soft_ms, .hard_ms = hard_ms };
-    }
-
-    inline fn maybeStopOnHardDeadline(self: *Self) void {
-        const hard_limit_ms = self.hard_time_limit_ms orelse return;
-        if ((self.nodes_searched & TIME_CHECK_NODE_INTERVAL_MASK) != 0) {
-            return;
-        }
-        const start_time = self.search_start_time orelse return;
-        const elapsed = elapsedMs(start_time);
-        if (elapsed <= 0) {
-            return;
-        }
-        const elapsed_ms: u64 = @intCast(elapsed);
-        if (elapsed_ms >= hard_limit_ms) {
-            self.stop_search.store(true, .seq_cst);
-        }
+        return time_for_move;
     }
 
     /// Alpha-beta search (negamax variant) with various pruning techniques
@@ -1456,12 +1385,6 @@ pub const SearchEngine = struct {
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.previous_move = move;
             self.nodes_searched += 1;
-            self.maybeStopOnHardDeadline();
-            if (self.stop_search.load(.seq_cst)) {
-                self.board.unmakeMoveUnchecked(move, undo);
-                self.previous_move = old_previous;
-                break;
-            }
 
             // Add position to history for repetition detection
             const old_hist_count = self.history_count;
@@ -1694,10 +1617,6 @@ pub const SearchEngine = struct {
         }
 
         self.nodes_searched += 1;
-        self.maybeStopOnHardDeadline();
-        if (self.stop_search.load(.seq_cst)) {
-            return 0;
-        }
         self.seldepth = @max(self.seldepth, ply);
 
         // Check if we're in check - if so, we must search all evasions (not just captures)
