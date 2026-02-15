@@ -9,6 +9,138 @@ const eval = @import("evaluation.zig");
 const zobrist = @import("zobrist.zig");
 const nnue = @import("nnue.zig");
 
+inline fn oppositeColor(color: piece.Color) piece.Color {
+    return if (color == .white) .black else .white;
+}
+
+inline fn seePieceValue(piece_type: piece.Type) i32 {
+    return switch (piece_type) {
+        .pawn => eval.PAWN_VALUE,
+        .knight => eval.KNIGHT_VALUE,
+        .bishop => eval.BISHOP_VALUE,
+        .rook => eval.ROOK_VALUE,
+        .queen => eval.QUEEN_VALUE,
+        .king => eval.KING_VALUE,
+    };
+}
+
+const SeeAttacker = struct {
+    from_sq: u6,
+    piece_type: piece.Type,
+};
+
+inline fn attackersToSquare(b: board.BitBoard, square: u6, occupied: u64) u64 {
+    const white = b.getColorBitboard(.white) & occupied;
+    const black = b.getColorBitboard(.black) & occupied;
+    const pawns = b.getKindBitboard(.pawn) & occupied;
+    const knights = b.getKindBitboard(.knight) & occupied;
+    const bishops = b.getKindBitboard(.bishop) & occupied;
+    const rooks = b.getKindBitboard(.rook) & occupied;
+    const queens = b.getKindBitboard(.queen) & occupied;
+    const kings = b.getKindBitboard(.king) & occupied;
+
+    var attackers: u64 = 0;
+
+    // White pawns attack from one rank below, black from one rank above.
+    attackers |= board.getPawnAttacks(square, .black) & white & pawns;
+    attackers |= board.getPawnAttacks(square, .white) & black & pawns;
+    attackers |= board.getKnightAttacks(square) & knights;
+    attackers |= board.getKingAttacks(square) & kings;
+
+    const bishop_like = bishops | queens;
+    if (bishop_like != 0) {
+        attackers |= board.getBishopAttacks(square, occupied) & bishop_like;
+    }
+
+    const rook_like = rooks | queens;
+    if (rook_like != 0) {
+        attackers |= board.getRookAttacks(square, occupied) & rook_like;
+    }
+
+    return attackers;
+}
+
+fn leastValuableAttacker(b: board.BitBoard, attackers: u64, color: piece.Color) ?SeeAttacker {
+    const own_attackers = attackers & b.getColorBitboard(color);
+    if (own_attackers == 0) return null;
+
+    const order = [_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen, .king };
+    inline for (order) |piece_type| {
+        const set = own_attackers & b.getKindBitboard(piece_type);
+        if (set != 0) {
+            return SeeAttacker{
+                .from_sq = @intCast(@ctz(set)),
+                .piece_type = piece_type,
+            };
+        }
+    }
+
+    return null;
+}
+
+fn staticExchangeRec(
+    b: board.BitBoard,
+    occupied: u64,
+    square: u6,
+    side_to_move: piece.Color,
+    captured_value: i32,
+) i32 {
+    const attackers = attackersToSquare(b, square, occupied);
+    const next = leastValuableAttacker(b, attackers, side_to_move) orelse return 0;
+
+    const from_mask = @as(u64, 1) << @intCast(next.from_sq);
+    const next_occupied = occupied & ~from_mask;
+
+    const gain = captured_value - staticExchangeRec(
+        b,
+        next_occupied,
+        square,
+        oppositeColor(side_to_move),
+        seePieceValue(next.piece_type),
+    );
+    return @max(gain, 0);
+}
+
+fn staticExchangeEvalPosition(b: board.BitBoard, move: Move) i32 {
+    const us = b.move;
+    const them = oppositeColor(us);
+    const from_sq = move.from();
+    const to_sq = move.to();
+
+    const moving_piece = b.getPieceAt(from_sq, us) orelse return 0;
+    var captured_piece = b.getPieceAt(to_sq, them);
+    const is_en_passant = moving_piece == .pawn and b.en_passant_square == to_sq and captured_piece == null;
+    if (is_en_passant) {
+        captured_piece = .pawn;
+    }
+
+    const promotion = move.promotion();
+    if (captured_piece == null and promotion == null) {
+        return 0;
+    }
+
+    var occupied = b.occupied();
+    const from_mask = @as(u64, 1) << @intCast(from_sq);
+    const to_mask = @as(u64, 1) << @intCast(to_sq);
+
+    occupied &= ~from_mask;
+    if (is_en_passant) {
+        const ep_capture_sq: u8 = if (us == .white) to_sq - 8 else to_sq + 8;
+        occupied &= ~(@as(u64, 1) << @intCast(ep_capture_sq));
+    }
+    occupied |= to_mask;
+
+    const captured_value = if (captured_piece) |cp| seePieceValue(cp) else 0;
+    const moved_value = if (promotion) |promo| seePieceValue(promo) else seePieceValue(moving_piece);
+    const promotion_gain: i32 = if (promotion != null and moving_piece == .pawn)
+        moved_value - seePieceValue(.pawn)
+    else
+        0;
+
+    const reply_gain = staticExchangeRec(b, occupied, @intCast(to_sq), them, moved_value);
+    return captured_value + promotion_gain - reply_gain;
+}
+
 /// Staged move picker for efficient move ordering
 /// Generates moves lazily in stages: TT move -> Good captures -> Killers -> Quiet moves -> Bad captures
 pub const MovePicker = struct {
@@ -195,10 +327,12 @@ pub const MovePicker = struct {
     }
 
     fn scoreCaptures(self: *Self) void {
-        const opponent_color = if (self.board_ptr.board.move == .white) piece.Color.black else piece.Color.white;
+        const opponent_color = oppositeColor(self.board_ptr.board.move);
 
         for (self.captures.slice(), 0..) |move, i| {
-            var score: i32 = GOOD_CAPTURE_BASE;
+            const see_score = staticExchangeEvalPosition(self.board_ptr.board, move);
+            var score: i32 = if (see_score >= 0) GOOD_CAPTURE_BASE else BAD_CAPTURE_SCORE;
+            score += see_score * SEE_CAPTURE_SCALE;
 
             // MVV-LVA scoring
             if (self.board_ptr.board.getPieceAt(move.to(), opponent_color)) |victim| {
@@ -208,20 +342,13 @@ pub const MovePicker = struct {
                 else
                     0;
 
-                // MVV-LVA: victim value * 10 - attacker value
-                // Higher victim value = better, lower attacker value = better
-                score += victim_value * 10 - attacker_value;
-
-                // If victim < attacker, it might be a bad capture
-                // Simple heuristic: if attacker significantly more valuable, mark as potentially bad
-                if (attacker_value > victim_value + 50) {
-                    score = BAD_CAPTURE_SCORE + victim_value * 10 - attacker_value;
-                }
+                // Keep MVV-LVA as a tie-breaker after SEE.
+                score += victim_value * 12 - attacker_value;
             }
 
             // Promotion bonus
             if (move.promotion()) |promo| {
-                score += eval.getPieceValue(promo);
+                score += seePieceValue(promo);
             }
 
             self.capture_scores[i] = score;
@@ -246,6 +373,9 @@ pub const MovePicker = struct {
             if (self.board_ptr.board.getPieceAt(move.from(), self.board_ptr.board.move)) |piece_type| {
                 var mobility_bonus: i32 = 0;
                 const to_sq: u8 = move.to();
+                const from_mask = @as(u64, 1) << @intCast(move.from());
+                const to_mask = @as(u64, 1) << @intCast(move.to());
+                const occupied_after = (occupied & ~from_mask) | to_mask;
 
                 switch (piece_type) {
                     .knight => {
@@ -253,15 +383,15 @@ pub const MovePicker = struct {
                         mobility_bonus = @as(i32, @intCast(@popCount(attacks))) * 3;
                     },
                     .bishop => {
-                        const attacks = board.getBishopAttacks(@intCast(to_sq), occupied) & ~friendly;
+                        const attacks = board.getBishopAttacks(@intCast(to_sq), occupied_after) & ~friendly;
                         mobility_bonus = @as(i32, @intCast(@popCount(attacks))) * 2;
                     },
                     .rook => {
-                        const attacks = board.getRookAttacks(@intCast(to_sq), occupied) & ~friendly;
+                        const attacks = board.getRookAttacks(@intCast(to_sq), occupied_after) & ~friendly;
                         mobility_bonus = @as(i32, @intCast(@popCount(attacks))) * 2;
                     },
                     .queen => {
-                        const attacks = (board.getBishopAttacks(@intCast(to_sq), occupied) | board.getRookAttacks(@intCast(to_sq), occupied)) & ~friendly;
+                        const attacks = (board.getBishopAttacks(@intCast(to_sq), occupied_after) | board.getRookAttacks(@intCast(to_sq), occupied_after)) & ~friendly;
                         mobility_bonus = @as(i32, @intCast(@popCount(attacks)));
                     },
                     else => {},
@@ -552,6 +682,7 @@ const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
 const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
+const SEE_CAPTURE_SCALE: i32 = 128;
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
@@ -597,10 +728,23 @@ inline fn isPurePawnEndgame(b: board.BitBoard) bool {
     return b.occupied() == (kings | pawns);
 }
 
+inline fn lmpQuietMoveLimit(depth: u32) u32 {
+    return switch (depth) {
+        0 => 0,
+        1 => 5,
+        2 => 10,
+        3 => 16,
+        else => std.math.maxInt(u32),
+    };
+}
+
 // Late Move Reduction parameters
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_FULL_DEPTH_MOVES: u32 = 4;
 const LMR_REDUCTION_LIMIT: u32 = 3;
+
+// Late Move Pruning parameters
+const LMP_MAX_DEPTH: u32 = 3;
 
 // Null move pruning parameters
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
@@ -613,6 +757,7 @@ const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
 
 // Razoring parameters
 const RAZOR_MARGIN: i32 = 400;
+const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
 
 // Transposition table entry
 pub const TTEntryBound = enum(u8) {
@@ -1356,6 +1501,7 @@ pub const SearchEngine = struct {
         var best_move: ?Move = null;
         var best_score: i32 = -INF;
         var moves_searched: u32 = 0;
+        var quiets_seen: u32 = 0;
         var quiets_tried: [64]Move = undefined;
         var quiets_tried_count: usize = 0;
         const color = self.board.board.move;
@@ -1365,9 +1511,28 @@ pub const SearchEngine = struct {
             const old_previous = self.previous_move;
 
             const move_color = self.board.board.move;
-            const opponent_color = if (move_color == .white) piece.Color.black else piece.Color.white;
-            const is_capture = self.board.board.getPieceAt(move.to(), opponent_color) != null;
+            const opponent_color = oppositeColor(move_color);
+            const is_en_passant = self.board.board.en_passant_square == move.to() and
+                self.board.board.getPieceAt(move.from(), move_color) == .pawn and
+                self.board.board.getPieceAt(move.to(), opponent_color) == null;
+            const is_capture = self.board.board.getPieceAt(move.to(), opponent_color) != null or is_en_passant;
             const is_promotion = move.promotion() != null;
+
+            if (!is_capture and !is_promotion) {
+                quiets_seen += 1;
+
+                // Late Move Pruning (LMP): at shallow non-PV nodes, trim low-history late quiets.
+                if (!is_pv_node and
+                    !in_check and
+                    search_depth <= LMP_MAX_DEPTH and
+                    moves_searched > 0 and
+                    quiets_seen > lmpQuietMoveLimit(search_depth) and
+                    !self.killer_moves.isKiller(move, ply) and
+                    self.history.getForColor(move, color) <= 0)
+                {
+                    continue;
+                }
+            }
 
             // Futility pruning - skip quiet moves if futile (but not if move gives check)
             if (futile and !is_capture and !is_promotion and moves_searched > 0) {
@@ -1657,12 +1822,18 @@ pub const SearchEngine = struct {
         // Order captures by MVV-LVA
         self.orderCaptures(&moves);
 
-        const opponent_color = if (self.board.board.move == .white) piece.Color.black else piece.Color.white;
+        const move_color = self.board.board.move;
+        const opponent_color = oppositeColor(move_color);
 
         for (moves.slice()) |move| {
             // Delta pruning - skip captures that can't possibly raise alpha (skip when in check)
             if (!in_check) {
-                const captured_value = if (self.board.board.getPieceAt(move.to(), opponent_color)) |p|
+                const is_en_passant = self.board.board.en_passant_square == move.to() and
+                    self.board.board.getPieceAt(move.from(), move_color) == .pawn and
+                    self.board.board.getPieceAt(move.to(), opponent_color) == null;
+                const captured_value = if (is_en_passant)
+                    eval.PAWN_VALUE
+                else if (self.board.board.getPieceAt(move.to(), opponent_color)) |p|
                     eval.getPieceValue(p)
                 else
                     0;
@@ -1676,6 +1847,11 @@ pub const SearchEngine = struct {
                 // Delta pruning margin increased to 300 to avoid being too aggressive
                 if (stand_pat + captured_value + promo_value + 300 < alpha) {
                     continue; // Futile capture
+                }
+
+                // SEE pruning - skip clearly losing non-promotion captures.
+                if (move.promotion() == null and staticExchangeEvalPosition(self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP) {
+                    continue;
                 }
             }
 
@@ -1792,24 +1968,36 @@ pub const SearchEngine = struct {
         }
     }
 
-    /// Order captures by MVV-LVA
+    /// Order tactical moves with SEE first, MVV-LVA second.
+    /// In quiescence check evasions, legal quiets may appear as well.
     fn orderCaptures(self: *Self, moves: *MoveList) void {
         const move_slice = moves.sliceMut();
         var scores: [256]i32 = undefined;
 
-        const opponent_color = if (self.board.board.move == .white) piece.Color.black else piece.Color.white;
+        const move_color = self.board.board.move;
+        const opponent_color = oppositeColor(move_color);
 
         for (move_slice, 0..) |move, i| {
-            var score: i32 = 0;
+            var score = staticExchangeEvalPosition(self.board.board, move) * SEE_CAPTURE_SCALE;
 
-            if (self.board.board.getPieceAt(move.to(), opponent_color)) |victim| {
+            if (self.board.board.en_passant_square == move.to() and
+                self.board.board.getPieceAt(move.from(), move_color) == .pawn and
+                self.board.board.getPieceAt(move.to(), opponent_color) == null)
+            {
+                score += eval.PAWN_VALUE * 10;
+            } else if (self.board.board.getPieceAt(move.to(), opponent_color)) |victim| {
                 const victim_value = eval.getPieceValue(victim);
                 const attacker_value = if (self.board.board.getPieceAt(move.from(), self.board.board.move)) |att|
                     eval.getPieceValue(att)
                 else
                     0;
 
-                score = victim_value * 100 - attacker_value;
+                score += victim_value * 12 - attacker_value;
+            } else if (move.promotion()) |promo| {
+                score += seePieceValue(promo) * 4;
+            } else {
+                // In-check quiescence can include quiet evasions.
+                score += self.history.getForColor(move, move_color);
             }
 
             scores[i] = score;
