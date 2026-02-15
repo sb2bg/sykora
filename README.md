@@ -113,10 +113,10 @@ For Python tooling, install dependencies as needed:
 
 ```bash
 # Core analysis/benchmark utilities
-python3 -m pip install chess
+python -m pip install chess
 
 # Lichess bot utilities
-python3 -m pip install berserk python-dotenv
+python -m pip install berserk python-dotenv
 ```
 
 ## Building
@@ -152,17 +152,17 @@ To run your own bot instance against Lichess:
 ```bash
 export LICHESS_API_TOKEN="<your_lichess_bot_token>"
 export ENGINE_PATH="./zig-out/bin/sykora"
-python3 utils/bot/lichess_bot.py
+python utils/bot/lichess_bot.py
 ```
 
 To issue a challenge from your token/account:
 
 ```bash
 # challenge a specific user
-python3 utils/bot/challenge_bot.py some_username --minutes 3 --increment 2
+python utils/bot/challenge_bot.py some_username --minutes 3 --increment 2
 
 # or pick a random online bot
-python3 utils/bot/challenge_bot.py --random-online-bot --minutes 3 --increment 2
+python utils/bot/challenge_bot.py --random-online-bot --minutes 3 --increment 2
 ```
 
 ## Testing
@@ -182,17 +182,17 @@ utils/test/test_perft_suite.sh
 To benchmark search speed (NPS):
 
 ```bash
-python3 utils/bench/nps.py --engine ./zig-out/bin/sykora --depth 10
-python3 utils/bench/nps.py --engine ./zig-out/bin/sykora --movetime-ms 500 --runs 2
+python utils/bench/nps.py --engine ./zig-out/bin/sykora --depth 10
+python utils/bench/nps.py --engine ./zig-out/bin/sykora --movetime-ms 500 --runs 2
 ```
 
 To run Strategic Test Suite (STS) EPD files (requires `python-chess`):
 
 ```bash
-python3 utils/sts/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-out/bin/sykora --movetime-ms 300
+python utils/sts/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-out/bin/sykora --movetime-ms 300
 
 # Example with NNUE options
-python3 utils/sts/sts.py --epd /path/to/sts --engine ./zig-out/bin/sykora --movetime-ms 300 \
+python utils/sts/sts.py --epd /path/to/sts --engine ./zig-out/bin/sykora --movetime-ms 300 \
   --engine-opt UseNNUE=true --engine-opt EvalFile=nnue/syk_nnue_v11_h128_d10.sknnue --engine-opt NnueBlend=2
 ```
 
@@ -200,20 +200,20 @@ To run engine-vs-engine self-play (also requires `python-chess`):
 
 ```bash
 # Baseline vs candidate, 80 games, 200ms/move, balanced openings
-python3 utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --name1 old --name2 new --games 80 --movetime-ms 200
+python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --name1 old --name2 new --games 80 --movetime-ms 200
 ```
 
 Useful variants:
 
 ```bash
 # More stable signal (recommended for commits you may keep)
-python3 utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 200 --movetime-ms 200
+python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 200 --movetime-ms 200
 
 # Fixed-depth comparison
-python3 utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 120 --depth 8
+python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 120 --depth 8
 
 # Save all PGNs for manual inspection
-python3 utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 80 --output-dir ./selfplay_pgn
+python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 80 --output-dir ./selfplay_pgn
 ```
 
 The script prints an estimated Elo difference (`candidate - baseline`), a 95% confidence interval, and a p-value versus equal strength.
@@ -236,20 +236,20 @@ For long-term version tracking, use the history ledger:
 
 ```bash
 # Initialize ledger folders
-python3 utils/history/history.py init
+python utils/history/history.py init
 
 # Snapshot current engine build
-python3 utils/history/history.py snapshot --label "experiment-a" --notes "describe your change"
+python utils/history/history.py snapshot --label "experiment-a" --notes "describe your change"
 
 # List snapshots, run archived match, recompute global ratings
-python3 utils/history/history.py list-engines
-python3 utils/history/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
-python3 utils/history/history.py ratings --plot
-python3 utils/history/history.py sts <engine_id> --movetime-ms 100
+python utils/history/history.py list-engines
+python utils/history/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
+python utils/history/history.py ratings --plot
+python utils/history/history.py sts <engine_id> --movetime-ms 100
 
 # Auto pit strongest vs weakest and render a network graph
-python3 utils/history/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
-python3 utils/history/history.py network --top-n 12 --min-games 10 --min-edge-games 2
+python utils/history/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
+python utils/history/history.py network --top-n 12 --min-games 10 --min-edge-games 2
 ```
 
 See `history/README.md` for folder schema and full workflow.
@@ -258,20 +258,20 @@ One-command tuning loop (STS gate + archived self-play + auto-promotion):
 
 ```bash
 # First run: create baseline from a known engine binary
-python3 utils/tuning/tune_loop.py --bootstrap-baseline-engine old_versions/old_sykora --candidate-label "first-pass"
+python utils/tuning/tune_loop.py --bootstrap-baseline-engine old_versions/old_sykora --candidate-label "first-pass"
 
 # Normal run: compare current code to history/current_baseline.txt
-python3 utils/tuning/tune_loop.py --candidate-label "eval-tweak" --candidate-notes "describe change"
+python utils/tuning/tune_loop.py --candidate-label "eval-tweak" --candidate-notes "describe change"
 ```
 
 Quick vs serious settings:
 
 ```bash
 # Quick loop (default): 6 STS themes, 20 self-play games at 80ms/move
-python3 utils/tuning/tune_loop.py --candidate-label "quick-iter"
+python utils/tuning/tune_loop.py --candidate-label "quick-iter"
 
 # Serious confirmation before keeping a major change
-python3 utils/tuning/tune_loop.py --candidate-label "confirm" --sp-games 120 --sp-movetime-ms 150 --max-p-value 0.2
+python utils/tuning/tune_loop.py --candidate-label "confirm" --sp-games 120 --sp-movetime-ms 150 --max-p-value 0.2
 ```
 
 Legacy wrapper paths under `utils/` are kept for compatibility, but new docs use the canonical subfolders.
@@ -298,12 +298,12 @@ To use pretrained weights immediately, use a net trained/exported for this forma
 Bullet-first dataset prep (for large Leela/lc0 chunk sets):
 
 ```bash
-python3 utils/nnue/bullet/prepare_lc0_dataset.py \
+python utils/nnue/bullet/prepare_lc0_dataset.py \
   --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
   --output-dir nnue/data/bullet/leela_run3 \
   --manifest-name shards.txt
 
-python3 utils/nnue/bullet/inspect_lc0_v6.py \
+python utils/nnue/bullet/inspect_lc0_v6.py \
   --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
   --max-files 32 --records-per-file 8 \
   --output-json nnue/data/bullet/leela_run3/inspect.json
@@ -312,7 +312,7 @@ python3 utils/nnue/bullet/inspect_lc0_v6.py \
 If your Bullet build exports float checkpoints (`.npz`), convert to Sykora net:
 
 ```bash
-python3 utils/nnue/bullet/export_npz_to_sknnue.py \
+python utils/nnue/bullet/export_npz_to_sknnue.py \
   --input nnue/models/bullet/<run_id>/checkpoint.npz \
   --output-net nnue/syk_nnue_<run_id>.sknnue
 ```
@@ -320,31 +320,31 @@ python3 utils/nnue/bullet/export_npz_to_sknnue.py \
 Fallback in-repo trainer pipeline:
 
 ```bash
-python3 utils/nnue/extract_positions.py --output nnue/data/positions.jsonl
-python3 utils/nnue/label_with_stockfish.py --input nnue/data/positions.jsonl --output nnue/data/labeled.jsonl --depth 8 --result-mix 0.0 --cp-clip 2000
-python3 utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue --augment-mirror
+python utils/nnue/extract_positions.py --output nnue/data/positions.jsonl
+python utils/nnue/label_with_stockfish.py --input nnue/data/positions.jsonl --output nnue/data/labeled.jsonl --depth 8 --result-mix 0.0 --cp-clip 2000
+python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue --augment-mirror
 ```
 
 Fishtest PGN ingestion example:
 
 ```bash
 # Download .pgn.gz runs (network required)
-python3 utils/data/download_fishtest_pgns.py --path datasets/fishtest --time-delta 720 --ltc-only true
+python utils/data/download_fishtest_pgns.py --path datasets/fishtest --time-delta 720 --ltc-only true
 
 # Extract positions directly from .pgn.gz (recursive glob supported)
-python3 utils/nnue/extract_positions.py --pgn-glob "datasets/fishtest/**/*.pgn.gz" --output nnue/data/positions.jsonl
+python utils/nnue/extract_positions.py --pgn-glob "datasets/fishtest/**/*.pgn.gz" --output nnue/data/positions.jsonl
 ```
 
 Optional cp-regression training mode:
 
 ```bash
-python3 utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0_cp.sknnue --target-mode cp --cp-target-key teacher_cp_stm --cp-norm 400 --augment-mirror
+python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0_cp.sknnue --target-mode cp --cp-target-key teacher_cp_stm --cp-norm 400 --augment-mirror
 ```
 
 To compare Sykora against Stockfish running a specific net:
 
 ```bash
-python3 utils/match/selfplay.py ./zig-out/bin/sykora /opt/homebrew/bin/stockfish --name1 sykora --name2 stockfish-nnue --engine2-opt EvalFile=nnue/nn-49c1193b131c.nnue --games 40 --movetime-ms 150
+python utils/match/selfplay.py ./zig-out/bin/sykora /opt/homebrew/bin/stockfish --name1 sykora --name2 stockfish-nnue --engine2-opt EvalFile=nnue/nn-49c1193b131c.nnue --games 40 --movetime-ms 150
 ```
 
 Some Stockfish builds reject external `EvalFile`; in that case use the default embedded net or a matching Stockfish build.
