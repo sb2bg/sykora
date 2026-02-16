@@ -309,36 +309,49 @@ python utils/nnue/bullet/inspect_lc0_v6.py \
   --output-json nnue/data/bullet/leela_run3/inspect.json
 ```
 
-If your Bullet build exports float checkpoints (`.npz`), convert to Sykora net:
+Bullet training pipeline (current canonical path):
 
 ```bash
-python utils/nnue/bullet/export_npz_to_sknnue.py \
-  --input nnue/models/bullet/<run_id>/checkpoint.npz \
-  --output-net nnue/syk_nnue_<run_id>.sknnue
-```
+# 1) Build teacher-labeled Bullet text (own/self-play + external PGNs)
+python utils/nnue/bullet/make_teacher_text_dataset.py \
+  --pgn-glob "history/matches/**/*.pgn" \
+  --pgn-glob "datasets/fishtest/**/*.pgn.gz" \
+  --output nnue/data/bullet/train/teacher_text.txt \
+  --stockfish /path/to/stockfish \
+  --depth 12 --threads 1 --hash-mb 256 \
+  --sample-rate 0.2 --min-ply 12 --max-ply 220 \
+  --skip-check --skip-captures --cp-clip 2500
 
-Fallback in-repo trainer pipeline:
+# 2) Convert + shuffle/interleave to BulletFormat .data
+python utils/nnue/bullet/pack_dataset.py \
+  --text-input nnue/data/bullet/train/teacher_text.txt \
+  --output nnue/data/bullet/train/train_main.data \
+  --shuffle-mem-mb 4096 --convert-threads 8
 
-```bash
-python utils/nnue/extract_positions.py --output nnue/data/positions.jsonl
-python utils/nnue/label_with_stockfish.py --input nnue/data/positions.jsonl --output nnue/data/labeled.jsonl --depth 8 --result-mix 0.0 --cp-clip 2000
-python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0.sknnue --augment-mirror
-```
+# 3) Launch long Bullet run (4070 Ti SUPER defaults)
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset nnue/data/bullet/train/train_main.data \
+  --bullet-repo nnue/bullet_repo \
+  --output-root nnue/models/bullet \
+  --hidden 256 --end-superbatch 320 --threads 8
 
-Fishtest PGN ingestion example:
+# 3b) Apple Silicon / CPU sanity training (for pipeline validation)
+python utils/nnue/bullet/train_apple_silicon_test.py \
+  --dataset nnue/data/bullet/train/train_main.data \
+  --bullet-repo nnue/bullet_repo \
+  --output-root nnue/models/bullet_cpu_test \
+  --hidden 64 --end-superbatch 1 --threads 6
 
-```bash
-# Download .pgn.gz runs (network required)
-python utils/data/download_fishtest_pgns.py --path datasets/fishtest --time-delta 720 --ltc-only true
-
-# Extract positions directly from .pgn.gz (recursive glob supported)
-python utils/nnue/extract_positions.py --pgn-glob "datasets/fishtest/**/*.pgn.gz" --output nnue/data/positions.jsonl
-```
-
-Optional cp-regression training mode:
-
-```bash
-python utils/nnue/train_syknnue.py --input nnue/data/labeled.jsonl --output-net nnue/syk_v0_cp.sknnue --target-mode cp --cp-target-key teacher_cp_stm --cp-norm 400 --augment-mirror
+# 4) Gate checkpoints (STS + optional self-play) and promote
+python utils/nnue/bullet/gate_checkpoints.py \
+  --checkpoints-dir nnue/models/bullet/<run_id>/checkpoints \
+  --engine ./zig-out/bin/sykora \
+  --blend 2 --nnue-scale 100 \
+  --sts-epd epd --sts-movetime-ms 40 --sts-max-positions 400 \
+  --selfplay-games 80 --selfplay-movetime-ms 120 --selfplay-top-k 3 \
+  --threads 1 --hash-mb 64 \
+  --min-elo 0 --max-p-value 0.25 \
+  --promote-to nnue/syk_nnue_best.sknnue
 ```
 
 To compare Sykora against Stockfish running a specific net:
@@ -349,7 +362,6 @@ python utils/match/selfplay.py ./zig-out/bin/sykora /opt/homebrew/bin/stockfish 
 
 Some Stockfish builds reject external `EvalFile`; in that case use the default embedded net or a matching Stockfish build.
 
-`train_syknnue.py` defaults to a portable NumPy backend; use `--backend torch` on machines with a stable PyTorch/OpenMP setup.
 `NnueBlend` lets you blend NNUE with classical eval (0 = classical only, 100 = pure NNUE). Current default is `2`.
 
 Full process spec: `specs/nnue_training_spec.md`.
