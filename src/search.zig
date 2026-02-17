@@ -115,9 +115,11 @@ inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
     const loss = -see_score;
     if (loss < eval.PAWN_VALUE) return 0;
 
-    // Moderate root-only bias against dubious wing-pawn sacs.
+    // Root-only bias against dubious minor-piece-for-pawn sacs.
+    // The HCE overvalues king safety destruction from open files/missing shield pawns,
+    // making these sacs look better than they are.
     const capped_depth: i32 = @intCast(@min(depth, 12));
-    return 45 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 3;
+    return 60 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 4;
 }
 
 // Late Move Reduction parameters
@@ -693,8 +695,8 @@ pub const SearchEngine = struct {
                 const attacker = moving_piece.?;
                 const victim = captured_piece.?;
                 const to_file = move.to() % 8;
-                const wing_file = to_file <= 1 or to_file >= 6;
-                if ((attacker == .bishop or attacker == .knight) and victim == .pawn and wing_file) {
+                const non_central = to_file <= 2 or to_file >= 5;
+                if ((attacker == .bishop or attacker == .knight) and victim == .pawn and non_central) {
                     speculative_sac_see = staticExchangeEvalPosition(self.board.board, move);
                     speculative_sac_candidate = speculative_sac_see <= -eval.PAWN_VALUE;
                 }
