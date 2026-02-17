@@ -15,19 +15,36 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-linux
+            cpu: baseline
             artifact: sykora-linux-x86_64
           - os: ubuntu-latest
+            target: x86_64-linux
+            cpu: x86_64_v3
+            artifact: sykora-linux-x86_64-avx2
+          - os: ubuntu-latest
             target: aarch64-linux
+            cpu: baseline
             artifact: sykora-linux-aarch64
           - os: macos-latest
             target: x86_64-macos
+            cpu: baseline
             artifact: sykora-macos-x86_64
           - os: macos-latest
+            target: x86_64-macos
+            cpu: x86_64_v3
+            artifact: sykora-macos-x86_64-avx2
+          - os: macos-latest
             target: aarch64-macos
+            cpu: baseline
             artifact: sykora-macos-aarch64
           - os: windows-latest
             target: x86_64-windows
+            cpu: baseline
             artifact: sykora-windows-x86_64
+          - os: windows-latest
+            target: x86_64-windows
+            cpu: x86_64_v3
+            artifact: sykora-windows-x86_64-avx2
 
     runs-on: ${{ matrix.os }}
 
@@ -39,7 +56,7 @@ jobs:
           version: 0.15.2
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }}
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
