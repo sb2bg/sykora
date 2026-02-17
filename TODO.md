@@ -1,114 +1,51 @@
-# Sykora Engine - Search & Eval Improvements
+High impact:
 
-## Search Improvements
+1. Check extension limit (bug fix) — Your MEMORY.md warns about this but  
+   src/search.zig still has no ply cap on check extensions. This causes seldepth  
+   explosion and phantom tactics. Add ply < 2 \* depth + 8 guard.
+2. LMR formula upgrade — You're using a step-function capped at R=3. Modern engines
+   use R = base + ln(depth) \* ln(moveIndex) / C with history-based modulation. This
+   is likely 20-40 Elo.
+3. Singular Extensions — When the TT move is clearly best (re-search at reduced
+   depth with TT score - margin as beta), extend it. ~20-30 Elo.
+4. Internal Iterative Reduction (IIR) — When no TT move exists, reduce depth by 1.
+   Trivial to implement, ~10-15 Elo.
 
-### LMR Log Formula + History-Based Reductions (~20-40 Elo)
+Medium impact: 5. Multi-bucket TT — Single entry per index loses a lot to collisions. 2-4 entries
+per bucket is standard. 6. History-based LMR modulation — Moves with bad history should reduce more; good
+history reduces less. Your LMR doesn't consult history at all. 7. TT prefetch — @prefetch the child TT entry after making a move to hide cache
+latency. 8. Continuation history / capture history — You only track from-to history.
+Continuation history (indexed by previous move's piece-to) improves move ordering
+significantly.
 
-Replace the current step-function LMR with a logarithmic formula:
-`R = base + ln(depth) * ln(moveIndex) / C`. This gives smoother, more aggressive
-reductions for late moves at high depths. Additionally:
+Evaluation
 
-- Reduce less for killer/counter moves
-- Reduce more for moves with bad history scores
-- Use the history score to modulate the reduction amount
+High impact: 9. Texel tuning — All ~100+ eval weights are hand-tuned. Automated tuning against
+labeled positions would be the single biggest HCE improvement (potentially 100-200
+Elo). 10. NNUE incremental updates — Your NNUE does a full accumulator recompute every
+call. This is extremely slow for hidden sizes of 256+. Without incremental
+make/unmake updates, HCE is probably faster at blitz time controls. 11. Attack-count king safety — Current king safety is basic pawn shield + open
+files. A non-linear danger table indexed by attacker count (weighted per piece
+type) is the standard approach.
 
-### Late Move Pruning (LMP) (~10-20 Elo)
+Medium impact: 12. Passed pawn refinements — Missing: rook behind passer (Tarrasch rule), king
+proximity in endgame, blockade penalty, unstoppable passer detection. 13. Pawn hash table — Pawn structure is recomputed from scratch every eval call. A
+small dedicated cache saves significant time since pawns rarely change.
 
-At low depths, skip quiet moves entirely after searching N moves. For example:
+Performance / Movegen
 
-- Depth 1: prune after 5 moves
-- Depth 2: prune after 10 moves
-- Depth 3: prune after 15 moves
-  Only apply at non-PV, non-check nodes. Do not prune captures or promotions.
+14. Add a mailbox array (piece_on[64]) — getPieceAt loops through 6 bitboards every
+    time. This is called constantly. A parallel [64]Piece array makes it O(1).
+15. Iterate piece bitboards in eval, not all 64 squares — evaluate() loops over all
+    64 squares calling getPieceAt twice. Iterating set bits of each piece bitboard is
+    much faster, especially in endgames.
+16. Selection sort in legacy move ordering — orderMoves/orderCaptures do full
+    O(n^2) sorts. The staged move picker already does incremental pick-best, but the
+    legacy functions still exist and may be called.
 
-### Proper Static Exchange Evaluation (SEE) (~20-40 Elo)
+Quick Wins (least effort, still useful)
 
-Replace the simple heuristic (`attacker > victim + 50`) with a full SEE algorithm
-that resolves the entire capture chain on a square. Benefits:
-
-- More accurate capture ordering (better good/bad capture classification)
-- Better quiescence search pruning (skip truly losing captures)
-- Can be used in LMR/futility to prune losing captures more aggressively
-- Enables SEE-based pruning in the main search
-
-### Internal Iterative Deepening / Reduction (IID/IIR) (~10-15 Elo)
-
-When there is no TT move at a PV node (or any node at sufficient depth), either:
-
-- **IID**: Do a reduced-depth search first to find a likely best move for ordering
-- **IIR** (simpler): Just reduce the search depth by 1-2 plies
-  Modern engines prefer IIR for simplicity.
-
-### Singular Extensions (~20-30 Elo)
-
-At sufficient depth, if the TT move's score is significantly better than all
-alternatives, extend it by 1 ply. Test with a reduced-depth search excluding the
-TT move — if all other moves score well below the TT score minus a margin, the TT
-move is "singular" and deserves deeper analysis. One of the bigger Elo gains in
-modern engines.
-
-## Evaluation Improvements
-
-### Texel Tuning (~100-200 Elo)
-
-Use a labeled dataset of positions (from self-play or existing databases) to
-optimize all eval parameters via gradient descent. Parameters to tune:
-
-- Material values (pawn, knight, bishop, rook, queen)
-- All piece-square table values (middlegame and endgame)
-- Pawn structure weights (doubled, isolated, backward, passed, chains)
-- Mobility table values (knight, bishop, rook)
-- King safety weights (pawn shield, open files, center penalty)
-- Rook bonuses (open file, semi-open, 7th rank, connected)
-- Outpost bonuses
-- Bishop pair bonus
-- Endgame mop-up weights
-
-### Better King Safety with Attack Tables (~30-50 Elo)
-
-Replace basic pawn shield + open file evaluation with attack-count-based king
-safety:
-
-- Track how many pieces attack squares near the enemy king
-- Weight attacks by piece type (queen attacks worth more than knight attacks)
-- Sum up an "attack index" and look up a non-linear penalty table
-- Add pawn storm detection (penalize when enemy pawns advance toward king)
-- Add virtual king mobility (how many safe squares the king has)
-
-### Passed Pawn Improvements (~15-25 Elo)
-
-- **Tarrasch rule**: Bonus for rooks behind passed pawns (both own and enemy)
-- **King proximity**: In endgame, bonus for friendly king near passed pawn, penalty
-  for enemy king near it
-- **Unstoppable passer**: Detect when a passed pawn can't be caught by enemy king
-  (rule of the square)
-- **Blockade**: Penalty when a passed pawn is blocked by an enemy piece
-
-## Speed Improvements
-
-### Lazy SMP / Parallel Search (~50-70 Elo)
-
-Run the same search on multiple threads with a shared transposition table. Different
-threads naturally explore different subtrees due to TT race conditions. This is the
-standard approach and scales well up to 4-8 threads. Requires:
-
-- Shared TT with atomic access
-- Thread pool management
-- Aggregated node counts and time management
-
-### NNUE Evaluation (~200-400 Elo)
-
-Replace the hand-crafted evaluation with a neural network (NNUE). This is the gold
-standard for modern engines. Requires:
-
-- Network architecture design (HalfKP or similar input features)
-- Training data generation from self-play
-- Efficient inference with incremental updates on make/unmake
-- SIMD-optimized matrix operations
-
-### Minor Speed Optimizations
-
-- **Pawn hash table**: Cache pawn structure evaluations in a separate small hash
-  table. Pawn structure changes rarely, so this avoids redundant computation.
-- **TT prefetch**: After making a move, issue a memory prefetch for the child's TT
-  entry to hide cache miss latency.
+- IIR: ~5 lines of code
+- Check extension cap: 1 line
+- TT prefetch: 1 line
+- Mailbox array: maintain alongside bitboards in make/unmake

@@ -28,38 +28,50 @@ pub const TTEntry = struct {
     }
 };
 
+const BUCKET_SIZE: usize = 4;
+
+const TTBucket = struct {
+    entries: [BUCKET_SIZE]TTEntry,
+
+    fn init() TTBucket {
+        return TTBucket{
+            .entries = [_]TTEntry{TTEntry.init()} ** BUCKET_SIZE,
+        };
+    }
+};
+
 pub const TranspositionTable = struct {
     const Self = @This();
 
-    entries: []TTEntry,
-    size: usize,
+    buckets: []TTBucket,
+    num_buckets: usize,
     current_age: u8,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, size_mb: usize) !Self {
-        const entry_size = @sizeOf(TTEntry);
-        const num_entries = (size_mb * 1024 * 1024) / entry_size;
-        const entries = try allocator.alloc(TTEntry, num_entries);
+        const bucket_size = @sizeOf(TTBucket);
+        const num_buckets = (size_mb * 1024 * 1024) / bucket_size;
+        const buckets = try allocator.alloc(TTBucket, num_buckets);
 
-        for (entries) |*entry| {
-            entry.* = TTEntry.init();
+        for (buckets) |*bucket| {
+            bucket.* = TTBucket.init();
         }
 
         return Self{
-            .entries = entries,
-            .size = num_entries,
+            .buckets = buckets,
+            .num_buckets = num_buckets,
             .current_age = 0,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.entries);
+        self.allocator.free(self.buckets);
     }
 
     pub fn clear(self: *Self) void {
-        for (self.entries) |*entry| {
-            entry.* = TTEntry.init();
+        for (self.buckets) |*bucket| {
+            bucket.* = TTBucket.init();
         }
         self.current_age = 0;
     }
@@ -69,48 +81,78 @@ pub const TranspositionTable = struct {
     }
 
     pub fn resize(self: *Self, new_size_mb: usize) !void {
-        self.allocator.free(self.entries);
-        const entry_size = @sizeOf(TTEntry);
-        const num_entries = (new_size_mb * 1024 * 1024) / entry_size;
-        const entries = try self.allocator.alloc(TTEntry, num_entries);
-        for (entries) |*entry| {
-            entry.* = TTEntry.init();
+        self.allocator.free(self.buckets);
+        const bucket_size = @sizeOf(TTBucket);
+        const num_buckets = (new_size_mb * 1024 * 1024) / bucket_size;
+        const buckets = try self.allocator.alloc(TTBucket, num_buckets);
+        for (buckets) |*bucket| {
+            bucket.* = TTBucket.init();
         }
-        self.entries = entries;
-        self.size = num_entries;
+        self.buckets = buckets;
+        self.num_buckets = num_buckets;
         self.current_age = 0;
     }
 
-    pub fn index(self: *Self, hash: u64) usize {
-        return @as(usize, @intCast(hash % @as(u64, @intCast(self.size))));
+    inline fn bucketIndex(self: *Self, hash: u64) usize {
+        return @as(usize, @intCast(hash % @as(u64, @intCast(self.num_buckets))));
     }
 
     pub fn probe(self: *Self, hash: u64) ?*TTEntry {
-        const idx = self.index(hash);
-        if (self.entries[idx].hash == hash) {
-            return &self.entries[idx];
+        const idx = self.bucketIndex(hash);
+        const bucket = &self.buckets[idx];
+        for (&bucket.entries) |*entry| {
+            if (entry.hash == hash) {
+                return entry;
+            }
         }
         return null;
     }
 
     pub fn store(self: *Self, hash: u64, depth: u8, score: i32, bound: TTEntryBound, best_move: Move) void {
-        const idx = self.index(hash);
-        const entry = &self.entries[idx];
+        const idx = self.bucketIndex(hash);
+        const bucket = &self.buckets[idx];
 
-        const replace = entry.hash == 0 or
-            entry.age != self.current_age or
-            (entry.hash == hash and depth >= entry.depth) or
-            (entry.hash != hash and depth > entry.depth);
-
-        if (replace) {
-            entry.hash = hash;
-            entry.depth = depth;
-            entry.score = score;
-            entry.bound = bound;
-            entry.best_move = best_move;
-            entry.age = self.current_age;
-        } else if (entry.hash == hash and best_move.from() != 0) {
-            entry.best_move = best_move;
+        // Check if this hash already exists in the bucket — always update same-hash entry
+        for (&bucket.entries) |*entry| {
+            if (entry.hash == hash) {
+                if (depth >= entry.depth or entry.age != self.current_age) {
+                    entry.depth = depth;
+                    entry.score = score;
+                    entry.bound = bound;
+                    entry.age = self.current_age;
+                }
+                if (best_move.from() != 0 or best_move.to() != 0) {
+                    entry.best_move = best_move;
+                }
+                return;
+            }
         }
+
+        // Find best replacement victim: prefer empty → stale age → shallowest depth
+        var victim_idx: usize = 0;
+        var victim_score: i32 = replacementScore(&bucket.entries[0], self.current_age);
+        for (1..BUCKET_SIZE) |i| {
+            const s = replacementScore(&bucket.entries[i], self.current_age);
+            if (s < victim_score) {
+                victim_score = s;
+                victim_idx = i;
+            }
+        }
+
+        const victim = &bucket.entries[victim_idx];
+        victim.hash = hash;
+        victim.depth = depth;
+        victim.score = score;
+        victim.bound = bound;
+        victim.best_move = best_move;
+        victim.age = self.current_age;
+    }
+
+    /// Lower score = more replaceable. Empty slots get lowest score.
+    inline fn replacementScore(entry: *const TTEntry, current_age: u8) i32 {
+        if (entry.hash == 0) return -1000; // Empty — most replaceable
+        var score: i32 = @as(i32, entry.depth);
+        if (entry.age != current_age) score -= 256; // Stale — very replaceable
+        return score;
     }
 };

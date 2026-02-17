@@ -111,10 +111,39 @@ inline fn lmpQuietMoveLimit(depth: u32) u32 {
     };
 }
 
+inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
+    const loss = -see_score;
+    if (loss < eval.PAWN_VALUE) return 0;
+
+    // Moderate root-only bias against dubious wing-pawn sacs.
+    const capped_depth: i32 = @intCast(@min(depth, 12));
+    return 45 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 3;
+}
+
 // Late Move Reduction parameters
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_FULL_DEPTH_MOVES: u32 = 4;
-const LMR_REDUCTION_LIMIT: u32 = 3;
+
+// Pre-computed LMR reduction table: lmr_table[depth][moveIndex] = ln(depth) * ln(moveIndex) / 2.0
+const LMR_TABLE_MAX_DEPTH = 64;
+const LMR_TABLE_MAX_MOVES = 64;
+const lmr_table: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
+    @setEvalBranchQuota(10000);
+    var table: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = undefined;
+    for (0..LMR_TABLE_MAX_DEPTH) |d| {
+        for (0..LMR_TABLE_MAX_MOVES) |m| {
+            if (d == 0 or m == 0) {
+                table[d][m] = 0;
+            } else {
+                const ln_d = @log(@as(f64, @floatFromInt(d)));
+                const ln_m = @log(@as(f64, @floatFromInt(m)));
+                const val = ln_d * ln_m / 2.0;
+                table[d][m] = @intFromFloat(@max(val, 0.0));
+            }
+        }
+    }
+    break :blk table;
+};
 
 // Late Move Pruning parameters
 const LMP_MAX_DEPTH: u32 = 3;
@@ -499,15 +528,15 @@ pub const SearchEngine = struct {
 
         const original_alpha = alpha;
 
-        // Check extension - extend search when in check
+        // Check extension - extend search when in check (with ply cap to prevent seldepth explosion)
         var search_depth = depth;
-        if (in_check) {
+        if (in_check and ply < 2 * depth + 8) {
             search_depth += 1;
         }
 
         const is_pv_node = (beta_adj - alpha) > 1;
 
-        // Probe transposition table
+        // Probe transposition table (and track whether we have a TT move for IIR)
         var tt_move: ?Move = null;
         if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
             if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
@@ -527,6 +556,11 @@ pub const SearchEngine = struct {
                     },
                 }
             }
+        }
+
+        // Internal Iterative Reduction (IIR) — reduce depth by 1 when no TT move at sufficient depth
+        if (tt_move == null and search_depth >= 4) {
+            search_depth -= 1;
         }
 
         // Static evaluation for pruning decisions
@@ -647,6 +681,24 @@ pub const SearchEngine = struct {
                 self.board.board.getPieceAt(move.to(), opponent_color) == null;
             const is_capture = self.board.board.getPieceAt(move.to(), opponent_color) != null or is_en_passant;
             const is_promotion = move.promotion() != null;
+            const moving_piece = self.board.board.getPieceAt(move.from(), move_color);
+            const captured_piece: ?piece.Type = if (is_en_passant)
+                .pawn
+            else
+                self.board.board.getPieceAt(move.to(), opponent_color);
+
+            var speculative_sac_candidate = false;
+            var speculative_sac_see: i32 = 0;
+            if (ply == 0 and !in_check and is_capture and !is_promotion and moving_piece != null and captured_piece != null) {
+                const attacker = moving_piece.?;
+                const victim = captured_piece.?;
+                const to_file = move.to() % 8;
+                const wing_file = to_file <= 1 or to_file >= 6;
+                if ((attacker == .bishop or attacker == .knight) and victim == .pawn and wing_file) {
+                    speculative_sac_see = staticExchangeEvalPosition(self.board.board, move);
+                    speculative_sac_candidate = speculative_sac_see <= -eval.PAWN_VALUE;
+                }
+            }
 
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
@@ -680,6 +732,7 @@ pub const SearchEngine = struct {
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.previous_move = move;
             self.nodes_searched += 1;
+            const gives_check = self.board.isInCheck(self.board.board.move);
 
             // Add position to history for repetition detection
             const old_hist_count = self.history_count;
@@ -698,25 +751,43 @@ pub const SearchEngine = struct {
 
             var score: i32 = undefined;
 
-            // Late Move Reductions (LMR)
+            // Late Move Reductions (LMR) — logarithmic formula with history modulation
             if (moves_searched >= LMR_FULL_DEPTH_MOVES and
                 search_depth >= LMR_MIN_DEPTH and
-                !is_pv_node and
                 !in_check and
                 !is_capture and
                 !is_promotion and
-                !self.board.isInCheck(self.board.board.move))
+                !gives_check)
             {
-                // Calculate reduction based on depth and moves searched
-                var reduction: u32 = 1;
-                if (moves_searched > 6) reduction += 1;
-                if (search_depth > 6) reduction += 1;
-                if (!is_pv_node) reduction += 1;
-                reduction = @min(reduction, LMR_REDUCTION_LIMIT);
-                reduction = @min(reduction, search_depth - 1);
+                // Base reduction from pre-computed log table
+                const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
+                const m_idx = @min(moves_searched, LMR_TABLE_MAX_MOVES - 1);
+                var reduction: i32 = lmr_table[d_idx][m_idx];
+
+                // History modulation: good history reduces less, bad history reduces more
+                const hist_score = self.history.getForColor(move, color);
+                reduction -= @divTrunc(hist_score, 8192);
+
+                // Killer and counter moves get reduced less
+                if (self.killer_moves.isKiller(move, ply)) {
+                    reduction -= 1;
+                }
+                if (counter_move) |cm| {
+                    if (cm.from() == move.from() and cm.to() == move.to()) {
+                        reduction -= 1;
+                    }
+                }
+
+                // PV nodes get reduced less
+                if (is_pv_node) {
+                    reduction -= 1;
+                }
+
+                // Clamp reduction: at least 1, at most depth-2 (leave at least 1 ply)
+                const r: u32 = @intCast(@max(1, @min(reduction, @as(i32, @intCast(next_depth)) - 1)));
 
                 // Search with reduced depth
-                score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - reduction, ply + 1, true);
+                score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - r, ply + 1, true);
 
                 // If LMR found something good, re-search at full depth
                 if (score > alpha) {
@@ -741,6 +812,12 @@ pub const SearchEngine = struct {
             self.board.unmakeMoveUnchecked(move, undo);
             self.previous_move = old_previous;
             self.history_count = old_hist_count; // Restore history count
+
+            // Discourage speculative non-checking minor-piece sacs for pawns unless
+            // search already proves concrete compensation.
+            if (speculative_sac_candidate and !gives_check and !eval.isMateScore(score)) {
+                score -= speculativeSacPenalty(speculative_sac_see, search_depth);
+            }
 
             moves_searched += 1;
 
