@@ -328,6 +328,16 @@ python utils/nnue/bullet/pack_dataset.py \
   --output nnue/data/bullet/train/train_main.data \
   --shuffle-mem-mb 4096 --convert-threads 8
 
+# 2b) One-command mixed data build (bounded fishtest + self-play + label + pack)
+python utils/nnue/bullet/build_mixed_dataset.py \
+  --fishtest-hours 72 --fishtest-max-runs 4 --fishtest-max-games 150000 \
+  --include-existing-fishtest \
+  --selfplay-games 80 --selfplay-movetime-ms 120 \
+  --skip-check --skip-captures --dedupe-fen
+
+# Tiny smoke test preset (good for fast pipeline checks)
+./utils/nnue/bullet/run_small_data_smoke.sh
+
 # 3) Launch long Bullet run (4070 Ti SUPER defaults)
 python utils/nnue/bullet/train_cuda_longrun.py \
   --dataset nnue/data/bullet/train/train_main.data \

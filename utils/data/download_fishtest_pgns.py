@@ -158,6 +158,18 @@ def parse_args() -> argparse.Namespace:
         help="Download tests by this username only.",
     )
     parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=0,
+        help="Stop after downloading this many runs (0 = unlimited).",
+    )
+    parser.add_argument(
+        "--max-games",
+        type=int,
+        default=0,
+        help="Skip runs with more than this many games (0 = unlimited).",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -174,6 +186,7 @@ def main() -> int:
 
     downloaded = find_downloaded_ids(root)
     print(f"Found {len(downloaded)} downloaded tests in {root} already.")
+    downloaded_this_run = 0
 
     query = build_finished_runs_query(args)
     page = 1
@@ -206,6 +219,8 @@ def main() -> int:
             break
 
         for test_id, meta in response_json.items():
+            if args.max_runs > 0 and downloaded_this_run >= args.max_runs:
+                break
             if test_id in downloaded:
                 continue
             if "spsa" in meta.get("args", {}):
@@ -230,6 +245,10 @@ def main() -> int:
             if games <= 0:
                 if args.verbose:
                     print(f"No games found, skipping test {test_id}")
+                continue
+            if args.max_games > 0 and games > args.max_games:
+                if args.verbose:
+                    print(f"Skipping test {test_id} with {games} games (> --max-games={args.max_games})")
                 continue
 
             tc_strings: list[str] = []
@@ -278,6 +297,7 @@ def main() -> int:
                 meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
                 downloaded.add(test_id)
+                downloaded_this_run += 1
 
                 if args.verbose:
                     actual_games = count_games(pgn_gz_path)
@@ -286,6 +306,9 @@ def main() -> int:
                 if args.verbose >= 2:
                     print(f"Skipping {test_id}: {exc}")
                 continue
+
+        if args.max_runs > 0 and downloaded_this_run >= args.max_runs:
+            break
 
         page += 1
 
