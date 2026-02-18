@@ -38,12 +38,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stockfish",
-        default="/opt/homebrew/bin/stockfish",
+        default="stockfish",
         help="Stockfish binary path",
     )
     parser.add_argument("--depth", type=int, default=12, help="Teacher depth")
-    parser.add_argument("--threads", type=int, default=1, help="Teacher Threads option")
-    parser.add_argument("--hash-mb", type=int, default=256, help="Teacher Hash option (MB)")
+    parser.add_argument("--threads", type=int, default=4, help="Teacher Threads option")
+    parser.add_argument("--hash-mb", type=int, default=2048, help="Teacher Hash option (MB)")
     parser.add_argument("--seed", type=int, default=1, help="RNG seed")
     parser.add_argument("--sample-rate", type=float, default=0.2, help="Sampling probability")
     parser.add_argument("--min-ply", type=int, default=12, help="Minimum ply")

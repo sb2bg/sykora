@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fishtest-max-runs",
         type=int,
-        default=4,
+        default=8,
         help="Maximum number of fishtest runs to download (0 = unlimited)",
     )
     parser.add_argument(
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-fishtest-pgns",
         type=int,
-        default=16,
+        default=32,
         help="Max fishtest PGNs to stage (0 = no cap)",
     )
     parser.add_argument(
@@ -119,8 +119,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selfplay-engine2", default="./zig-out/bin/sykora", help="Self-play engine2 path")
     parser.add_argument("--selfplay-name1", default="sykora-a", help="Label for self-play engine1")
     parser.add_argument("--selfplay-name2", default="sykora-b", help="Label for self-play engine2")
-    parser.add_argument("--selfplay-games", type=int, default=40, help="Self-play game count")
-    parser.add_argument("--selfplay-movetime-ms", type=int, default=100, help="Self-play movetime in ms")
+    parser.add_argument("--selfplay-games", type=int, default=200, help="Self-play game count")
+    parser.add_argument("--selfplay-movetime-ms", type=int, default=150, help="Self-play movetime in ms")
     parser.add_argument("--selfplay-openings", default="default", help="Self-play openings source")
     parser.add_argument("--selfplay-shuffle-openings", action="store_true", help="Shuffle self-play openings")
     parser.add_argument("--selfplay-seed", type=int, default=1, help="Self-play opening seed")
@@ -153,10 +153,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Teacher settings.
-    parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish", help="Teacher engine path")
+    parser.add_argument("--stockfish", default="stockfish", help="Teacher engine path")
     parser.add_argument("--teacher-depth", type=int, default=12, help="Teacher depth")
-    parser.add_argument("--teacher-threads", type=int, default=1, help="Teacher Threads")
-    parser.add_argument("--teacher-hash-mb", type=int, default=256, help="Teacher Hash MB")
+    parser.add_argument("--teacher-threads", type=int, default=4, help="Teacher Threads")
+    parser.add_argument("--teacher-hash-mb", type=int, default=2048, help="Teacher Hash MB")
     parser.add_argument("--sample-rate", type=float, default=0.2, help="Position sample probability")
     parser.add_argument("--min-ply", type=int, default=12, help="Min ply for sampling")
     parser.add_argument("--max-ply", type=int, default=220, help="Max ply for sampling")
@@ -172,8 +172,8 @@ def parse_args() -> argparse.Namespace:
         default="nnue/bullet_repo/target/release/bullet-utils",
         help="Path to bullet-utils binary",
     )
-    parser.add_argument("--shuffle-mem-mb", type=int, default=4096, help="Shuffle memory budget")
-    parser.add_argument("--convert-threads", type=int, default=8, help="Text conversion threads")
+    parser.add_argument("--shuffle-mem-mb", type=int, default=8192, help="Shuffle memory budget")
+    parser.add_argument("--convert-threads", type=int, default=16, help="Text conversion threads")
 
     parser.add_argument("--dry-run", action="store_true", help="Print planned commands and exit")
     return parser.parse_args()
