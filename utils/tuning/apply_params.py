@@ -174,7 +174,9 @@ def dump_defaults(output_path: str, eval_zig_path: str) -> None:
     ):
         name = m.group(1)
         body = m.group(3)
-        nums = re.findall(r'-?\d+', body)
+        # Strip inline comments (// ...) before extracting numbers
+        body_no_comments = re.sub(r'//[^\n]*', '', body)
+        nums = re.findall(r'-?\d+', body_no_comments)
         lines.append(f"{name} {' '.join(nums)}")
 
     with open(output_path, 'w') as f:

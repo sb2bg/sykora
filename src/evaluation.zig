@@ -161,7 +161,7 @@ fn setParam(key: []const u8, value_str: []const u8) !void {
                     );
                 },
                 .array => |arr_info| {
-                    var arr: field.type = undefined;
+                    var arr: field.type = @field(g_params, field.name);
                     var it = std.mem.splitScalar(u8, value_str, ' ');
                     var i: usize = 0;
                     while (it.next()) |token| {
