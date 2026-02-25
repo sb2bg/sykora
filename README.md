@@ -6,9 +6,7 @@
 
 <img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="200" alt="Sykora Logo">
 
-Sykora is a chess engine written in Zig that implements the Universal Chess Interface (UCI) protocol. It provides a robust and efficient implementation of chess game logic and UCI communication.
-
-You can play against the live bot on Lichess: [SykoraBot](https://lichess.org/@/sykorabot).
+Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, a full alpha-beta search with LMR/null-move/futility pruning, Lazy SMP parallel search, a hand-tuned classical evaluation, and an experimental NNUE path. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
 
 ## Features
 
