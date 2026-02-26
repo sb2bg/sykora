@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 import math
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -31,6 +32,8 @@ import tempfile
 import time
 
 import numpy as np
+
+NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -76,23 +79,18 @@ def params_to_tempfile(params: dict) -> str:
 # Engine evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_batch(fens: list[str], params: dict, engine: str) -> list[int]:
-    """
-    Run sykora-tune with the given params and return a score for every FEN.
-    Returns [] on engine failure.
-    """
-    params_path = params_to_tempfile(params)
+def _evaluate_chunk(args: tuple) -> list[int]:
+    """Evaluate a chunk of FENs in a single sykora-tune subprocess."""
+    fens_chunk, params_path, engine = args
     try:
         result = subprocess.run(
             [engine, '--params', params_path],
-            input='\n'.join(fens),
+            input='\n'.join(fens_chunk),
             capture_output=True,
             text=True,
             timeout=120,
         )
         if result.returncode != 0:
-            print(f"[warn] engine exited {result.returncode}: {result.stderr[:200]}",
-                  file=sys.stderr)
             return []
         scores = []
         for line in result.stdout.strip().split('\n'):
@@ -104,8 +102,39 @@ def evaluate_batch(fens: list[str], params: dict, engine: str) -> list[int]:
                     scores.append(0)
         return scores
     except subprocess.TimeoutExpired:
-        print('[warn] engine timed out', file=sys.stderr)
         return []
+
+
+def evaluate_batch(fens: list[str], params: dict, engine: str) -> list[int]:
+    """
+    Run sykora-tune with the given params and return a score for every FEN.
+    Splits work across NUM_WORKERS parallel processes.
+    Returns [] on engine failure.
+    """
+    params_path = params_to_tempfile(params)
+    try:
+        n = len(fens)
+        w = min(NUM_WORKERS, max(1, n // 1000))  # don't spawn workers for tiny batches
+        if w <= 1:
+            # Single process path
+            chunk_scores = _evaluate_chunk((fens, params_path, engine))
+            return chunk_scores
+
+        chunk_size = (n + w - 1) // w
+        chunks = [fens[i:i + chunk_size] for i in range(0, n, chunk_size)]
+        args = [(chunk, params_path, engine) for chunk in chunks]
+
+        with multiprocessing.Pool(w) as pool:
+            results = pool.map(_evaluate_chunk, args)
+
+        scores = []
+        for chunk_scores in results:
+            if not chunk_scores:
+                print('[warn] a worker failed, falling back to single-process',
+                      file=sys.stderr)
+                return _evaluate_chunk((fens, params_path, engine))
+            scores.extend(chunk_scores)
+        return scores
     finally:
         os.unlink(params_path)
 
