@@ -48,6 +48,10 @@ const Args = struct {
     seed: u64 = 1,
     no_bounds: bool = false,
     scalar_bound_mult: f64 = 3.0,
+    array_bound_mult: f64 = 1.5,
+    array_bound_min: i32 = 24,
+    cp_target_weight: f64 = 0.35,
+    sf_k: f64 = 1.0,
     min_improvement: f64 = 1e-6,
     full_eval_interval: usize = 1,
 };
@@ -92,6 +96,18 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
         } else if (eql(arg, "--scalar-bound-mult")) {
             const val = requireOptionValue(argv, &i, "--scalar-bound-mult");
             args.scalar_bound_mult = try std.fmt.parseFloat(f64, val);
+        } else if (eql(arg, "--array-bound-mult")) {
+            const val = requireOptionValue(argv, &i, "--array-bound-mult");
+            args.array_bound_mult = try std.fmt.parseFloat(f64, val);
+        } else if (eql(arg, "--array-bound-min")) {
+            const val = requireOptionValue(argv, &i, "--array-bound-min");
+            args.array_bound_min = try std.fmt.parseInt(i32, val, 10);
+        } else if (eql(arg, "--cp-target-weight")) {
+            const val = requireOptionValue(argv, &i, "--cp-target-weight");
+            args.cp_target_weight = try std.fmt.parseFloat(f64, val);
+        } else if (eql(arg, "--sf-k")) {
+            const val = requireOptionValue(argv, &i, "--sf-k");
+            args.sf_k = try std.fmt.parseFloat(f64, val);
         } else if (eql(arg, "--min-improvement")) {
             const val = requireOptionValue(argv, &i, "--min-improvement");
             args.min_improvement = try std.fmt.parseFloat(f64, val);
@@ -140,10 +156,15 @@ fn printUsage() void {
         \\  --seed <N>                Random seed (default: 1)
         \\  --no-bounds               Disable parameter bounds
         \\  --scalar-bound-mult <f>   Bound span multiplier (default: 3.0)
+        \\  --array-bound-mult <f>    Array bound multiplier (default: 1.5)
+        \\  --array-bound-min <N>     Array minimum bound span (default: 24)
+        \\  --cp-target-weight <f>    Blend weight for cp target in [0,1] (default: 0.35)
+        \\  --sf-k <f>                Sigmoid K for cp -> prob conversion (default: 1.0)
         \\  --min-improvement <f>     Min MSE improvement threshold (default: 1e-6)
         \\  --full-eval-interval <N>  Full-dataset eval every N epochs (default: 1)
         \\  --help                    Show this help
         \\
+        \\Duplicate FEN rows are merged by averaging labels before tuning.
         \\Dataset rows with invalid FEN are treated as hard errors.
         \\
     ) catch {};
@@ -155,34 +176,46 @@ fn printUsage() void {
 
 const Dataset = struct {
     boards: []Board,
-    results: []f64,
+    targets: []f64,
     count: usize,
 
     fn deinit(self: *Dataset, allocator: std.mem.Allocator) void {
         allocator.free(self.boards);
-        allocator.free(self.results);
+        allocator.free(self.targets);
         self.* = undefined;
     }
 };
 
-fn loadDataset(path: []const u8, max_positions: usize, allocator: std.mem.Allocator) !Dataset {
+const AggregatedEntry = struct {
+    board: Board,
+    sum_result: f64,
+    sum_cp_prob: f64,
+    count: usize,
+};
+
+fn loadDataset(path: []const u8, max_positions: usize, args: *const Args, allocator: std.mem.Allocator) !Dataset {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    var boards_list = std.ArrayList(Board).empty;
-    defer boards_list.deinit(allocator);
-
-    var results_list = std.ArrayList(f64).empty;
-    defer results_list.deinit(allocator);
+    var by_fen = std.StringHashMap(AggregatedEntry).init(allocator);
+    defer {
+        var it_free = by_fen.iterator();
+        while (it_free.next()) |entry| allocator.free(entry.key_ptr.*);
+        by_fen.deinit();
+    }
 
     var file_buf: [64 * 1024]u8 = undefined;
     var reader = file.reader(&file_buf);
 
+    var raw_rows: usize = 0;
     var skipped_bad_rows: usize = 0;
+    var skipped_bad_cp: usize = 0;
     var skipped_bad_results: usize = 0;
+    var merged_duplicates: usize = 0;
+    var cp_nonzero_rows: usize = 0;
     var line_no: usize = 0;
 
-    while (boards_list.items.len < max_positions) {
+    while (by_fen.count() < max_positions) {
         const maybe_line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.StreamTooLong => {
                 eprint("Error: dataset line too long near line {d}.\n", .{line_no + 1});
@@ -195,6 +228,7 @@ fn loadDataset(path: []const u8, max_positions: usize, allocator: std.mem.Alloca
         line_no += 1;
         const trimmed = std.mem.trim(u8, line, " \r\t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        raw_rows += 1;
 
         // Parse "FEN | cp_score | result"
         var parts = std.mem.splitSequence(u8, trimmed, "|");
@@ -202,17 +236,26 @@ fn loadDataset(path: []const u8, max_positions: usize, allocator: std.mem.Alloca
             skipped_bad_rows += 1;
             continue;
         };
-        _ = parts.next() orelse {
+        const cp_part = parts.next() orelse {
             skipped_bad_rows += 1;
             continue;
-        }; // skip cp_score
+        };
         const result_part = parts.next() orelse {
             skipped_bad_rows += 1;
             continue;
         };
 
         const fen = std.mem.trim(u8, fen_part, " \t");
+        const cp_str = std.mem.trim(u8, cp_part, " \t");
         const result_str = std.mem.trim(u8, result_part, " \t\r");
+
+        var cp: f64 = std.fmt.parseFloat(f64, cp_str) catch {
+            skipped_bad_cp += 1;
+            continue;
+        };
+        if (cp > 5000.0) cp = 5000.0;
+        if (cp < -5000.0) cp = -5000.0;
+        if (@abs(cp) >= 1.0) cp_nonzero_rows += 1;
 
         const result = std.fmt.parseFloat(f64, result_str) catch {
             skipped_bad_results += 1;
@@ -225,44 +268,65 @@ fn loadDataset(path: []const u8, max_positions: usize, allocator: std.mem.Alloca
             continue;
         }
 
+        if (by_fen.getPtr(fen)) |entry| {
+            entry.sum_result += result;
+            entry.sum_cp_prob += sigmoid(cp, args.sf_k);
+            entry.count += 1;
+            merged_duplicates += 1;
+            continue;
+        }
+
         const board = Board.fromFen(fen) catch {
             eprint("Error: invalid FEN at line {d}.\n", .{line_no});
             return error.InvalidDatasetFen;
         };
 
-        try boards_list.append(allocator, board);
-        try results_list.append(allocator, result);
+        const fen_key = try allocator.dupe(u8, fen);
+        errdefer allocator.free(fen_key);
+        try by_fen.put(fen_key, .{
+            .board = board,
+            .sum_result = result,
+            .sum_cp_prob = sigmoid(cp, args.sf_k),
+            .count = 1,
+        });
     }
 
-    return finalizeDataset(
-        &boards_list,
-        &results_list,
-        skipped_bad_rows,
-        skipped_bad_results,
-        path,
-        allocator,
-    );
-}
+    var effective_cp_weight = args.cp_target_weight;
+    if (effective_cp_weight > 0.0 and cp_nonzero_rows == 0) {
+        print("Warning: cp_target_weight > 0 but cp scores are all zero; falling back to result-only targets.\n", .{});
+        effective_cp_weight = 0.0;
+    }
 
-fn finalizeDataset(
-    boards_list: *std.ArrayList(Board),
-    results_list: *std.ArrayList(f64),
-    skipped_bad_rows: usize,
-    skipped_bad_results: usize,
-    path: []const u8,
-    allocator: std.mem.Allocator,
-) !Dataset {
-    const boards = try boards_list.toOwnedSlice(allocator);
+    const unique = by_fen.count();
+    const boards = try allocator.alloc(Board, unique);
     errdefer allocator.free(boards);
-    const results = try results_list.toOwnedSlice(allocator);
+    const targets = try allocator.alloc(f64, unique);
+    errdefer allocator.free(targets);
 
-    print("Loaded {d} positions from {s}\n", .{ boards.len, path });
+    var idx: usize = 0;
+    var it = by_fen.iterator();
+    while (it.next()) |entry| {
+        const n_samples = @as(f64, @floatFromInt(entry.value_ptr.count));
+        const mean_result = entry.value_ptr.sum_result / n_samples;
+        const mean_cp_prob = entry.value_ptr.sum_cp_prob / n_samples;
+        const blended_target = (1.0 - effective_cp_weight) * mean_result + effective_cp_weight * mean_cp_prob;
+        boards[idx] = entry.value_ptr.board;
+        targets[idx] = blended_target;
+        idx += 1;
+    }
+
+    print("Loaded {d} unique positions from {s} ({d} raw rows)\n", .{ unique, path, raw_rows });
+    if (merged_duplicates > 0)
+        print("  merged {d} duplicate rows by averaging labels\n", .{merged_duplicates});
     if (skipped_bad_rows > 0)
         print("  skipped {d} malformed rows\n", .{skipped_bad_rows});
+    if (skipped_bad_cp > 0)
+        print("  skipped {d} rows with invalid cp scores\n", .{skipped_bad_cp});
     if (skipped_bad_results > 0)
         print("  skipped {d} rows with invalid result labels\n", .{skipped_bad_results});
+    print("  target blend: result={d:.2}, cp={d:.2}, sf_k={d:.3}\n", .{ 1.0 - effective_cp_weight, effective_cp_weight, args.sf_k });
 
-    return .{ .boards = boards, .results = results, .count = boards.len };
+    return .{ .boards = boards, .targets = targets, .count = boards.len };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -273,13 +337,13 @@ fn sigmoid(cp: f64, K: f64) f64 {
     return 1.0 / (1.0 + std.math.pow(f64, 10.0, -K * cp / 400.0));
 }
 
-fn computeMse(boards: []Board, results: []const f64, count: usize, K: f64) f64 {
+fn computeMse(boards: []Board, targets: []const f64, count: usize, K: f64) f64 {
     var sum: f64 = 0.0;
     for (0..count) |i| {
         var b = boards[i];
         const score: f64 = @floatFromInt(eval.evaluateWhite(&b));
         const pred = sigmoid(score, K);
-        const err = pred - results[i];
+        const err = pred - targets[i];
         sum += err * err;
     }
     return sum / @as(f64, @floatFromInt(count));
@@ -287,7 +351,7 @@ fn computeMse(boards: []Board, results: []const f64, count: usize, K: f64) f64 {
 
 fn computeMseSubset(
     boards: []Board,
-    results: []const f64,
+    targets: []const f64,
     indices: []const usize,
     K: f64,
 ) f64 {
@@ -296,7 +360,7 @@ fn computeMseSubset(
         var b = boards[idx];
         const score: f64 = @floatFromInt(eval.evaluateWhite(&b));
         const pred = sigmoid(score, K);
-        const err = pred - results[idx];
+        const err = pred - targets[idx];
         sum += err * err;
     }
     return sum / @as(f64, @floatFromInt(indices.len));
@@ -306,7 +370,7 @@ fn computeMseSubset(
 // K auto-tuning
 // ─────────────────────────────────────────────────────────────────────
 
-fn tuneK(boards: []Board, results: []const f64, count: usize) f64 {
+fn tuneK(boards: []Board, targets: []const f64, count: usize) f64 {
     print("Auto-tuning K...", .{});
 
     // Pre-evaluate all positions once
@@ -329,7 +393,7 @@ fn tuneK(boards: []Board, results: []const f64, count: usize) f64 {
         var sum: f64 = 0.0;
         for (0..count) |i| {
             const pred = sigmoid(scores[i], K);
-            const err = pred - results[i];
+            const err = pred - targets[i];
             sum += err * err;
         }
         const mse = sum / @as(f64, @floatFromInt(count));
@@ -376,6 +440,30 @@ fn scalarBounds(comptime name: []const u8, base: i32, mult: f64) Bounds {
     // Default: symmetric range around base
     const abs_base = if (base < 0) -base else base;
     const span: i32 = @max(20, @as(i32, @intFromFloat(@as(f64, @floatFromInt(abs_base)) * mult)));
+    return .{ .lo = base - span, .hi = base + span };
+}
+
+fn arrayBounds(comptime name: []const u8, base: i32, mult: f64, min_span: i32) Bounds {
+    const abs_base = if (base < 0) -base else base;
+    const from_mult: i32 = @as(i32, @intFromFloat(@as(f64, @floatFromInt(abs_base)) * mult));
+    const span = @max(min_span, @max(8, from_mult));
+
+    if (comptime eql(name, "passed_pawn_bonus")) {
+        return .{ .lo = 0, .hi = @max(220, base + span) };
+    }
+
+    if (comptime endsWith(name, "_table")) {
+        return .{ .lo = clamp(base - span, -200, 200), .hi = clamp(base + span, -200, 200) };
+    }
+
+    if (comptime endsWith(name, "_mobility")) {
+        return .{ .lo = clamp(base - span, -120, 120), .hi = clamp(base + span, -120, 120) };
+    }
+
+    if (comptime endsWith(name, "_bonus") or endsWith(name, "_penalty")) {
+        return .{ .lo = 0, .hi = @max(60, base + span) };
+    }
+
     return .{ .lo = base - span, .hi = base + span };
 }
 
@@ -475,12 +563,15 @@ fn setParam(pid: ParamId, value: i32) void {
 }
 
 /// Get scalar bounds for a parameter slot (only meaningful for scalar fields).
-fn getParamBounds(pid: ParamId, mult: f64) ?Bounds {
-    if (pid.is_array) return null; // Arrays have no bounds in the Python tuner
+fn getParamBounds(pid: ParamId, scalar_mult: f64, array_mult: f64, array_min: i32) ?Bounds {
     inline for (std.meta.fields(EvalParams), 0..) |field, fi| {
         if (fi == pid.field_idx) {
             switch (@typeInfo(field.type)) {
-                .int => return scalarBounds(field.name, @field(eval.g_params, field.name), mult),
+                .int => return scalarBounds(field.name, @field(eval.g_params, field.name), scalar_mult),
+                .array => {
+                    const arr = @field(eval.g_params, field.name);
+                    return arrayBounds(field.name, arr[pid.elem_idx], array_mult, array_min);
+                },
                 else => return null,
             }
         }
@@ -506,6 +597,14 @@ fn sampleIndices(indices: []usize, n: usize, k: usize, rng: std.Random) void {
     }
 }
 
+fn snapshotParams(out: []i32) void {
+    for (PARAM_LIST, 0..) |pid, i| out[i] = getParam(pid);
+}
+
+fn restoreParams(snapshot: []const i32) void {
+    for (PARAM_LIST, 0..) |pid, i| setParam(pid, snapshot[i]);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Coordinate descent
 // ─────────────────────────────────────────────────────────────────────
@@ -519,13 +618,15 @@ fn coordinateDescent(
     const n = ds.count;
     var delta = args.delta;
     const use_bounds = !args.no_bounds;
-    const mult = args.scalar_bound_mult;
+    const scalar_mult = args.scalar_bound_mult;
+    const array_mult = args.array_bound_mult;
+    const array_min = args.array_bound_min;
 
-    // Pre-compute scalar bounds from initial param values
+    // Pre-compute parameter bounds from initial param values
     var bounds_cache: [PARAM_LIST.len]?Bounds = undefined;
     if (use_bounds) {
         for (PARAM_LIST, 0..) |pid, i| {
-            bounds_cache[i] = getParamBounds(pid, mult);
+            bounds_cache[i] = getParamBounds(pid, scalar_mult, array_mult, array_min);
         }
     } else {
         for (0..PARAM_LIST.len) |i| bounds_cache[i] = null;
@@ -534,15 +635,18 @@ fn coordinateDescent(
     // Allocate index array for sampling
     const index_buf = try allocator.alloc(usize, n);
     defer allocator.free(index_buf);
+    const epoch_snapshot = try allocator.alloc(i32, PARAM_LIST.len);
+    defer allocator.free(epoch_snapshot);
 
     var rng = std.Random.DefaultPrng.init(args.seed);
     const random = rng.random();
 
     // Evaluate baseline on full dataset
     print("Evaluating baseline...", .{});
-    const baseline_mse = computeMse(ds.boards, ds.results, n, K);
+    const baseline_mse = computeMse(ds.boards, ds.targets, n, K);
     print(" MSE={d:.6}\n", .{baseline_mse});
     var current_full_mse = baseline_mse;
+    var best_full_mse = baseline_mse;
 
     var epoch: usize = 1;
     while (epoch <= args.epochs) : (epoch += 1) {
@@ -550,6 +654,8 @@ fn coordinateDescent(
             print("Delta < 1, stopping after epoch {d}.\n", .{epoch - 1});
             break;
         }
+
+        snapshotParams(epoch_snapshot);
 
         // Sample subset for this epoch
         const use_subset = args.batch_size < n;
@@ -564,9 +670,9 @@ fn coordinateDescent(
         // Baseline MSE on sample
         var current_sample_mse: f64 = undefined;
         if (use_subset) {
-            current_sample_mse = computeMseSubset(ds.boards, ds.results, sample_indices, K);
+            current_sample_mse = computeMseSubset(ds.boards, ds.targets, sample_indices, K);
         } else {
-            current_sample_mse = computeMse(ds.boards, ds.results, n, K);
+            current_sample_mse = computeMse(ds.boards, ds.targets, n, K);
         }
 
         const epoch_start = std.time.nanoTimestamp();
@@ -583,9 +689,9 @@ fn coordinateDescent(
             if (plus_candidate != orig) {
                 setParam(pid, plus_candidate);
                 mse_plus = if (use_subset)
-                    computeMseSubset(ds.boards, ds.results, sample_indices, K)
+                    computeMseSubset(ds.boards, ds.targets, sample_indices, K)
                 else
-                    computeMse(ds.boards, ds.results, n, K);
+                    computeMse(ds.boards, ds.targets, n, K);
             }
 
             if (mse_plus + args.min_improvement < current_sample_mse) {
@@ -603,9 +709,9 @@ fn coordinateDescent(
             if (minus_candidate != orig) {
                 setParam(pid, minus_candidate);
                 mse_minus = if (use_subset)
-                    computeMseSubset(ds.boards, ds.results, sample_indices, K)
+                    computeMseSubset(ds.boards, ds.targets, sample_indices, K)
                 else
-                    computeMse(ds.boards, ds.results, n, K);
+                    computeMse(ds.boards, ds.targets, n, K);
             }
 
             if (mse_minus + args.min_improvement < current_sample_mse) {
@@ -627,8 +733,19 @@ fn coordinateDescent(
 
         // Full-dataset eval at interval
         const do_full_eval = (args.full_eval_interval <= 1) or (epoch % args.full_eval_interval == 0);
+        var rolled_back = false;
         if (do_full_eval) {
-            current_full_mse = computeMse(ds.boards, ds.results, n, K);
+            const full_mse = computeMse(ds.boards, ds.targets, n, K);
+            if (full_mse > best_full_mse + args.min_improvement) {
+                restoreParams(epoch_snapshot);
+                current_full_mse = best_full_mse;
+                rolled_back = true;
+            } else {
+                current_full_mse = full_mse;
+                if (full_mse + args.min_improvement < best_full_mse) {
+                    best_full_mse = full_mse;
+                }
+            }
         }
 
         const elapsed_ns = std.time.nanoTimestamp() - epoch_start;
@@ -638,6 +755,9 @@ fn coordinateDescent(
             print("\nEpoch {d:3} | delta={d:3} | improved={d:4} | sample_MSE={d:.6} | full_MSE={d:.6} | {d:.1}s\n", .{
                 epoch, delta, improved, current_sample_mse, current_full_mse, elapsed_s,
             });
+            if (rolled_back) {
+                print("  Full MSE regressed -> epoch reverted to previous best parameters.\n", .{});
+            }
         } else {
             print("\nEpoch {d:3} | delta={d:3} | improved={d:4} | sample_MSE={d:.6} | full_MSE=skipped | {d:.1}s\n", .{
                 epoch, delta, improved, current_sample_mse, elapsed_s,
@@ -648,9 +768,13 @@ fn coordinateDescent(
         try eval.saveParams(args.output, allocator);
         print("  Params saved to {s}\n", .{args.output});
 
-        if (improved == 0) {
+        if (improved == 0 or rolled_back) {
             delta = @divTrunc(delta, 2);
-            print("  No improvement -> delta halved to {d}\n", .{delta});
+            if (rolled_back) {
+                print("  Rollback triggered -> delta halved to {d}\n", .{delta});
+            } else {
+                print("  No improvement -> delta halved to {d}\n", .{delta});
+            }
         }
     }
 }
@@ -683,6 +807,22 @@ pub fn main() !void {
         eprint("Error: --scalar-bound-mult must be > 0\n", .{});
         std.process.exit(1);
     }
+    if (args.array_bound_mult <= 0.0) {
+        eprint("Error: --array-bound-mult must be > 0\n", .{});
+        std.process.exit(1);
+    }
+    if (args.array_bound_min <= 0) {
+        eprint("Error: --array-bound-min must be > 0\n", .{});
+        std.process.exit(1);
+    }
+    if (args.cp_target_weight < 0.0 or args.cp_target_weight > 1.0) {
+        eprint("Error: --cp-target-weight must be in [0,1]\n", .{});
+        std.process.exit(1);
+    }
+    if (args.sf_k <= 0.0) {
+        eprint("Error: --sf-k must be > 0\n", .{});
+        std.process.exit(1);
+    }
     if (args.min_improvement < 0.0) {
         eprint("Error: --min-improvement must be >= 0\n", .{});
         std.process.exit(1);
@@ -697,7 +837,7 @@ pub fn main() !void {
     }
 
     // Load dataset
-    var ds = try loadDataset(args.dataset.?, args.positions, allocator);
+    var ds = try loadDataset(args.dataset.?, args.positions, &args, allocator);
     defer ds.deinit(allocator);
     if (ds.count == 0) {
         eprint("Error: dataset is empty.\n", .{});
@@ -705,7 +845,7 @@ pub fn main() !void {
     }
 
     // Tune K
-    const K = args.K orelse tuneK(ds.boards, ds.results, ds.count);
+    const K = args.K orelse tuneK(ds.boards, ds.targets, ds.count);
     if (args.K != null) {
         print("Using provided K={d:.4}\n", .{K});
     }
