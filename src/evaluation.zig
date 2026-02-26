@@ -11,134 +11,145 @@ pub const KING_VALUE: i32 = 20000; // used by move_picker for SEE
 
 // Backward-compatible material aliases for search.zig / move_picker.zig.
 // These match EvalParams defaults and are also updated by apply_params.py.
-pub const PAWN_VALUE: i32 = 100;
-pub const KNIGHT_VALUE: i32 = 320;
-pub const BISHOP_VALUE: i32 = 330;
-pub const ROOK_VALUE: i32 = 500;
-pub const QUEEN_VALUE: i32 = 950;
+pub const PAWN_VALUE: i32 = 87;
+pub const KNIGHT_VALUE: i32 = 328;
+pub const BISHOP_VALUE: i32 = 327;
+pub const ROOK_VALUE: i32 = 504;
+pub const QUEEN_VALUE: i32 = 1007;
 
 // ──────────────────────────────────────────────
 // EvalParams – every tunable evaluation constant
 // ──────────────────────────────────────────────
 pub const EvalParams = struct {
     // Material values (centipawns)
-    pawn_value: i32 = 100,
-    knight_value: i32 = 320,
-    bishop_value: i32 = 330,
-    rook_value: i32 = 500,
-    queen_value: i32 = 950,
+    pawn_value: i32 = 87,
+    knight_value: i32 = 328,
+    bishop_value: i32 = 327,
+    rook_value: i32 = 504,
+    queen_value: i32 = 1007,
 
     // Scalar evaluation weights
-    rook_open_file_bonus: i32 = 25,
-    rook_semi_open_file_bonus: i32 = 12,
-    rook_on_seventh_bonus: i32 = 20,
-    connected_rooks_bonus: i32 = 10,
-    isolated_pawn_penalty: i32 = 15,
-    backward_pawn_penalty: i32 = 10,
-    doubled_pawn_penalty: i32 = 15,
-    bishop_pair_bonus: i32 = 45,
-    knight_outpost_bonus: i32 = 25,
-    bishop_outpost_bonus: i32 = 15,
-    tempo_bonus: i32 = 10,
-    king_pawn_shield_bonus: i32 = 12,
-    king_open_file_penalty: i32 = 25,
-    king_center_middlegame_penalty: i32 = 13,
-    king_castled_bonus: i32 = 20,
-    king_early_walk_penalty: i32 = 24,
-    pawn_chain_bonus: i32 = 5,
-    protected_passed_pawn_bonus: i32 = 20,
-    connected_passed_pawn_bonus: i32 = 25,
-    safe_pawn_advance_bonus: i32 = 8,
+    rook_open_file_bonus: i32 = 14,
+    rook_semi_open_file_bonus: i32 = 18,
+    rook_on_seventh_bonus: i32 = 27,
+    connected_rooks_bonus: i32 = 5,
+    isolated_pawn_penalty: i32 = 4,
+    backward_pawn_penalty: i32 = 6,
+    doubled_pawn_penalty: i32 = 10,
+    bishop_pair_bonus: i32 = 33,
+    knight_outpost_bonus: i32 = 15,
+    bishop_outpost_bonus: i32 = 28,
+    tempo_bonus: i32 = 14,
+    king_pawn_shield_bonus: i32 = 15,
+    king_open_file_penalty: i32 = 20,
+    king_center_middlegame_penalty: i32 = 19,
+    king_castled_bonus: i32 = 17,
+    king_early_walk_penalty: i32 = 12,
+    pawn_chain_bonus: i32 = 8,
+    protected_passed_pawn_bonus: i32 = 2,
+    connected_passed_pawn_bonus: i32 = 15,
+    safe_pawn_advance_bonus: i32 = 1,
     mop_up_center_bonus: i32 = 10,
     mop_up_corner_bonus: i32 = 20,
     mop_up_king_proximity_bonus: i32 = 5,
-    castling_rights_kingside_bonus: i32 = 28,
-    castling_rights_queenside_bonus: i32 = 14,
-    pawn_storm_advance_bonus: i32 = 4,
-    pawn_storm_near_king_bonus: i32 = 8,
-    king_activity_center_bonus: i32 = 5,
-    king_activity_mobility_bonus: i32 = 2,
+    castling_rights_kingside_bonus: i32 = 41,
+    castling_rights_queenside_bonus: i32 = 23,
+    pawn_storm_advance_bonus: i32 = 0,
+    pawn_storm_near_king_bonus: i32 = 3,
+    king_activity_center_bonus: i32 = 2,
+    king_activity_mobility_bonus: i32 = 3,
     endgame_phase_threshold: i32 = 160,
 
     // Piece-Square Tables (index 0 = a1, 63 = h8, white perspective)
     pawn_table: [64]i32 = .{
-        0,  0,  0,   0,   0,   0,  0,  0, // Rank 1
-        5,  10, 10,  -20, -20, 10, 10, 5, // Rank 2
-        5,  -5, -10, 0,   0,   -10,-5, 5, // Rank 3
-        0,  0,  0,   20,  20,  0,  0,  0, // Rank 4
-        5,  5,  10,  25,  25,  10, 5,  5, // Rank 5
-        10, 10, 20,  30,  30,  20, 10, 10, // Rank 6
-        50, 50, 50,  50,  50,  50, 50, 50, // Rank 7
-        0,  0,  0,   0,   0,   0,  0,  0, // Rank 8
+           0,    0,    0,    0,    0,    0,    0,    0,
+          10,    8,   -6,  -12,  -25,   15,   29,   -3,
+           5,    0,  -10,   12,   -5,    8,   17,   -4,
+          16,   11,    3,   -2,    1,    8,   14,    0,
+          24,   21,    3,   17,    6,    1,   15,   -6,
+          34,   20,   21,    3,   10,   24,   15,   23,
+          70,   85,   40,   50,   25,   60,    1,   45,
+           0,    0,    0,    0,    0,    0,    0,    0,
     },
     knight_table: [64]i32 = .{
-        -50, -40, -30, -30, -30, -30, -40, -50,
-        -40, -20, 0,   5,   5,   0,   -20, -40,
-        -30, 5,   10,  15,  15,  10,  5,   -30,
-        -30, 0,   15,  20,  20,  15,  0,   -30,
-        -30, 5,   15,  20,  20,  15,  5,   -30,
-        -30, 0,   10,  15,  15,  10,  0,   -30,
-        -40, -20, 0,   0,   0,   0,   -20, -40,
-        -50, -40, -30, -30, -30, -30, -40, -50,
+         -50,  -14,  -20,    0,  -35,  -21,  -16,  -50,
+         -50,  -50,  -21,   -2,   10,  -10,   10,  -30,
+         -35,  -19,  -13,   37,   24,   -5,   18,  -40,
+         -13,   17,   15,   -2,    6,   39,  -24,   12,
+         -30,   14,   10,   19,    3,   39,   11,   15,
+          -5,   20,   16,   13,   27,   30,   -5,  -33,
+         -10,  -35,   24,   15,   15,   10,  -10,  -55,
+         -65,  -30,   -5,  -30,  -30,  -30,  -40,  -60,
     },
     bishop_table: [64]i32 = .{
-        -20, -10, -10, -10, -10, -10, -10, -20,
-        -10, 5,   0,   0,   0,   0,   5,   -10,
-        -10, 10,  10,  10,  10,  10,  10,  -10,
-        -10, 0,   10,  10,  10,  10,  0,   -10,
-        -10, 5,   5,   10,  10,  5,   5,   -10,
-        -10, 0,   5,   10,  10,  5,   0,   -10,
-        -10, 0,   0,   0,   0,   0,   0,   -10,
-        -20, -10, -10, -10, -10, -10, -10, -20,
+         -20,  -20,   -8,   -6,  -14,    2,  -20,  -20,
+          14,   -7,   10,    0,    6,   -8,    8,  -27,
+          -1,   -5,   25,   10,   10,   10,   10,  -21,
+         -34,  -23,   13,   28,   20,    2,   -4,  -11,
+           6,  -13,   -6,    5,   11,   17,    4,   -7,
+          11,  -16,   29,    6,    5,   12,   24,  -10,
+         -15,   22,   -8,   -7,   18,   -5,  -15,  -34,
+         -15,  -10,    0,  -27,  -10,  -15,  -10,  -20,
     },
     rook_table: [64]i32 = .{
-        0,  0,  0,  5,  5,  0,  0,  0,
-        -5, 0,  0,  0,  0,  0,  0,  -5,
-        -5, 0,  0,  0,  0,  0,  0,  -5,
-        -5, 0,  0,  0,  0,  0,  0,  -5,
-        -5, 0,  0,  0,  0,  0,  0,  -5,
-        -5, 0,  0,  0,  0,  0,  0,  -5,
-        5,  10, 10, 10, 10, 10, 10, 5,
-        0,  0,  0,  0,  0,  0,  0,  0,
+          -7,   -7,    1,   -2,   -2,    1,   10,  -23,
+           0,   -1,    0,    2,   -4,   -9,  -24,  -27,
+         -16,    2,  -15,  -14,    1,  -24,   -8,  -29,
+          14,    4,   22,   -6,    3,   -4,   -5,   14,
+          -8,   -6,   14,   22,   -5,    6,   20,  -12,
+          18,   24,   17,   23,   -5,   24,   18,    3,
+           9,    1,   -3,    1,   18,    9,   34,    5,
+          12,   24,   24,    8,  -10,   24,   22,    0,
     },
     queen_table: [64]i32 = .{
-        -20, -10, -10, -5, -5, -10, -10, -20,
-        -10, 0,   5,   0,  0,  0,   0,   -10,
-        -10, 5,   5,   5,  5,  5,   0,   -10,
-        0,   0,   5,   5,  5,  5,   0,   -5,
-        -5,  0,   5,   5,  5,  5,   0,   -5,
-        -10, 0,   5,   5,  5,  5,   0,   -10,
-        -10, 0,   0,   0,  0,  0,   0,   -10,
-        -20, -10, -10, -5, -5, -10, -10, -20,
+         -40,  -34,   -1,   -9,  -24,  -34,  -30,  -20,
+         -34,  -19,    5,  -15,  -10,   -8,    5,  -20,
+          -5,   -8,   12,   -4,    9,    6,   11,  -34,
+         -24,  -24,   16,    3,   24,   21,   17,   13,
+           2,    1,   23,   20,   29,   15,   24,   19,
+           3,    0,    7,   10,   29,   29,   24,   14,
+         -16,  -23,    7,   21,   17,   -5,   24,   14,
+         -40,  -34,   14,    8,    4,    0,  -20,    0,
     },
     king_middlegame_table: [64]i32 = .{
-        20,  30,  10,  0,   0,   10,  30,  20,
-        20,  20,  0,   0,   0,   0,   20,  20,
-        -10, -20, -20, -20, -20, -20, -20, -10,
-        -20, -30, -30, -40, -40, -30, -30, -20,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
+          25,   50,   26,  -20,  -19,   -9,   15,   27,
+          15,   15,  -10,   22,    1,   -9,   30,   49,
+         -10,  -20,  -15,  -28,  -12,  -30,  -35,  -15,
+         -20,  -30,  -30,  -40,  -60,  -35,  -30,  -20,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
     },
     king_endgame_table: [64]i32 = .{
-        -50, -30, -30, -30, -30, -30, -30, -50,
-        -30, -30, 0,   0,   0,   0,   -30, -30,
-        -30, -10, 20,  30,  30,  20,  -10, -30,
-        -30, -10, 30,  40,  40,  30,  -10, -30,
-        -30, -10, 30,  40,  40,  30,  -10, -30,
-        -30, -10, 20,  30,  30,  20,  -10, -30,
-        -30, -20, -10, 0,   0,   -10, -20, -30,
-        -50, -40, -30, -20, -20, -30, -40, -50,
+         -45,  -37,  -25,  -50,  -30,  -17,  -32,  -48,
+         -55,  -25,   -8,    2,   -3,    2,  -21,  -36,
+         -30,   -5,    3,   22,   19,   13,  -16,  -40,
+         -35,   -5,   30,   53,   12,   22,  -25,  -20,
+         -25,  -10,   60,   60,   33,   32,   14,  -35,
+         -30,   14,   25,   30,   40,   35,   -5,  -30,
+         -30,  -20,   -5,    0,    0,  -10,  -20,  -30,
+         -50,  -40,  -30,  -20,  -20,  -30,  -40,  -50,
     },
 
     // Passed pawn bonus by rank (rank 0–7, white perspective)
-    passed_pawn_bonus: [8]i32 = .{ 0, 10, 15, 25, 40, 65, 100, 0 },
+    passed_pawn_bonus: [8]i32 = .{
+           0,    4,    1,   10,   48,   82,   97,    0,
+    },
 
     // Mobility tables
-    knight_mobility: [9]i32 = .{ -30, -15, -5, 0, 5, 10, 15, 18, 20 },
-    bishop_mobility: [14]i32 = .{ -25, -15, -5, 0, 5, 10, 15, 18, 20, 22, 24, 25, 26, 27 },
-    rook_mobility: [15]i32 = .{ -10, -5, 0, 0, 3, 6, 9, 12, 15, 17, 19, 20, 21, 22, 23 },
+    knight_mobility: [9]i32 = .{
+          -3,   -8,   -1,    7,   11,   20,   23,   21,
+          37,
+    },
+    bishop_mobility: [14]i32 = .{
+         -23,  -24,   -9,   -2,    6,   10,   18,   22,
+          21,   25,   24,   28,   36,   37,
+    },
+    rook_mobility: [15]i32 = .{
+         -29,  -13,    2,   -2,    2,    8,   10,    9,
+          16,   17,   24,   29,   27,   30,   32,
+    },
 };
 
 /// Global mutable params – defaults at startup, overridden by loadParams().
