@@ -153,13 +153,19 @@ def generate_dataset(
     max_move: int,
     min_pieces: int,
     positions_per_game: int,
+    seed: int | None,
 ) -> None:
+    if seed is not None:
+        random.seed(seed)
+
     tc_str = f"depth {depth}" if depth else f"{movetime_ms}ms"
     print(f"Engine:      {engine_path}")
     print(f"Output:      {output_path}")
     print(f"Games:       {num_games}")
     print(f"Time ctrl:   {tc_str}")
     print(f"Stockfish:   {stockfish_path or 'disabled (result-only)'}")
+    if seed is not None:
+        print(f"Seed:        {seed}")
     print()
 
     engine = chess.engine.SimpleEngine.popen_uci(engine_path)
@@ -265,6 +271,8 @@ def main() -> None:
                         help='Skip positions with fewer than this many pieces')
     parser.add_argument('--positions-per-game', type=int, default=20,
                         help='Max positions sampled per game')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Optional RNG seed for reproducible sampling/opening choice')
     args = parser.parse_args()
 
     generate_dataset(
@@ -279,6 +287,7 @@ def main() -> None:
         max_move=args.max_move,
         min_pieces=args.min_pieces,
         positions_per_game=args.positions_per_game,
+        seed=args.seed,
     )
 
 
