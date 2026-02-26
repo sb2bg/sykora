@@ -9,6 +9,7 @@ index/*
 matches/*
 ratings/*
 sts/*
+tuning/*
 
 # Keep directory placeholders
 !engines/.gitkeep

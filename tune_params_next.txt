@@ -1,0 +1,46 @@
+pawn_value 87
+knight_value 328
+bishop_value 327
+rook_value 504
+queen_value 1007
+rook_open_file_bonus 14
+rook_semi_open_file_bonus 18
+rook_on_seventh_bonus 27
+connected_rooks_bonus 5
+isolated_pawn_penalty 4
+backward_pawn_penalty 6
+doubled_pawn_penalty 10
+bishop_pair_bonus 33
+knight_outpost_bonus 15
+bishop_outpost_bonus 28
+tempo_bonus 14
+king_pawn_shield_bonus 15
+king_open_file_penalty 20
+king_center_middlegame_penalty 19
+king_castled_bonus 17
+king_early_walk_penalty 12
+pawn_chain_bonus 8
+protected_passed_pawn_bonus 2
+connected_passed_pawn_bonus 15
+safe_pawn_advance_bonus 1
+mop_up_center_bonus 10
+mop_up_corner_bonus 20
+mop_up_king_proximity_bonus 5
+castling_rights_kingside_bonus 41
+castling_rights_queenside_bonus 23
+pawn_storm_advance_bonus 0
+pawn_storm_near_king_bonus 3
+king_activity_center_bonus 2
+king_activity_mobility_bonus 3
+endgame_phase_threshold 160
+pawn_table 0 0 0 0 0 0 0 0 10 8 -6 -12 -25 15 29 -3 5 0 -10 12 -5 8 17 -4 16 11 3 -2 1 8 14 0 24 21 3 17 6 1 15 -6 34 20 21 3 10 24 15 23 70 85 40 50 25 60 1 45 0 0 0 0 0 0 0 0
+knight_table -50 -14 -20 0 -35 -21 -16 -50 -50 -50 -21 -2 10 -10 10 -30 -35 -19 -13 37 24 -5 18 -40 -13 17 15 -2 6 39 -24 12 -30 14 10 19 3 39 11 15 -5 20 16 13 27 30 -5 -33 -10 -35 24 15 15 10 -10 -55 -65 -30 -5 -30 -30 -30 -40 -60
+bishop_table -20 -20 -8 -6 -14 2 -20 -20 14 -7 10 0 6 -8 8 -27 -1 -5 25 10 10 10 10 -21 -34 -23 13 28 20 2 -4 -11 6 -13 -6 5 11 17 4 -7 11 -16 29 6 5 12 24 -10 -15 22 -8 -7 18 -5 -15 -34 -15 -10 0 -27 -10 -15 -10 -20
+rook_table -7 -7 1 -2 -2 1 10 -23 0 -1 0 2 -4 -9 -24 -27 -16 2 -15 -14 1 -24 -8 -29 14 4 22 -6 3 -4 -5 14 -8 -6 14 22 -5 6 20 -12 18 24 17 23 -5 24 18 3 9 1 -3 1 18 9 34 5 12 24 24 8 -10 24 22 0
+queen_table -40 -34 -1 -9 -24 -34 -30 -20 -34 -19 5 -15 -10 -8 5 -20 -5 -8 12 -4 9 6 11 -34 -24 -24 16 3 24 21 17 13 2 1 23 20 29 15 24 19 3 0 7 10 29 29 24 14 -16 -23 7 21 17 -5 24 14 -40 -34 14 8 4 0 -20 0
+king_middlegame_table 25 50 26 -20 -19 -9 15 27 15 15 -10 22 1 -9 30 49 -10 -20 -15 -28 -12 -30 -35 -15 -20 -30 -30 -40 -60 -35 -30 -20 -30 -40 -40 -50 -50 -40 -40 -30 -30 -40 -40 -50 -50 -40 -40 -30 -30 -40 -40 -50 -50 -40 -40 -30 -30 -40 -40 -50 -50 -40 -40 -30
+king_endgame_table -45 -37 -25 -50 -30 -17 -32 -48 -55 -25 -8 2 -3 2 -21 -36 -30 -5 3 22 19 13 -16 -40 -35 -5 30 53 12 22 -25 -20 -25 -10 60 60 33 32 14 -35 -30 14 25 30 40 35 -5 -30 -30 -20 -5 0 0 -10 -20 -30 -50 -40 -30 -20 -20 -30 -40 -50
+passed_pawn_bonus 0 4 1 10 48 82 97 0
+knight_mobility -3 -8 -1 7 11 20 23 21 37
+bishop_mobility -23 -24 -9 -2 6 10 18 22 21 25 24 28 36 37
+rook_mobility -29 -13 2 -2 2 8 10 9 16 17 24 29 27 30 32

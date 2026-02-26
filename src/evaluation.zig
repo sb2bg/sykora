@@ -4,146 +4,237 @@ const Board = board.Board;
 const BitBoard = board.BitBoard;
 const piece = @import("piece.zig");
 
-// Material values in centipawns (tuned values)
+// Non-tunable constants used by search / move ordering
+pub const MATE_SCORE: i32 = 30000;
+pub const MATE_BOUND: i32 = 29000;
+pub const KING_VALUE: i32 = 20000; // used by move_picker for SEE
+
+// Backward-compatible material aliases for search.zig / move_picker.zig.
+// These match EvalParams defaults and are also updated by apply_params.py.
 pub const PAWN_VALUE: i32 = 100;
 pub const KNIGHT_VALUE: i32 = 320;
 pub const BISHOP_VALUE: i32 = 330;
 pub const ROOK_VALUE: i32 = 500;
 pub const QUEEN_VALUE: i32 = 950;
-pub const KING_VALUE: i32 = 20000; // Not actually used in evaluation
 
-pub const MATE_SCORE: i32 = 30000;
-pub const MATE_BOUND: i32 = 29000; // Scores above this are mate scores
+// ──────────────────────────────────────────────
+// EvalParams – every tunable evaluation constant
+// ──────────────────────────────────────────────
+pub const EvalParams = struct {
+    // Material values (centipawns)
+    pawn_value: i32 = 100,
+    knight_value: i32 = 320,
+    bishop_value: i32 = 330,
+    rook_value: i32 = 500,
+    queen_value: i32 = 950,
 
-// Evaluation weights
-const MOBILITY_WEIGHT: i32 = 4;
-const ROOK_OPEN_FILE_BONUS: i32 = 25;
-const ROOK_SEMI_OPEN_FILE_BONUS: i32 = 12;
-const ROOK_ON_SEVENTH_BONUS: i32 = 20;
-const CONNECTED_ROOKS_BONUS: i32 = 10;
-const ISOLATED_PAWN_PENALTY: i32 = 15;
-const BACKWARD_PAWN_PENALTY: i32 = 10;
-const DOUBLED_PAWN_PENALTY: i32 = 15;
-const BISHOP_PAIR_BONUS: i32 = 45;
-const KNIGHT_OUTPOST_BONUS: i32 = 25;
-const BISHOP_OUTPOST_BONUS: i32 = 15;
-const TEMPO_BONUS: i32 = 10;
-const KING_PAWN_SHIELD_BONUS: i32 = 12;
-const KING_OPEN_FILE_PENALTY: i32 = 25;
-const KING_CENTER_MIDDLEGAME_PENALTY: i32 = 13;
-const KING_CASTLED_BONUS: i32 = 20;
-const KING_EARLY_WALK_PENALTY: i32 = 24;
-const PAWN_CHAIN_BONUS: i32 = 5;
-const PROTECTED_PASSED_PAWN_BONUS: i32 = 20;
-const CONNECTED_PASSED_PAWN_BONUS: i32 = 25;
-const SAFE_PAWN_ADVANCE_BONUS: i32 = 8;
-const MOP_UP_CENTER_BONUS: i32 = 10;
-const MOP_UP_CORNER_BONUS: i32 = 20;
-const MOP_UP_KING_PROXIMITY_BONUS: i32 = 5;
-const CASTLING_RIGHTS_KINGSIDE_BONUS: i32 = 28;
-const CASTLING_RIGHTS_QUEENSIDE_BONUS: i32 = 14;
-const PAWN_STORM_ADVANCE_BONUS: i32 = 4;
-const PAWN_STORM_NEAR_KING_BONUS: i32 = 8;
-const KING_ACTIVITY_CENTER_BONUS: i32 = 5;
-const KING_ACTIVITY_MOBILITY_BONUS: i32 = 2;
-const ENDGAME_PHASE_THRESHOLD: i32 = 160;
+    // Scalar evaluation weights
+    rook_open_file_bonus: i32 = 25,
+    rook_semi_open_file_bonus: i32 = 12,
+    rook_on_seventh_bonus: i32 = 20,
+    connected_rooks_bonus: i32 = 10,
+    isolated_pawn_penalty: i32 = 15,
+    backward_pawn_penalty: i32 = 10,
+    doubled_pawn_penalty: i32 = 15,
+    bishop_pair_bonus: i32 = 45,
+    knight_outpost_bonus: i32 = 25,
+    bishop_outpost_bonus: i32 = 15,
+    tempo_bonus: i32 = 10,
+    king_pawn_shield_bonus: i32 = 12,
+    king_open_file_penalty: i32 = 25,
+    king_center_middlegame_penalty: i32 = 13,
+    king_castled_bonus: i32 = 20,
+    king_early_walk_penalty: i32 = 24,
+    pawn_chain_bonus: i32 = 5,
+    protected_passed_pawn_bonus: i32 = 20,
+    connected_passed_pawn_bonus: i32 = 25,
+    safe_pawn_advance_bonus: i32 = 8,
+    mop_up_center_bonus: i32 = 10,
+    mop_up_corner_bonus: i32 = 20,
+    mop_up_king_proximity_bonus: i32 = 5,
+    castling_rights_kingside_bonus: i32 = 28,
+    castling_rights_queenside_bonus: i32 = 14,
+    pawn_storm_advance_bonus: i32 = 4,
+    pawn_storm_near_king_bonus: i32 = 8,
+    king_activity_center_bonus: i32 = 5,
+    king_activity_mobility_bonus: i32 = 2,
+    endgame_phase_threshold: i32 = 160,
 
-// Piece-Square Tables (from white's perspective)
-// Values are in centipawns, will be mirrored for black
-// Index 0 = a1, Index 7 = h1, Index 56 = a8, Index 63 = h8
+    // Piece-Square Tables (index 0 = a1, 63 = h8, white perspective)
+    pawn_table: [64]i32 = .{
+        0,  0,  0,   0,   0,   0,  0,  0, // Rank 1
+        5,  10, 10,  -20, -20, 10, 10, 5, // Rank 2
+        5,  -5, -10, 0,   0,   -10,-5, 5, // Rank 3
+        0,  0,  0,   20,  20,  0,  0,  0, // Rank 4
+        5,  5,  10,  25,  25,  10, 5,  5, // Rank 5
+        10, 10, 20,  30,  30,  20, 10, 10, // Rank 6
+        50, 50, 50,  50,  50,  50, 50, 50, // Rank 7
+        0,  0,  0,   0,   0,   0,  0,  0, // Rank 8
+    },
+    knight_table: [64]i32 = .{
+        -50, -40, -30, -30, -30, -30, -40, -50,
+        -40, -20, 0,   5,   5,   0,   -20, -40,
+        -30, 5,   10,  15,  15,  10,  5,   -30,
+        -30, 0,   15,  20,  20,  15,  0,   -30,
+        -30, 5,   15,  20,  20,  15,  5,   -30,
+        -30, 0,   10,  15,  15,  10,  0,   -30,
+        -40, -20, 0,   0,   0,   0,   -20, -40,
+        -50, -40, -30, -30, -30, -30, -40, -50,
+    },
+    bishop_table: [64]i32 = .{
+        -20, -10, -10, -10, -10, -10, -10, -20,
+        -10, 5,   0,   0,   0,   0,   5,   -10,
+        -10, 10,  10,  10,  10,  10,  10,  -10,
+        -10, 0,   10,  10,  10,  10,  0,   -10,
+        -10, 5,   5,   10,  10,  5,   5,   -10,
+        -10, 0,   5,   10,  10,  5,   0,   -10,
+        -10, 0,   0,   0,   0,   0,   0,   -10,
+        -20, -10, -10, -10, -10, -10, -10, -20,
+    },
+    rook_table: [64]i32 = .{
+        0,  0,  0,  5,  5,  0,  0,  0,
+        -5, 0,  0,  0,  0,  0,  0,  -5,
+        -5, 0,  0,  0,  0,  0,  0,  -5,
+        -5, 0,  0,  0,  0,  0,  0,  -5,
+        -5, 0,  0,  0,  0,  0,  0,  -5,
+        -5, 0,  0,  0,  0,  0,  0,  -5,
+        5,  10, 10, 10, 10, 10, 10, 5,
+        0,  0,  0,  0,  0,  0,  0,  0,
+    },
+    queen_table: [64]i32 = .{
+        -20, -10, -10, -5, -5, -10, -10, -20,
+        -10, 0,   5,   0,  0,  0,   0,   -10,
+        -10, 5,   5,   5,  5,  5,   0,   -10,
+        0,   0,   5,   5,  5,  5,   0,   -5,
+        -5,  0,   5,   5,  5,  5,   0,   -5,
+        -10, 0,   5,   5,  5,  5,   0,   -10,
+        -10, 0,   0,   0,  0,  0,   0,   -10,
+        -20, -10, -10, -5, -5, -10, -10, -20,
+    },
+    king_middlegame_table: [64]i32 = .{
+        20,  30,  10,  0,   0,   10,  30,  20,
+        20,  20,  0,   0,   0,   0,   20,  20,
+        -10, -20, -20, -20, -20, -20, -20, -10,
+        -20, -30, -30, -40, -40, -30, -30, -20,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+    },
+    king_endgame_table: [64]i32 = .{
+        -50, -30, -30, -30, -30, -30, -30, -50,
+        -30, -30, 0,   0,   0,   0,   -30, -30,
+        -30, -10, 20,  30,  30,  20,  -10, -30,
+        -30, -10, 30,  40,  40,  30,  -10, -30,
+        -30, -10, 30,  40,  40,  30,  -10, -30,
+        -30, -10, 20,  30,  30,  20,  -10, -30,
+        -30, -20, -10, 0,   0,   -10, -20, -30,
+        -50, -40, -30, -20, -20, -30, -40, -50,
+    },
 
-const PAWN_TABLE = [64]i32{
-    0, 0, 0, 0, 0, 0, 0, 0, // Rank 1 (can't have pawns here)
-    5, 10, 10, -20, -20, 10, 10, 5, // Rank 2 (starting position)
-    5, -5, -10, 0, 0, -10, -5, 5, // Rank 3
-    0, 0, 0, 20, 20, 0, 0, 0, // Rank 4
-    5, 5, 10, 25, 25, 10, 5, 5, // Rank 5
-    10, 10, 20, 30, 30, 20, 10, 10, // Rank 6
-    50, 50, 50, 50, 50, 50, 50, 50, // Rank 7 (about to promote)
-    0, 0, 0, 0, 0, 0, 0, 0, // Rank 8 (can't have pawns here)
+    // Passed pawn bonus by rank (rank 0–7, white perspective)
+    passed_pawn_bonus: [8]i32 = .{ 0, 10, 15, 25, 40, 65, 100, 0 },
+
+    // Mobility tables
+    knight_mobility: [9]i32 = .{ -30, -15, -5, 0, 5, 10, 15, 18, 20 },
+    bishop_mobility: [14]i32 = .{ -25, -15, -5, 0, 5, 10, 15, 18, 20, 22, 24, 25, 26, 27 },
+    rook_mobility: [15]i32 = .{ -10, -5, 0, 0, 3, 6, 9, 12, 15, 17, 19, 20, 21, 22, 23 },
 };
 
-const KNIGHT_TABLE = [64]i32{
-    -50, -40, -30, -30, -30, -30, -40, -50, // Rank 1
-    -40, -20, 0, 5, 5, 0, -20, -40, // Rank 2
-    -30, 5, 10, 15, 15, 10, 5, -30, // Rank 3
-    -30, 0, 15, 20, 20, 15, 0, -30, // Rank 4
-    -30, 5, 15, 20, 20, 15, 5, -30, // Rank 5
-    -30, 0, 10, 15, 15, 10, 0, -30, // Rank 6
-    -40, -20, 0, 0, 0, 0, -20, -40, // Rank 7
-    -50, -40, -30, -30, -30, -30, -40, -50, // Rank 8
-};
+/// Global mutable params – defaults at startup, overridden by loadParams().
+pub var g_params: EvalParams = .{};
 
-const BISHOP_TABLE = [64]i32{
-    -20, -10, -10, -10, -10, -10, -10, -20, // Rank 1
-    -10, 5, 0, 0, 0, 0, 5, -10, // Rank 2
-    -10, 10, 10, 10, 10, 10, 10, -10, // Rank 3
-    -10, 0, 10, 10, 10, 10, 0, -10, // Rank 4
-    -10, 5, 5, 10, 10, 5, 5, -10, // Rank 5
-    -10, 0, 5, 10, 10, 5, 0, -10, // Rank 6
-    -10, 0, 0, 0, 0, 0, 0, -10, // Rank 7
-    -20, -10, -10, -10, -10, -10, -10, -20, // Rank 8
-};
+// ──────────────────────────────────────────────
+// Params serialisation (for Texel tuner)
+// ──────────────────────────────────────────────
 
-const ROOK_TABLE = [64]i32{
-    0, 0, 0, 5, 5, 0, 0, 0, // Rank 1 (centralize)
-    -5, 0, 0, 0, 0, 0, 0, -5, // Rank 2
-    -5, 0, 0, 0, 0, 0, 0, -5, // Rank 3
-    -5, 0, 0, 0, 0, 0, 0, -5, // Rank 4
-    -5, 0, 0, 0, 0, 0, 0, -5, // Rank 5
-    -5, 0, 0, 0, 0, 0, 0, -5, // Rank 6
-    5, 10, 10, 10, 10, 10, 10, 5, // Rank 7 (7th rank is great for rooks)
-    0, 0, 0, 0, 0, 0, 0, 0, // Rank 8
-};
+/// Apply one key-value line into g_params.  Silently ignores unknown keys.
+fn setParam(key: []const u8, value_str: []const u8) !void {
+    inline for (std.meta.fields(EvalParams)) |field| {
+        if (std.mem.eql(u8, key, field.name)) {
+            switch (@typeInfo(field.type)) {
+                .int => {
+                    @field(g_params, field.name) = try std.fmt.parseInt(
+                        i32,
+                        std.mem.trim(u8, value_str, " \r\t"),
+                        10,
+                    );
+                },
+                .array => |arr_info| {
+                    var arr: field.type = @field(g_params, field.name);
+                    var it = std.mem.splitScalar(u8, value_str, ' ');
+                    var i: usize = 0;
+                    while (it.next()) |token| {
+                        const t = std.mem.trim(u8, token, " \r\t");
+                        if (t.len == 0) continue;
+                        if (i >= arr_info.len) break;
+                        arr[i] = try std.fmt.parseInt(i32, t, 10);
+                        i += 1;
+                    }
+                    @field(g_params, field.name) = arr;
+                },
+                else => {},
+            }
+            return;
+        }
+    }
+}
 
-const QUEEN_TABLE = [64]i32{
-    -20, -10, -10, -5, -5, -10, -10, -20, // Rank 1
-    -10, 0, 5, 0, 0, 0, 0, -10, // Rank 2
-    -10, 5, 5, 5, 5, 5, 0, -10, // Rank 3
-    0, 0, 5, 5, 5, 5, 0, -5, // Rank 4
-    -5, 0, 5, 5, 5, 5, 0, -5, // Rank 5
-    -10, 0, 5, 5, 5, 5, 0, -10, // Rank 6
-    -10, 0, 0, 0, 0, 0, 0, -10, // Rank 7
-    -20, -10, -10, -5, -5, -10, -10, -20, // Rank 8
-};
+/// Load a params file (key-value, one per line) and override g_params.
+/// Format: "pawn_value 100" or "pawn_table 0 0 0 ..." (64 space-separated ints)
+pub fn loadParams(path: []const u8, allocator: std.mem.Allocator) !void {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
 
-const KING_MIDDLEGAME_TABLE = [64]i32{
-    20, 30, 10, 0, 0, 10, 30, 20, // Rank 1 (castled king is safe)
-    20, 20, 0, 0, 0, 0, 20, 20, // Rank 2
-    -10, -20, -20, -20, -20, -20, -20, -10, // Rank 3
-    -20, -30, -30, -40, -40, -30, -30, -20, // Rank 4
-    -30, -40, -40, -50, -50, -40, -40, -30, // Rank 5
-    -30, -40, -40, -50, -50, -40, -40, -30, // Rank 6
-    -30, -40, -40, -50, -50, -40, -40, -30, // Rank 7
-    -30, -40, -40, -50, -50, -40, -40, -30, // Rank 8
-};
+    const content = try file.readToEndAlloc(allocator, 4 * 1024 * 1024);
+    defer allocator.free(content);
 
-const KING_ENDGAME_TABLE = [64]i32{
-    -50, -30, -30, -30, -30, -30, -30, -50, // Rank 1
-    -30, -30, 0, 0, 0, 0, -30, -30, // Rank 2
-    -30, -10, 20, 30, 30, 20, -10, -30, // Rank 3
-    -30, -10, 30, 40, 40, 30, -10, -30, // Rank 4
-    -30, -10, 30, 40, 40, 30, -10, -30, // Rank 5
-    -30, -10, 20, 30, 30, 20, -10, -30, // Rank 6
-    -30, -20, -10, 0, 0, -10, -20, -30, // Rank 7
-    -50, -40, -30, -20, -20, -30, -40, -50, // Rank 8
-};
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        const space_idx = std.mem.indexOfScalar(u8, trimmed, ' ') orelse continue;
+        const key = trimmed[0..space_idx];
+        const value_str = trimmed[space_idx + 1 ..];
+        setParam(key, value_str) catch {};
+    }
+}
 
-// Passed pawn bonus by rank (from white's perspective, rank 2-7)
-const PASSED_PAWN_BONUS = [8]i32{ 0, 10, 15, 25, 40, 65, 100, 0 };
+/// Serialize g_params to a flat key-value text file.
+pub fn saveParams(path: []const u8, allocator: std.mem.Allocator) !void {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+    const writer = buf.writer(allocator);
 
-// Knight mobility bonus by number of attacks
-const KNIGHT_MOBILITY = [9]i32{ -30, -15, -5, 0, 5, 10, 15, 18, 20 };
+    inline for (std.meta.fields(EvalParams)) |field| {
+        const value = @field(g_params, field.name);
+        switch (@typeInfo(field.type)) {
+            .int => {
+                try writer.print("{s} {d}\n", .{ field.name, value });
+            },
+            .array => |arr_info| {
+                try writer.print("{s}", .{field.name});
+                for (0..arr_info.len) |i| {
+                    try writer.print(" {d}", .{value[i]});
+                }
+                try writer.print("\n", .{});
+            },
+            else => {},
+        }
+    }
 
-// Bishop mobility bonus
-const BISHOP_MOBILITY = [14]i32{ -25, -15, -5, 0, 5, 10, 15, 18, 20, 22, 24, 25, 26, 27 };
+    const out = try std.fs.cwd().createFile(path, .{});
+    defer out.close();
+    try out.writeAll(buf.items);
+}
 
-// Rook mobility bonus (softened low-end: trapped rooks in the opening are normal)
-const ROOK_MOBILITY = [15]i32{ -10, -5, 0, 0, 3, 6, 9, 12, 15, 17, 19, 20, 21, 22, 23 };
+// ──────────────────────────────────────────────
+// Internal helpers (unchanged logic, using g_params)
+// ──────────────────────────────────────────────
 
 /// Mirror a square index for black pieces
 inline fn mirrorSquare(square: u8) u8 {
-    return square ^ 56; // XOR with 56 flips rank
+    return square ^ 56;
 }
 
 /// Get piece-square table value for a given piece at a square
@@ -151,24 +242,24 @@ fn getPieceSquareValue(piece_type: piece.Type, color: piece.Color, square: u8, i
     const sq = if (color == .white) square else mirrorSquare(square);
 
     return switch (piece_type) {
-        .pawn => PAWN_TABLE[sq],
-        .knight => KNIGHT_TABLE[sq],
-        .bishop => BISHOP_TABLE[sq],
-        .rook => ROOK_TABLE[sq],
-        .queen => QUEEN_TABLE[sq],
-        .king => if (is_endgame) KING_ENDGAME_TABLE[sq] else KING_MIDDLEGAME_TABLE[sq],
+        .pawn => g_params.pawn_table[sq],
+        .knight => g_params.knight_table[sq],
+        .bishop => g_params.bishop_table[sq],
+        .rook => g_params.rook_table[sq],
+        .queen => g_params.queen_table[sq],
+        .king => if (is_endgame) g_params.king_endgame_table[sq] else g_params.king_middlegame_table[sq],
     };
 }
 
-/// Get material value for a piece
+/// Get material value for a piece (uses g_params so tuner sees consistent values)
 pub fn getPieceValue(piece_type: piece.Type) i32 {
     return switch (piece_type) {
-        .pawn => PAWN_VALUE,
-        .knight => KNIGHT_VALUE,
-        .bishop => BISHOP_VALUE,
-        .rook => ROOK_VALUE,
-        .queen => QUEEN_VALUE,
-        .king => 0, // King value not counted in material
+        .pawn => g_params.pawn_value,
+        .knight => g_params.knight_value,
+        .bishop => g_params.bishop_value,
+        .rook => g_params.rook_value,
+        .queen => g_params.queen_value,
+        .king => 0,
     };
 }
 
@@ -177,24 +268,21 @@ fn countMaterial(b: BitBoard, color: piece.Color) i32 {
     const color_bb = b.getColorBitboard(color);
     var material: i32 = 0;
 
-    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.pawn)))) * PAWN_VALUE;
-    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.knight)))) * KNIGHT_VALUE;
-    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.bishop)))) * BISHOP_VALUE;
-    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.rook)))) * ROOK_VALUE;
-    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.queen)))) * QUEEN_VALUE;
+    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.pawn)))) * g_params.pawn_value;
+    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.knight)))) * g_params.knight_value;
+    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.bishop)))) * g_params.bishop_value;
+    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.rook)))) * g_params.rook_value;
+    material += @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.queen)))) * g_params.queen_value;
 
     return material;
 }
 
 /// Determine if we're in the endgame phase
-/// Use phase-based detection so queenless middlegames are not misclassified
-/// as endgames while many major/minor pieces remain.
 fn isEndgame(b: BitBoard) bool {
-    return getGamePhase(b) >= ENDGAME_PHASE_THRESHOLD;
+    return getGamePhase(b) >= g_params.endgame_phase_threshold;
 }
 
 /// Calculate game phase (0 = opening, 256 = endgame)
-/// Used for tapered evaluation
 fn getGamePhase(b: BitBoard) i32 {
     const knight_phase: i32 = 1;
     const bishop_phase: i32 = 1;
@@ -208,18 +296,16 @@ fn getGamePhase(b: BitBoard) i32 {
     phase -= @as(i32, @intCast(@popCount(b.getKindBitboard(.rook)))) * rook_phase;
     phase -= @as(i32, @intCast(@popCount(b.getKindBitboard(.queen)))) * queen_phase;
 
-    // Ensure phase is in valid range
     phase = @max(0, @min(phase, total_phase));
     return @divTrunc(phase * 256 + @divTrunc(total_phase, 2), total_phase);
 }
 
-/// Evaluate pawn structure with improved metrics
+/// Evaluate pawn structure
 fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
     const pawns = b.getColorBitboard(color) & b.getKindBitboard(.pawn);
     const opponent_pawns = b.getColorBitboard(if (color == .white) .black else .white) & b.getKindBitboard(.pawn);
     var score: i32 = 0;
 
-    // File masks
     const file_masks = [8]u64{
         0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
         0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
@@ -229,7 +315,7 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
     for (0..8) |file| {
         const pawns_on_file = @popCount(pawns & file_masks[file]);
         if (pawns_on_file > 1) {
-            score -= @as(i32, @intCast(pawns_on_file - 1)) * DOUBLED_PAWN_PENALTY;
+            score -= @as(i32, @intCast(pawns_on_file - 1)) * g_params.doubled_pawn_penalty;
         }
     }
 
@@ -241,29 +327,26 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         const file = sq % 8;
         const rank = sq / 8;
 
-        // Get adjacent file masks
         var adjacent_files: u64 = 0;
         if (file > 0) adjacent_files |= file_masks[file - 1];
         if (file < 7) adjacent_files |= file_masks[file + 1];
 
-        // Check for isolated pawns (no friendly pawns on adjacent files)
+        // Isolated pawn
         if ((pawns & adjacent_files) == 0) {
-            score -= ISOLATED_PAWN_PENALTY;
+            score -= g_params.isolated_pawn_penalty;
         }
 
-        // Check for pawn chains (pawn defended by another pawn)
+        // Pawn chain
         const pawn_attacks = board.getPawnAttacks(@intCast(sq), if (color == .white) .black else .white);
         if ((pawns & pawn_attacks) != 0) {
-            score += PAWN_CHAIN_BONUS;
+            score += g_params.pawn_chain_bonus;
         }
 
-        // Create mask for files that would block this pawn
+        // Mask squares ahead of this pawn
         var blocking_mask: u64 = file_masks[file];
         if (file > 0) blocking_mask |= file_masks[file - 1];
         if (file < 7) blocking_mask |= file_masks[file + 1];
 
-        // Mask for squares ahead of this pawn
-        // Clamp shift amounts to 0-63 to avoid overflow
         const ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
         const ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
         const ahead_mask: u64 = if (color == .white)
@@ -271,8 +354,7 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         else
             blocking_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> ahead_shift_black);
 
-        // Check for backward pawns
-        // Clamp shift amounts to 0-63 to avoid overflow
+        // Backward pawn
         const behind_shift_white: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
         const behind_shift_black: u6 = @intCast(rank * 8);
         const behind_mask: u64 = if (color == .white)
@@ -280,32 +362,27 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         else
             adjacent_files & (@as(u64, 0xFFFFFFFFFFFFFFFF) << behind_shift_black);
 
-        // Backward pawn: no friendly pawns behind on adjacent files that could defend it
         if ((pawns & behind_mask) == 0 and (pawns & adjacent_files) == 0) {
-            // And it can't safely advance (opponent pawn attacks the square in front)
             const front_sq: u6 = if (color == .white) @intCast(sq + 8) else @intCast(sq -| 8);
-            // Squares from which enemy pawns attack front_sq
             const attackers_squares = board.getPawnAttacks(front_sq, color);
             if ((opponent_pawns & attackers_squares) != 0) {
-                score -= BACKWARD_PAWN_PENALTY;
+                score -= g_params.backward_pawn_penalty;
             }
         }
 
-        // If no opponent pawns blocking, it's passed
+        // Passed pawn
         if ((opponent_pawns & ahead_mask) == 0) {
             const advancement: usize = if (color == .white) rank else 7 - rank;
-            score += PASSED_PAWN_BONUS[advancement];
+            score += g_params.passed_pawn_bonus[advancement];
 
-            // Protected passed pawn bonus - defended by another pawn
             const our_pawn_attacks = board.getPawnAttacks(@intCast(sq), if (color == .white) .black else .white);
             if ((pawns & our_pawn_attacks) != 0) {
-                score += PROTECTED_PASSED_PAWN_BONUS;
+                score += g_params.protected_passed_pawn_bonus;
             }
 
-            // Connected passed pawn bonus - another passed pawn on adjacent file
+            // Connected passed pawn
             const adj_passed_mask = adjacent_files & pawns;
             if (adj_passed_mask != 0) {
-                // Check if any adjacent pawn is also passed
                 var adj_bb = adj_passed_mask;
                 while (adj_bb != 0) {
                     const adj_sq: u8 = @intCast(@ctz(adj_bb));
@@ -313,12 +390,10 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
                     const adj_file = adj_sq % 8;
                     const adj_rank = adj_sq / 8;
 
-                    // Build ahead mask for adjacent pawn
                     var adj_blocking: u64 = file_masks[adj_file];
                     if (adj_file > 0) adj_blocking |= file_masks[adj_file - 1];
                     if (adj_file < 7) adj_blocking |= file_masks[adj_file + 1];
 
-                    // Clamp shift amounts to avoid overflow
                     const adj_ahead_shift_white: u6 = if (adj_rank >= 7) 63 else @intCast((adj_rank + 1) * 8);
                     const adj_ahead_shift_black: u6 = if (adj_rank == 0) 63 else @intCast((8 - adj_rank) * 8);
                     const adj_ahead: u64 = if (color == .white)
@@ -327,23 +402,19 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
                         adj_blocking & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> adj_ahead_shift_black);
 
                     if ((opponent_pawns & adj_ahead) == 0) {
-                        score += CONNECTED_PASSED_PAWN_BONUS / 2; // Half bonus since both pawns get it
+                        score += @divTrunc(g_params.connected_passed_pawn_bonus, 2);
                         break;
                     }
                 }
             }
         }
 
-        // Safe pawn advance bonus - square in front not attacked by enemy pawns
+        // Safe pawn advance bonus
         if ((color == .white and rank < 7) or (color == .black and rank > 0)) {
             const front_sq_safe: u6 = if (color == .white) @intCast(sq + 8) else @intCast(sq - 8);
-            // To check if front_sq is attacked by enemy pawns, we need squares from which
-            // enemy pawns would attack it. For a white pawn's front square, black pawns
-            // attack from diagonally above (higher rank). getPawnAttacks with our color
-            // gives us those squares.
             const attackers_squares = board.getPawnAttacks(front_sq_safe, color);
             if ((opponent_pawns & attackers_squares) == 0) {
-                score += SAFE_PAWN_ADVANCE_BONUS;
+                score += g_params.safe_pawn_advance_bonus;
             }
         }
     }
@@ -353,7 +424,6 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
 
 /// Evaluate king safety
 fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i32 {
-    // In endgame, king safety is less important
     if (is_endgame_phase) return 0;
 
     const king_bb = b.getColorBitboard(color) & b.getKindBitboard(.king);
@@ -367,48 +437,38 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
     const pawns = b.getColorBitboard(color) & b.getKindBitboard(.pawn);
     const all_pawns = b.getKindBitboard(.pawn);
 
-    // File masks for pawn shield check
     const file_masks = [8]u64{
         0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
         0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
     };
 
-    // Check pawn shield (pawns in front of king)
     const shield_ranks = if (color == .white) [_]u8{ king_rank + 1, king_rank + 2 } else [_]u8{ king_rank -| 1, king_rank -| 2 };
 
     for (shield_ranks) |rank| {
         if (rank > 7) continue;
-
-        // Check pawns on king's file and adjacent files
         for (0..3) |i| {
-            const file = king_file +% i -% 1; // king_file - 1, king_file, king_file + 1
+            const file = king_file +% i -% 1;
             if (file > 7) continue;
-
             const sq = rank * 8 + file;
             if ((pawns & (@as(u64, 1) << @intCast(sq))) != 0) {
-                score += KING_PAWN_SHIELD_BONUS;
+                score += g_params.king_pawn_shield_bonus;
             }
         }
     }
 
-    // Penalize open/semi-open files near king
     for (0..3) |i| {
         const file = king_file +% i -% 1;
         if (file > 7) continue;
-
         const file_mask = file_masks[file];
         if ((all_pawns & file_mask) == 0) {
-            // Open file near king
-            score -= KING_OPEN_FILE_PENALTY;
+            score -= g_params.king_open_file_penalty;
         } else if ((pawns & file_mask) == 0) {
-            // Semi-open file (no friendly pawns)
-            score -= KING_OPEN_FILE_PENALTY / 2;
+            score -= @divTrunc(g_params.king_open_file_penalty, 2);
         }
     }
 
-    // Penalize king in center in middlegame
     if (king_file >= 2 and king_file <= 5) {
-        score -= KING_CENTER_MIDDLEGAME_PENALTY;
+        score -= g_params.king_center_middlegame_penalty;
     }
 
     const is_castled = if (color == .white)
@@ -419,23 +479,20 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
     const home_sq: u8 = if (color == .white) 4 else 60;
     const king_has_moved = king_sq != home_sq;
 
-    // Encourage keeping the king sheltered via castling and discourage
-    // premature king walks in middlegames.
     if (is_castled) {
-        score += KING_CASTLED_BONUS;
+        score += g_params.king_castled_bonus;
     } else if (king_has_moved) {
-        score -= KING_EARLY_WALK_PENALTY;
-
+        score -= g_params.king_early_walk_penalty;
         const advanced_rank = if (color == .white) king_rank >= 2 else king_rank <= 5;
         if (advanced_rank) {
-            score -= @divTrunc(KING_EARLY_WALK_PENALTY, 2);
+            score -= @divTrunc(g_params.king_early_walk_penalty, 2);
         }
     }
 
     return score;
 }
 
-/// Evaluate king activity in endgames (centralization + mobility)
+/// Evaluate king activity in endgames
 fn evaluateKingActivity(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i32 {
     if (!is_endgame_phase) return 0;
 
@@ -446,24 +503,22 @@ fn evaluateKingActivity(b: BitBoard, color: piece.Color, is_endgame_phase: bool)
     const king_file: i32 = @intCast(king_sq % 8);
     const king_rank: i32 = @intCast(king_sq / 8);
 
-    // Distance to nearest central square (d4/e4/d5/e5)
     const d1: i32 = @intCast(@abs(king_file - 3) + @abs(king_rank - 3));
     const d2: i32 = @intCast(@abs(king_file - 4) + @abs(king_rank - 3));
     const d3: i32 = @intCast(@abs(king_file - 3) + @abs(king_rank - 4));
     const d4: i32 = @intCast(@abs(king_file - 4) + @abs(king_rank - 4));
     const center_dist: i32 = @min(@min(d1, d2), @min(d3, d4));
 
-    var score: i32 = @max(0, 6 - center_dist) * KING_ACTIVITY_CENTER_BONUS;
+    var score: i32 = @max(0, 6 - center_dist) * g_params.king_activity_center_bonus;
 
-    // Active endgame kings should have nearby squares available
     const friendly = b.getColorBitboard(color);
     const attacks = board.getKingAttacks(@intCast(king_sq)) & ~friendly;
-    score += @as(i32, @intCast(@popCount(attacks))) * KING_ACTIVITY_MOBILITY_BONUS;
+    score += @as(i32, @intCast(@popCount(attacks))) * g_params.king_activity_mobility_bonus;
 
     return score;
 }
 
-/// Evaluate wing pawn storms toward the enemy king
+/// Evaluate wing pawn storms
 fn evaluatePawnStorm(b: BitBoard, color: piece.Color) i32 {
     const enemy = if (color == .white) piece.Color.black else piece.Color.white;
     const enemy_king_bb = b.getColorBitboard(enemy) & b.getKindBitboard(.king);
@@ -473,7 +528,6 @@ fn evaluatePawnStorm(b: BitBoard, color: piece.Color) i32 {
     const enemy_king_file: i32 = @intCast(enemy_king_sq % 8);
     const enemy_king_rank: i32 = @intCast(enemy_king_sq / 8);
 
-    // Only consider true wing king attacks. If king is central, this term is too noisy.
     if (enemy_king_file >= 3 and enemy_king_file <= 4) return 0;
 
     const own_king_bb = b.getColorBitboard(color) & b.getKindBitboard(.king);
@@ -499,26 +553,24 @@ fn evaluatePawnStorm(b: BitBoard, color: piece.Color) i32 {
         const advancement = if (color == .white) rank - 1 else 6 - rank;
         if (advancement <= 0) continue;
 
-        // Focus storms strictly on the target wing plus adjacent support file.
         if (attacking_kingside) {
             if (file < 4) continue;
         } else {
             if (file > 3) continue;
         }
 
-        score += advancement * PAWN_STORM_ADVANCE_BONUS;
+        score += advancement * g_params.pawn_storm_advance_bonus;
 
         const file_dist: i32 = @intCast(@abs(file - enemy_king_file));
         const rank_dist: i32 = @intCast(@abs(rank - enemy_king_rank));
         if (file_dist <= 2 and rank_dist <= 3) {
-            const proximity_bonus = PAWN_STORM_NEAR_KING_BONUS - (file_dist * 2 + rank_dist);
+            const proximity_bonus = g_params.pawn_storm_near_king_bonus - (file_dist * 2 + rank_dist);
             if (proximity_bonus > 0) {
                 score += proximity_bonus;
             }
         }
     }
 
-    // Same-side king storms are often dubious unless tactically justified.
     if (same_side_kings) {
         score = @divTrunc(score, 2);
     }
@@ -533,7 +585,6 @@ fn evaluateMobility(b: BitBoard, color: piece.Color) i32 {
     const friendly = b.getColorBitboard(color);
     const enemy_pawns = b.getColorBitboard(if (color == .white) .black else .white) & b.getKindBitboard(.pawn);
 
-    // Calculate pawn attack masks
     var enemy_pawn_attacks: u64 = 0;
     var pawn_bb = enemy_pawns;
     while (pawn_bb != 0) {
@@ -542,34 +593,31 @@ fn evaluateMobility(b: BitBoard, color: piece.Color) i32 {
         enemy_pawn_attacks |= board.getPawnAttacks(sq, if (color == .white) .black else .white);
     }
 
-    // Knight mobility
     var knights = friendly & b.getKindBitboard(.knight);
     while (knights != 0) {
         const sq: u6 = @intCast(@ctz(knights));
         knights &= knights - 1;
         const attacks = board.getKnightAttacks(sq) & ~friendly & ~enemy_pawn_attacks;
         const mobility = @min(@popCount(attacks), 8);
-        score += KNIGHT_MOBILITY[mobility];
+        score += g_params.knight_mobility[mobility];
     }
 
-    // Bishop mobility
     var bishops = friendly & b.getKindBitboard(.bishop);
     while (bishops != 0) {
         const sq: u6 = @intCast(@ctz(bishops));
         bishops &= bishops - 1;
         const attacks = board.getBishopAttacks(sq, occupied) & ~friendly;
         const mobility = @min(@popCount(attacks), 13);
-        score += BISHOP_MOBILITY[mobility];
+        score += g_params.bishop_mobility[mobility];
     }
 
-    // Rook mobility
     var rooks = friendly & b.getKindBitboard(.rook);
     while (rooks != 0) {
         const sq: u6 = @intCast(@ctz(rooks));
         rooks &= rooks - 1;
         const attacks = board.getRookAttacks(sq, occupied) & ~friendly;
         const mobility = @min(@popCount(attacks), 14);
-        score += ROOK_MOBILITY[mobility];
+        score += g_params.rook_mobility[mobility];
     }
 
     return score;
@@ -597,32 +645,29 @@ fn evaluateRooks(b: BitBoard, color: piece.Color) i32 {
         const rank = sq / 8;
         const file_mask = file_masks[file];
 
-        // Open file bonus
         if ((friendly_pawns & file_mask) == 0) {
             if ((enemy_pawns & file_mask) == 0) {
-                score += ROOK_OPEN_FILE_BONUS;
+                score += g_params.rook_open_file_bonus;
             } else {
-                score += ROOK_SEMI_OPEN_FILE_BONUS;
+                score += g_params.rook_semi_open_file_bonus;
             }
         }
 
-        // Rook on 7th rank bonus
         const seventh_rank: u8 = if (color == .white) 6 else 1;
         if (rank == seventh_rank) {
-            score += ROOK_ON_SEVENTH_BONUS;
+            score += g_params.rook_on_seventh_bonus;
         }
 
-        // Connected rooks bonus
         const rook_attacks = board.getRookAttacks(sq, occupied);
         if ((rook_attacks & rooks) != 0) {
-            score += CONNECTED_ROOKS_BONUS / 2; // Divide by 2 since both rooks get the bonus
+            score += @divTrunc(g_params.connected_rooks_bonus, 2);
         }
     }
 
     return score;
 }
 
-/// Evaluate knight outposts
+/// Evaluate knight/bishop outposts
 fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
     var score: i32 = 0;
     const knights = b.getColorBitboard(color) & b.getKindBitboard(.knight);
@@ -635,7 +680,6 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
     };
 
-    // Outpost squares: squares that can't be attacked by enemy pawns
     var piece_bb = knights;
     while (piece_bb != 0) {
         const sq: u6 = @intCast(@ctz(piece_bb));
@@ -644,21 +688,16 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         const file = sq % 8;
         const rank = sq / 8;
 
-        // Check if in enemy territory (ranks 4-6 for white, 1-3 for black)
         const in_outpost_zone = if (color == .white) rank >= 3 and rank <= 5 else rank >= 2 and rank <= 4;
         if (!in_outpost_zone) continue;
 
-        // Check if defended by pawn
         const pawn_attacks = board.getPawnAttacks(sq, if (color == .white) .black else .white);
         if ((friendly_pawns & pawn_attacks) == 0) continue;
 
-        // Check if can't be attacked by enemy pawns
         var attack_mask: u64 = 0;
         if (file > 0) attack_mask |= file_masks[file - 1];
         if (file < 7) attack_mask |= file_masks[file + 1];
 
-        // Mask squares in front of the knight
-        // Clamp shift amounts to avoid overflow
         const knight_ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
         const knight_ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
         const ahead_mask: u64 = if (color == .white)
@@ -667,11 +706,10 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
             attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> knight_ahead_shift_black);
 
         if ((enemy_pawns & ahead_mask) == 0) {
-            score += KNIGHT_OUTPOST_BONUS;
+            score += g_params.knight_outpost_bonus;
         }
     }
 
-    // Similar for bishops (with smaller bonus)
     piece_bb = bishops;
     while (piece_bb != 0) {
         const sq: u6 = @intCast(@ctz(piece_bb));
@@ -690,7 +728,6 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         if (file > 0) attack_mask |= file_masks[file - 1];
         if (file < 7) attack_mask |= file_masks[file + 1];
 
-        // Clamp shift amounts to avoid overflow
         const bishop_ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
         const bishop_ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
         const bishop_ahead_mask: u64 = if (color == .white)
@@ -699,15 +736,14 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
             attack_mask & (@as(u64, 0xFFFFFFFFFFFFFFFF) >> bishop_ahead_shift_black);
 
         if ((enemy_pawns & bishop_ahead_mask) == 0) {
-            score += BISHOP_OUTPOST_BONUS;
+            score += g_params.bishop_outpost_bonus;
         }
     }
 
     return score;
 }
 
-/// Endgame mop-up heuristics - drive enemy king to corner when winning
-/// Returns bonus from perspective of the winning side
+/// Endgame mop-up heuristics
 fn evaluateMopUp(b: BitBoard, winning_color: piece.Color) i32 {
     const losing_color = if (winning_color == .white) piece.Color.black else piece.Color.white;
 
@@ -721,31 +757,32 @@ fn evaluateMopUp(b: BitBoard, winning_color: piece.Color) i32 {
 
     var score: i32 = 0;
 
-    // Push losing king away from center
     const losing_file: i32 = @intCast(losing_king_sq % 8);
     const losing_rank: i32 = @intCast(losing_king_sq / 8);
     const center_dist_file = @max(3 - losing_file, losing_file - 4);
     const center_dist_rank = @max(3 - losing_rank, losing_rank - 4);
-    score += (center_dist_file + center_dist_rank) * MOP_UP_CENTER_BONUS;
+    score += (center_dist_file + center_dist_rank) * g_params.mop_up_center_bonus;
 
-    // Corner distance bonus - prefer corners over edges
     const corner_dist = @min(
         @min(losing_file + losing_rank, losing_file + (7 - losing_rank)),
         @min((7 - losing_file) + losing_rank, (7 - losing_file) + (7 - losing_rank)),
     );
-    score += @divTrunc((7 - corner_dist) * MOP_UP_CORNER_BONUS, 7);
+    score += @divTrunc((7 - corner_dist) * g_params.mop_up_corner_bonus, 7);
 
-    // Bring winning king closer to losing king (Manhattan distance)
     const winning_file: i32 = @intCast(winning_king_sq % 8);
     const winning_rank: i32 = @intCast(winning_king_sq / 8);
     const king_dist: i32 = @intCast(@abs(winning_file - losing_file) + @abs(winning_rank - losing_rank));
-    score += (14 - king_dist) * MOP_UP_KING_PROXIMITY_BONUS;
+    score += (14 - king_dist) * g_params.mop_up_king_proximity_bonus;
 
     return score;
 }
 
-/// Main evaluation function
-/// Returns score from the perspective of the side to move
+// ──────────────────────────────────────────────
+// Public evaluation API
+// ──────────────────────────────────────────────
+
+/// Main evaluation function.
+/// Returns score from the perspective of the side to move.
 pub fn evaluate(b: *Board) i32 {
     const board_state = b.board;
     const side_to_move = board_state.move;
@@ -753,12 +790,11 @@ pub fn evaluate(b: *Board) i32 {
     const is_endgame_phase = isEndgame(board_state);
     const phase = getGamePhase(board_state);
 
-    // Material evaluation
     const white_material = countMaterial(board_state, .white);
     const black_material = countMaterial(board_state, .black);
     var score = white_material - black_material;
 
-    // Piece-square tables (with tapered eval for king)
+    // Tapered PST evaluation
     var mg_pst_score: i32 = 0;
     var eg_pst_score: i32 = 0;
 
@@ -788,45 +824,35 @@ pub fn evaluate(b: *Board) i32 {
         }
     }
 
-    // Tapered evaluation for PST
     score += @divTrunc((mg_pst_score * (256 - phase)) + (eg_pst_score * phase), 256);
 
-    // Pawn structure
     score += evaluatePawnStructure(board_state, .white);
     score -= evaluatePawnStructure(board_state, .black);
 
-    // King safety (reduced in endgame through phase)
     const white_king_safety = evaluateKingSafety(board_state, .white, is_endgame_phase);
     const black_king_safety = evaluateKingSafety(board_state, .black, is_endgame_phase);
     score += @divTrunc((white_king_safety - black_king_safety) * (256 - phase), 256);
 
-    // Piece mobility
     score += evaluateMobility(board_state, .white);
     score -= evaluateMobility(board_state, .black);
 
-    // Rook evaluation
     score += evaluateRooks(board_state, .white);
     score -= evaluateRooks(board_state, .black);
 
-    // Outpost evaluation
     score += evaluateOutposts(board_state, .white);
     score -= evaluateOutposts(board_state, .black);
 
-    // Wing pawn storms are primarily a middlegame concept
     const pawn_storm_score = evaluatePawnStorm(board_state, .white) - evaluatePawnStorm(board_state, .black);
     score += @divTrunc(pawn_storm_score * (256 - phase), 256);
 
-    // Bishop pair bonus (more valuable in open positions/endgames)
     const white_bishops = @popCount(board_state.getColorBitboard(.white) & board_state.getKindBitboard(.bishop));
     const black_bishops = @popCount(board_state.getColorBitboard(.black) & board_state.getKindBitboard(.bishop));
-    if (white_bishops >= 2) score += BISHOP_PAIR_BONUS;
-    if (black_bishops >= 2) score -= BISHOP_PAIR_BONUS;
+    if (white_bishops >= 2) score += g_params.bishop_pair_bonus;
+    if (black_bishops >= 2) score -= g_params.bishop_pair_bonus;
 
-    // Endgame mop-up heuristics - drive enemy king to corner when winning
-    // Only apply when we have significant material advantage in endgame
     if (is_endgame_phase) {
         const material_diff = white_material - black_material;
-        const mop_up_threshold: i32 = ROOK_VALUE; // Need at least a rook advantage
+        const mop_up_threshold: i32 = g_params.rook_value;
 
         if (material_diff >= mop_up_threshold) {
             score += evaluateMopUp(board_state, .white);
@@ -835,24 +861,25 @@ pub fn evaluate(b: *Board) i32 {
         }
     }
 
-    // Active king play matters in endgames
     score += evaluateKingActivity(board_state, .white, is_endgame_phase);
     score -= evaluateKingActivity(board_state, .black, is_endgame_phase);
 
-    // Castling rights bonus - penalize losing the right to castle
-    // Scaled by phase so it only matters in the opening/middlegame
     var castling_score: i32 = 0;
-    if (board_state.castle_rights.white_kingside) castling_score += CASTLING_RIGHTS_KINGSIDE_BONUS;
-    if (board_state.castle_rights.white_queenside) castling_score += CASTLING_RIGHTS_QUEENSIDE_BONUS;
-    if (board_state.castle_rights.black_kingside) castling_score -= CASTLING_RIGHTS_KINGSIDE_BONUS;
-    if (board_state.castle_rights.black_queenside) castling_score -= CASTLING_RIGHTS_QUEENSIDE_BONUS;
+    if (board_state.castle_rights.white_kingside) castling_score += g_params.castling_rights_kingside_bonus;
+    if (board_state.castle_rights.white_queenside) castling_score += g_params.castling_rights_queenside_bonus;
+    if (board_state.castle_rights.black_kingside) castling_score -= g_params.castling_rights_kingside_bonus;
+    if (board_state.castle_rights.black_queenside) castling_score -= g_params.castling_rights_queenside_bonus;
     score += @divTrunc(castling_score * (256 - phase), 256);
 
-    // Tempo bonus - small bonus for side to move
-    score += if (side_to_move == .white) TEMPO_BONUS else -TEMPO_BONUS;
+    score += if (side_to_move == .white) g_params.tempo_bonus else -g_params.tempo_bonus;
 
-    // Return score from side to move's perspective
     return if (side_to_move == .white) score else -score;
+}
+
+/// Evaluate from white's perspective (for Texel tuner).
+pub fn evaluateWhite(b: *Board) i32 {
+    const score = evaluate(b);
+    return if (b.board.move == .white) score else -score;
 }
 
 /// Convert a mate score to account for distance to mate
