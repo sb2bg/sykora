@@ -114,7 +114,7 @@ def evaluate_batch(fens: list[str], params: dict, engine: str) -> list[int]:
     params_path = params_to_tempfile(params)
     try:
         n = len(fens)
-        w = min(NUM_WORKERS, max(1, n // 1000))  # don't spawn workers for tiny batches
+        w = min(NUM_WORKERS, max(1, n // 20_000))  # only parallelize for large batches
         if w <= 1:
             # Single process path
             chunk_scores = _evaluate_chunk((fens, params_path, engine))
@@ -239,13 +239,15 @@ def coordinate_descent(
     K: float,
     max_epochs: int,
     initial_delta: int,
+    batch_size: int = 10_000,
 ) -> dict:
     """Run coordinate descent Texel tuning."""
 
     all_scalars = flatten_params(params)
     delta = initial_delta
+    n = len(fens)
 
-    # Evaluate baseline
+    # Evaluate baseline on full dataset
     print("Evaluating baseline...", end='', flush=True)
     scores = evaluate_batch(fens, params, engine)
     if not scores:
@@ -259,6 +261,22 @@ def coordinate_descent(
             print(f"Delta < 1, stopping after epoch {epoch - 1}.")
             break
 
+        # Sample a fixed subset for this epoch's per-param evaluations
+        if batch_size < n:
+            idx_sample = np.random.choice(n, size=batch_size, replace=False)
+            epoch_fens = [fens[i] for i in idx_sample]
+            epoch_results = results[idx_sample]
+        else:
+            epoch_fens = fens
+            epoch_results = results
+
+        # Baseline MSE on the sample
+        scores = evaluate_batch(epoch_fens, params, engine)
+        if not scores:
+            print(" engine failed on sample!")
+            return params
+        current_sample_mse = compute_mse(scores, epoch_results, K)
+
         epoch_start = time.time()
         improved = 0
         total = len(all_scalars)
@@ -268,27 +286,27 @@ def coordinate_descent(
 
             # Try +delta
             set_scalar(params, key, idx, orig + delta)
-            scores = evaluate_batch(fens, params, engine)
+            scores = evaluate_batch(epoch_fens, params, engine)
             if scores:
-                mse_plus = compute_mse(scores, results, K)
+                mse_plus = compute_mse(scores, epoch_results, K)
             else:
                 mse_plus = float('inf')
 
-            if mse_plus < current_mse:
-                current_mse = mse_plus
+            if mse_plus < current_sample_mse:
+                current_sample_mse = mse_plus
                 improved += 1
                 continue  # keep +delta
 
             # Try -delta
             set_scalar(params, key, idx, orig - delta)
-            scores = evaluate_batch(fens, params, engine)
+            scores = evaluate_batch(epoch_fens, params, engine)
             if scores:
-                mse_minus = compute_mse(scores, results, K)
+                mse_minus = compute_mse(scores, epoch_results, K)
             else:
                 mse_minus = float('inf')
 
-            if mse_minus < current_mse:
-                current_mse = mse_minus
+            if mse_minus < current_sample_mse:
+                current_sample_mse = mse_minus
                 improved += 1
                 continue  # keep -delta
 
@@ -297,9 +315,13 @@ def coordinate_descent(
 
             if (param_i + 1) % 50 == 0:
                 pct = 100 * (param_i + 1) / total
-                print(f"  [{pct:5.1f}%] MSE={current_mse:.6f} delta={delta} "
+                print(f"  [{pct:5.1f}%] MSE={current_sample_mse:.6f} delta={delta} "
                       f"improved={improved}", end='\r', flush=True)
 
+        # Report full-dataset MSE at epoch end
+        full_scores = evaluate_batch(fens, params, engine)
+        if full_scores:
+            current_mse = compute_mse(full_scores, results, K)
         elapsed = time.time() - epoch_start
         print(f"\nEpoch {epoch:3d} | delta={delta:3d} | improved={improved:4d} | "
               f"MSE={current_mse:.6f} | {elapsed:.1f}s")
@@ -336,6 +358,8 @@ def main() -> None:
                         help='Starting params file (defaults: engine defaults)')
     parser.add_argument('--K', type=float, default=None,
                         help='Sigmoid scaling factor (auto-tuned if omitted)')
+    parser.add_argument('--batch-size', type=int, default=10_000,
+                        help='Positions per batch eval during tuning (default: 10000)')
     args = parser.parse_args()
 
     # Verify engine exists
@@ -385,6 +409,7 @@ def main() -> None:
         K=K,
         max_epochs=args.epochs,
         initial_delta=args.delta,
+        batch_size=args.batch_size,
     )
 
     save_params(tuned, args.output)
