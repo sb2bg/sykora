@@ -416,7 +416,9 @@ pub const Uci = struct {
         const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
         const use_nnue_for_search = self.use_nnue and net_ptr != null;
 
-        const prior_count = if (self.position_hash_count > 0) self.position_hash_count - 1 else 0;
+        // Include the current position in game history so the search detects
+        // cycles back to the root position (prevents phantom perpetual scores).
+        const prior_count = self.position_hash_count;
 
         // Age TT before search (caller responsibility now)
         self.tt.nextAge();

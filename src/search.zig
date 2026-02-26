@@ -59,11 +59,11 @@ const SEE_CAPTURE_SCALE: i32 = 128;
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
-const REPETITION_BASE_CONTEMPT_CP: i32 = 20;
-const REPETITION_SMALL_ADV_CP: i32 = 40;
-const REPETITION_MEDIUM_ADV_CP: i32 = 80;
-const REPETITION_LARGE_ADV_CP: i32 = 160;
-const REPETITION_HUGE_ADV_CP: i32 = 260;
+const REPETITION_BASE_CONTEMPT_CP: i32 = 15;
+const REPETITION_SMALL_ADV_CP: i32 = 30;
+const REPETITION_MEDIUM_ADV_CP: i32 = 50;
+const REPETITION_LARGE_ADV_CP: i32 = 80;
+const REPETITION_HUGE_ADV_CP: i32 = 120;
 const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
 const REPETITION_CYCLE_EVAL_THRESHOLD_CP: i32 = 80;
 const REPETITION_CYCLE_PENALTY_CP: i32 = 200;
@@ -925,10 +925,32 @@ pub const SearchEngine = struct {
         return matches;
     }
 
-    /// Check if current position is a true threefold repetition.
-    /// We require two prior matches of the current hash with the same side to move.
+    /// Check if any match is from game history (positions before search started).
+    inline fn hasGameHistoryMatch(self: *Self) bool {
+        const current_hash = self.board.zobrist_hasher.zobrist_hash;
+        const total = self.combinedHistoryCount();
+        if (total < 3) return false;
+
+        const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
+        const max_back = @min(halfmove, total - 1);
+
+        var plies_back: usize = 2;
+        while (plies_back <= max_back) : (plies_back += 2) {
+            const idx = total - 1 - plies_back;
+            if (self.hashAtCombinedIndex(idx) == current_hash) {
+                // Check if this match is in game history (before search started)
+                if (idx < self.game_history_count) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Check for repetition draw.
+    /// Any single repetition match (twofold) is enough — if the engine has reached
+    /// the same position before (whether in game history or search tree), continuing
+    /// will just lead to threefold repetition in practice.
     fn isRepetition(self: *Self) bool {
-        return self.repetitionMatchCount() >= 2;
+        return self.repetitionMatchCount() >= 1;
     }
 
     /// Return a contempt-adjusted score for repetition draws.
