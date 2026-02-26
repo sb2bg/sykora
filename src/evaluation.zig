@@ -202,9 +202,9 @@ pub fn loadParams(path: []const u8, allocator: std.mem.Allocator) !void {
 
 /// Serialize g_params to a flat key-value text file.
 pub fn saveParams(path: []const u8, allocator: std.mem.Allocator) !void {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    const writer = buf.writer();
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+    const writer = buf.writer(allocator);
 
     inline for (std.meta.fields(EvalParams)) |field| {
         const value = @field(g_params, field.name);

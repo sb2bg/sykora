@@ -1,7 +1,7 @@
 /// sykora-tune: standalone batch evaluator for Texel tuning.
 ///
 /// Usage:
-///   ./zig-out/bin/sykora-tune [--params <file>]
+///   ./zig-out/bin/sykora-tune [--params <file>] [--save-params <file>]
 ///
 /// Reads FEN strings from stdin (one per line), evaluates each position
 /// from white's perspective using the HCE, and prints one integer score
@@ -19,16 +19,26 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    var save_params_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--params") and i + 1 < args.len) {
             i += 1;
             try eval.loadParams(args[i], allocator);
+        } else if (std.mem.eql(u8, args[i], "--save-params") and i + 1 < args.len) {
+            i += 1;
+            save_params_path = args[i];
         }
+    }
+
+    if (save_params_path) |path| {
+        try eval.saveParams(path, allocator);
+        return;
     }
 
     const stdin = std.fs.File.stdin();
     const stdout = std.fs.File.stdout();
+    const stderr = std.fs.File.stderr();
 
     var line_buf = std.ArrayListUnmanaged(u8){};
     defer line_buf.deinit(allocator);
@@ -59,7 +69,10 @@ pub fn main() !void {
             continue;
         }
 
-        var b = Board.fromFen(fen) catch continue;
+        var b = Board.fromFen(fen) catch {
+            try stderr.writeAll("invalid fen in sykora-tune input\n");
+            return error.InvalidFen;
+        };
         const score = eval.evaluateWhite(&b);
 
         const s = std.fmt.bufPrint(&score_buf, "{d}\n", .{score}) catch continue;
