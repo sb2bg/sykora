@@ -61,43 +61,43 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
         if (eql(arg, "--dataset")) {
-            i += 1;
-            args.dataset = try allocator.dupe(u8, argv[i]);
+            const val = requireOptionValue(argv, &i, "--dataset");
+            args.dataset = try allocator.dupe(u8, val);
         } else if (eql(arg, "--output")) {
-            i += 1;
-            args.output = try allocator.dupe(u8, argv[i]);
+            const val = requireOptionValue(argv, &i, "--output");
+            args.output = try allocator.dupe(u8, val);
         } else if (eql(arg, "--params")) {
-            i += 1;
-            args.params = try allocator.dupe(u8, argv[i]);
+            const val = requireOptionValue(argv, &i, "--params");
+            args.params = try allocator.dupe(u8, val);
         } else if (eql(arg, "--positions")) {
-            i += 1;
-            args.positions = try std.fmt.parseInt(usize, argv[i], 10);
+            const val = requireOptionValue(argv, &i, "--positions");
+            args.positions = try std.fmt.parseInt(usize, val, 10);
         } else if (eql(arg, "--epochs")) {
-            i += 1;
-            args.epochs = try std.fmt.parseInt(usize, argv[i], 10);
+            const val = requireOptionValue(argv, &i, "--epochs");
+            args.epochs = try std.fmt.parseInt(usize, val, 10);
         } else if (eql(arg, "--delta")) {
-            i += 1;
-            args.delta = try std.fmt.parseInt(i32, argv[i], 10);
+            const val = requireOptionValue(argv, &i, "--delta");
+            args.delta = try std.fmt.parseInt(i32, val, 10);
         } else if (eql(arg, "--batch-size")) {
-            i += 1;
-            args.batch_size = try std.fmt.parseInt(usize, argv[i], 10);
+            const val = requireOptionValue(argv, &i, "--batch-size");
+            args.batch_size = try std.fmt.parseInt(usize, val, 10);
         } else if (eql(arg, "--K")) {
-            i += 1;
-            args.K = try std.fmt.parseFloat(f64, argv[i]);
+            const val = requireOptionValue(argv, &i, "--K");
+            args.K = try std.fmt.parseFloat(f64, val);
         } else if (eql(arg, "--seed")) {
-            i += 1;
-            args.seed = try std.fmt.parseInt(u64, argv[i], 10);
+            const val = requireOptionValue(argv, &i, "--seed");
+            args.seed = try std.fmt.parseInt(u64, val, 10);
         } else if (eql(arg, "--no-bounds")) {
             args.no_bounds = true;
         } else if (eql(arg, "--scalar-bound-mult")) {
-            i += 1;
-            args.scalar_bound_mult = try std.fmt.parseFloat(f64, argv[i]);
+            const val = requireOptionValue(argv, &i, "--scalar-bound-mult");
+            args.scalar_bound_mult = try std.fmt.parseFloat(f64, val);
         } else if (eql(arg, "--min-improvement")) {
-            i += 1;
-            args.min_improvement = try std.fmt.parseFloat(f64, argv[i]);
+            const val = requireOptionValue(argv, &i, "--min-improvement");
+            args.min_improvement = try std.fmt.parseFloat(f64, val);
         } else if (eql(arg, "--full-eval-interval")) {
-            i += 1;
-            args.full_eval_interval = try std.fmt.parseInt(usize, argv[i], 10);
+            const val = requireOptionValue(argv, &i, "--full-eval-interval");
+            args.full_eval_interval = try std.fmt.parseInt(usize, val, 10);
         } else if (eql(arg, "--help") or eql(arg, "-h")) {
             printUsage();
             std.process.exit(0);
@@ -108,6 +108,16 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
         }
     }
     return args;
+}
+
+fn requireOptionValue(argv: []const []const u8, i: *usize, opt_name: []const u8) []const u8 {
+    if (i.* + 1 >= argv.len) {
+        eprint("Missing value for option: {s}\n", .{opt_name});
+        printUsage();
+        std.process.exit(1);
+    }
+    i.* += 1;
+    return argv[i.*];
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
@@ -134,6 +144,8 @@ fn printUsage() void {
         \\  --full-eval-interval <N>  Full-dataset eval every N epochs (default: 1)
         \\  --help                    Show this help
         \\
+        \\Dataset rows with invalid FEN are treated as hard errors.
+        \\
     ) catch {};
 }
 
@@ -145,38 +157,42 @@ const Dataset = struct {
     boards: []Board,
     results: []f64,
     count: usize,
+
+    fn deinit(self: *Dataset, allocator: std.mem.Allocator) void {
+        allocator.free(self.boards);
+        allocator.free(self.results);
+        self.* = undefined;
+    }
 };
 
 fn loadDataset(path: []const u8, max_positions: usize, allocator: std.mem.Allocator) !Dataset {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    const content = try file.readToEndAlloc(allocator, 2 * 1024 * 1024 * 1024); // 2 GB max
-    defer allocator.free(content);
+    var boards_list = std.ArrayList(Board).empty;
+    defer boards_list.deinit(allocator);
 
-    // First pass: count lines to pre-allocate
-    var line_count: usize = 0;
-    {
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \r\t");
-            if (trimmed.len == 0 or trimmed[0] == '#') continue;
-            line_count += 1;
-            if (line_count >= max_positions) break;
-        }
-    }
+    var results_list = std.ArrayList(f64).empty;
+    defer results_list.deinit(allocator);
 
-    const cap = @min(line_count, max_positions);
-    const boards = try allocator.alloc(Board, cap);
-    const results = try allocator.alloc(f64, cap);
-    var count: usize = 0;
+    var file_buf: [64 * 1024]u8 = undefined;
+    var reader = file.reader(&file_buf);
+
     var skipped_bad_rows: usize = 0;
     var skipped_bad_results: usize = 0;
-    var skipped_bad_fens: usize = 0;
+    var line_no: usize = 0;
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        if (count >= max_positions) break;
+    while (boards_list.items.len < max_positions) {
+        const maybe_line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => {
+                eprint("Error: dataset line too long near line {d}.\n", .{line_no + 1});
+                return error.DatasetLineTooLong;
+            },
+            else => return err,
+        };
+        const line = maybe_line orelse break;
+
+        line_no += 1;
         const trimmed = std.mem.trim(u8, line, " \r\t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
@@ -210,24 +226,43 @@ fn loadDataset(path: []const u8, max_positions: usize, allocator: std.mem.Alloca
         }
 
         const board = Board.fromFen(fen) catch {
-            skipped_bad_fens += 1;
-            continue;
+            eprint("Error: invalid FEN at line {d}.\n", .{line_no});
+            return error.InvalidDatasetFen;
         };
 
-        boards[count] = board;
-        results[count] = result;
-        count += 1;
+        try boards_list.append(allocator, board);
+        try results_list.append(allocator, result);
     }
 
-    print("Loaded {d} positions from {s}\n", .{ count, path });
+    return finalizeDataset(
+        &boards_list,
+        &results_list,
+        skipped_bad_rows,
+        skipped_bad_results,
+        path,
+        allocator,
+    );
+}
+
+fn finalizeDataset(
+    boards_list: *std.ArrayList(Board),
+    results_list: *std.ArrayList(f64),
+    skipped_bad_rows: usize,
+    skipped_bad_results: usize,
+    path: []const u8,
+    allocator: std.mem.Allocator,
+) !Dataset {
+    const boards = try boards_list.toOwnedSlice(allocator);
+    errdefer allocator.free(boards);
+    const results = try results_list.toOwnedSlice(allocator);
+
+    print("Loaded {d} positions from {s}\n", .{ boards.len, path });
     if (skipped_bad_rows > 0)
         print("  skipped {d} malformed rows\n", .{skipped_bad_rows});
     if (skipped_bad_results > 0)
         print("  skipped {d} rows with invalid result labels\n", .{skipped_bad_results});
-    if (skipped_bad_fens > 0)
-        print("  skipped {d} rows with invalid FENs\n", .{skipped_bad_fens});
 
-    return .{ .boards = boards, .results = results, .count = count };
+    return .{ .boards = boards, .results = results, .count = boards.len };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -636,6 +671,22 @@ pub fn main() !void {
         printUsage();
         std.process.exit(1);
     }
+    if (args.batch_size == 0) {
+        eprint("Error: --batch-size must be > 0\n", .{});
+        std.process.exit(1);
+    }
+    if (args.full_eval_interval == 0) {
+        eprint("Error: --full-eval-interval must be > 0\n", .{});
+        std.process.exit(1);
+    }
+    if (args.scalar_bound_mult <= 0.0) {
+        eprint("Error: --scalar-bound-mult must be > 0\n", .{});
+        std.process.exit(1);
+    }
+    if (args.min_improvement < 0.0) {
+        eprint("Error: --min-improvement must be >= 0\n", .{});
+        std.process.exit(1);
+    }
 
     // Load starting params
     if (args.params) |p| {
@@ -646,7 +697,8 @@ pub fn main() !void {
     }
 
     // Load dataset
-    const ds = try loadDataset(args.dataset.?, args.positions, allocator);
+    var ds = try loadDataset(args.dataset.?, args.positions, allocator);
+    defer ds.deinit(allocator);
     if (ds.count == 0) {
         eprint("Error: dataset is empty.\n", .{});
         std.process.exit(1);
