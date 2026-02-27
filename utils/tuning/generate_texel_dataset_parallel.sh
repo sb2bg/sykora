@@ -24,6 +24,9 @@ Quality / filtering options:
   --stockfish PATH           Stockfish path (default: auto-detect if available)
   --no-stockfish             Disable Stockfish annotation (cp=0)
   --sf-depth N               Stockfish analysis depth (default: 10)
+  --sf-threads N             Stockfish Threads per shard (default: 1)
+  --sf-hash-mb N             Stockfish Hash MB per shard (default: 32)
+  --sf-restart-retries N     Restart attempts after SF failure (default: 1)
   --depth N                  Self-play search depth (default: 6)
   --movetime-ms N            Self-play movetime ms (used only when depth is disabled)
   --min-move N               Default: 8
@@ -86,6 +89,9 @@ if [[ -x "/opt/homebrew/bin/stockfish" ]]; then
   STOCKFISH="/opt/homebrew/bin/stockfish"
 fi
 SF_DEPTH=10
+SF_THREADS=1
+SF_HASH_MB=32
+SF_RESTART_RETRIES=1
 DEPTH=6
 MOVETIME_MS=50
 USE_DEPTH=1
@@ -108,6 +114,9 @@ while [[ $# -gt 0 ]]; do
     --stockfish) STOCKFISH="$2"; shift 2 ;;
     --no-stockfish) STOCKFISH=""; shift ;;
     --sf-depth) SF_DEPTH="$2"; shift 2 ;;
+    --sf-threads) SF_THREADS="$2"; shift 2 ;;
+    --sf-hash-mb) SF_HASH_MB="$2"; shift 2 ;;
+    --sf-restart-retries) SF_RESTART_RETRIES="$2"; shift 2 ;;
     --depth) DEPTH="$2"; USE_DEPTH=1; shift 2 ;;
     --movetime-ms) MOVETIME_MS="$2"; USE_DEPTH=0; shift 2 ;;
     --min-move) MIN_MOVE="$2"; shift 2 ;;
@@ -174,6 +183,9 @@ shards=${SHARDS}
 python=${PYTHON_PATH}
 stockfish=${STOCKFISH:-<none>}
 sf_depth=${SF_DEPTH}
+sf_threads=${SF_THREADS}
+sf_hash_mb=${SF_HASH_MB}
+sf_restart_retries=${SF_RESTART_RETRIES}
 depth=$(if (( USE_DEPTH == 1 )); then echo "${DEPTH}"; else echo "<disabled>"; fi)
 movetime_ms=$(if (( USE_DEPTH == 1 )); then echo "<ignored>"; else echo "${MOVETIME_MS}"; fi)
 seed=${SEED}
@@ -224,6 +236,9 @@ for ((i = 0; i < SHARDS; i++)); do
     --output "${shard_file}"
     --games "${shard_games}"
     --sf-depth "${SF_DEPTH}"
+    --sf-threads "${SF_THREADS}"
+    --sf-hash-mb "${SF_HASH_MB}"
+    --sf-restart-retries "${SF_RESTART_RETRIES}"
     --min-move "${MIN_MOVE}"
     --max-move "${MAX_MOVE}"
     --min-pieces "${MIN_PIECES}"

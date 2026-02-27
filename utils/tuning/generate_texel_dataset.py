@@ -141,6 +141,32 @@ def annotate_with_stockfish(
     return scores
 
 
+def start_stockfish(
+    stockfish_path: str,
+    sf_threads: int,
+    sf_hash_mb: int,
+) -> chess.engine.SimpleEngine:
+    sf = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+    cfg: dict[str, object] = {}
+    if "Threads" in sf.options:
+        cfg["Threads"] = sf_threads
+    if "Hash" in sf.options:
+        cfg["Hash"] = sf_hash_mb
+    if cfg:
+        sf.configure(cfg)
+        sf.ping()
+    return sf
+
+
+def safe_quit_engine(engine: chess.engine.SimpleEngine | None) -> None:
+    if engine is None:
+        return
+    try:
+        engine.quit()
+    except chess.engine.EngineTerminatedError:
+        pass
+
+
 def generate_dataset(
     engine_path: str,
     output_path: str,
@@ -149,6 +175,9 @@ def generate_dataset(
     depth: int | None,
     stockfish_path: str | None,
     sf_depth: int,
+    sf_threads: int,
+    sf_hash_mb: int,
+    sf_restart_retries: int,
     min_move: int,
     max_move: int,
     min_pieces: int,
@@ -164,6 +193,8 @@ def generate_dataset(
     print(f"Games:       {num_games}")
     print(f"Time ctrl:   {tc_str}")
     print(f"Stockfish:   {stockfish_path or 'disabled (result-only)'}")
+    if stockfish_path:
+        print(f"SF config:   depth={sf_depth} threads={sf_threads} hash={sf_hash_mb}MB retries={sf_restart_retries}")
     if seed is not None:
         print(f"Seed:        {seed}")
     print()
@@ -171,8 +202,7 @@ def generate_dataset(
     engine = chess.engine.SimpleEngine.popen_uci(engine_path)
     sf: chess.engine.SimpleEngine | None = None
     if stockfish_path:
-        sf = chess.engine.SimpleEngine.popen_uci(stockfish_path)
-        sf.configure({"Threads": 1, "Hash": 32})
+        sf = start_stockfish(stockfish_path, sf_threads, sf_hash_mb)
 
     # Pre-parse openings; duplicate each for both colours
     openings = [parse_opening(line) for line in OPENING_LINES]
@@ -216,11 +246,36 @@ def generate_dataset(
             # Annotate with Stockfish if requested
             if sf and candidates:
                 fens_only = [fen for fen, _ in candidates]
-                try:
-                    cp_scores = annotate_with_stockfish(fens_only, sf, sf_depth)
-                except Exception as e:
-                    print(f"\n[warn] SF annotation failed: {e}", file=sys.stderr)
-                    cp_scores = [0] * len(candidates)
+                cp_scores = [0] * len(candidates)
+                annotation_ok = False
+                for attempt in range(sf_restart_retries + 1):
+                    try:
+                        cp_scores = annotate_with_stockfish(fens_only, sf, sf_depth)
+                        annotation_ok = True
+                        break
+                    except Exception as e:
+                        print(
+                            f"\n[warn] SF annotation failed (attempt {attempt + 1}/{sf_restart_retries + 1}): {e}",
+                            file=sys.stderr,
+                        )
+                        safe_quit_engine(sf)
+                        sf = None
+
+                        if not stockfish_path or attempt >= sf_restart_retries:
+                            break
+                        try:
+                            sf = start_stockfish(stockfish_path, sf_threads, sf_hash_mb)
+                            print("[info] Stockfish restarted after failure.", file=sys.stderr)
+                        except Exception as restart_err:
+                            print(f"[warn] SF restart failed: {restart_err}", file=sys.stderr)
+                            sf = None
+                            break
+
+                if not annotation_ok and sf is None:
+                    print(
+                        "[warn] Disabling Stockfish annotation for remainder of this shard.",
+                        file=sys.stderr,
+                    )
             else:
                 cp_scores = [0] * len(candidates)
 
@@ -243,9 +298,8 @@ def generate_dataset(
 
     print(f"\n\nDone. {total_positions:,} positions in {time.time()-start:.0f}s → {output_path}")
 
-    engine.quit()
-    if sf:
-        sf.quit()
+    safe_quit_engine(engine)
+    safe_quit_engine(sf)
 
 
 def main() -> None:
@@ -263,6 +317,12 @@ def main() -> None:
                         help='Path to Stockfish (for eval annotation)')
     parser.add_argument('--sf-depth', type=int, default=8,
                         help='Stockfish analysis depth per position')
+    parser.add_argument('--sf-threads', type=int, default=1,
+                        help='Stockfish Threads option (default: 1)')
+    parser.add_argument('--sf-hash-mb', type=int, default=32,
+                        help='Stockfish Hash option in MB (default: 32)')
+    parser.add_argument('--sf-restart-retries', type=int, default=1,
+                        help='How many times to restart Stockfish after annotation failure')
     parser.add_argument('--min-move', type=int, default=8,
                         help='Skip positions before this half-move number')
     parser.add_argument('--max-move', type=int, default=80,
@@ -283,6 +343,9 @@ def main() -> None:
         depth=args.depth,
         stockfish_path=args.stockfish,
         sf_depth=args.sf_depth,
+        sf_threads=args.sf_threads,
+        sf_hash_mb=args.sf_hash_mb,
+        sf_restart_retries=args.sf_restart_retries,
         min_move=args.min_move,
         max_move=args.max_move,
         min_pieces=args.min_pieces,
