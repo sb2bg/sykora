@@ -160,18 +160,27 @@ inline fn clampToQa(v: i32) i32 {
     return v;
 }
 
-/// Returns score from the side-to-move perspective, same convention as classical eval.
-pub fn evaluate(net: *const Network, b: *Board, use_screlu: bool) i32 {
+// ─── Incremental Accumulator Infrastructure ───
+
+pub const AccumulatorPair = struct {
+    white: [MAX_HIDDEN_SIZE]i32,
+    black: [MAX_HIDDEN_SIZE]i32,
+};
+
+/// Full recompute of accumulators from board state (used at search root).
+pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
     const state = b.board;
     const hidden_size: usize = @intCast(net.hidden_size);
 
-    var white_acc: [MAX_HIDDEN_SIZE]i32 = [_]i32{0} ** MAX_HIDDEN_SIZE;
-    var black_acc: [MAX_HIDDEN_SIZE]i32 = [_]i32{0} ** MAX_HIDDEN_SIZE;
+    var acc = AccumulatorPair{
+        .white = [_]i32{0} ** MAX_HIDDEN_SIZE,
+        .black = [_]i32{0} ** MAX_HIDDEN_SIZE,
+    };
 
     for (0..hidden_size) |h| {
         const bias = net.biases[h];
-        white_acc[h] = bias;
-        black_acc[h] = bias;
+        acc.white[h] = bias;
+        acc.black[h] = bias;
     }
 
     inline for ([_]piece.Color{ .white, .black }) |color| {
@@ -189,40 +198,129 @@ pub fn evaluate(net: *const Network, b: *Board, use_screlu: bool) i32 {
                 const white_base = white_feature * hidden_size;
                 const black_base = black_feature * hidden_size;
                 for (0..hidden_size) |h| {
-                    white_acc[h] += net.input_weights[white_base + h];
-                    black_acc[h] += net.input_weights[black_base + h];
+                    acc.white[h] += net.input_weights[white_base + h];
+                    acc.black[h] += net.input_weights[black_base + h];
                 }
             }
         }
     }
 
-    const stm_is_white = state.move == .white;
+    return acc;
+}
+
+/// Apply a single feature delta (add or subtract) to an accumulator pair.
+inline fn applyDelta(
+    net: *const Network,
+    acc: *AccumulatorPair,
+    sq: u8,
+    pt: piece.Type,
+    color: piece.Color,
+    add: bool,
+) void {
+    const hidden_size: usize = @intCast(net.hidden_size);
+    const white_feature = featureIndex(.white, sq, pt, color);
+    const black_feature = featureIndex(.black, sq, pt, color);
+    const white_base = white_feature * hidden_size;
+    const black_base = black_feature * hidden_size;
+
+    if (add) {
+        for (0..hidden_size) |h| {
+            acc.white[h] += net.input_weights[white_base + h];
+            acc.black[h] += net.input_weights[black_base + h];
+        }
+    } else {
+        for (0..hidden_size) |h| {
+            acc.white[h] -= net.input_weights[white_base + h];
+            acc.black[h] -= net.input_weights[black_base + h];
+        }
+    }
+}
+
+/// Incremental accumulator update after a move.
+/// Copies `prev` into `result`, then applies feature deltas.
+pub fn updateAccumulators(
+    net: *const Network,
+    prev: *const AccumulatorPair,
+    result: *AccumulatorPair,
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+    capture_sq: ?u8,
+    promotion: ?piece.Type,
+    is_castling: bool,
+    rook_from: ?u8,
+    rook_to: ?u8,
+) void {
+    const hidden_size: usize = @intCast(net.hidden_size);
+
+    // Copy previous accumulator
+    @memcpy(result.white[0..hidden_size], prev.white[0..hidden_size]);
+    @memcpy(result.black[0..hidden_size], prev.black[0..hidden_size]);
+
+    // Remove piece from origin
+    applyDelta(net, result, from_sq, moved_piece, moved_color, false);
+
+    // Add piece at destination (or promoted piece)
+    const final_piece = promotion orelse moved_piece;
+    applyDelta(net, result, to_sq, final_piece, moved_color, true);
+
+    // Remove captured piece if any
+    if (captured_piece) |cp| {
+        const opp = oppositeColor(moved_color);
+        applyDelta(net, result, capture_sq.?, cp, opp, false);
+    }
+
+    // Castling: move the rook too
+    if (is_castling) {
+        if (rook_from) |rf| {
+            applyDelta(net, result, rf, .rook, moved_color, false);
+            applyDelta(net, result, rook_to.?, .rook, moved_color, true);
+        }
+    }
+}
+
+/// Evaluate using pre-computed accumulators (activation + output layer only).
+/// Returns score from the side-to-move perspective.
+pub fn evaluateFromAccumulators(
+    net: *const Network,
+    acc: *const AccumulatorPair,
+    stm_is_white: bool,
+    use_screlu: bool,
+) i32 {
+    const hidden_size: usize = @intCast(net.hidden_size);
     var sum: i64 = 0;
 
     for (0..hidden_size) |h| {
-        const us_raw = if (stm_is_white) white_acc[h] else black_acc[h];
-        const them_raw = if (stm_is_white) black_acc[h] else white_acc[h];
+        const us_raw = if (stm_is_white) acc.white[h] else acc.black[h];
+        const them_raw = if (stm_is_white) acc.black[h] else acc.white[h];
 
         const us = clampToQa(us_raw);
         const them = clampToQa(them_raw);
 
         if (use_screlu) {
-            // SCReLU(x) = clamp(x, 0, QA)^2. Matches Bullet simple/progression nets.
             sum += @as(i64, us) * @as(i64, us) * @as(i64, net.output_weights[h]);
             sum += @as(i64, them) * @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
         } else {
-            // CReLU(x) = clamp(x, 0, QA). Legacy SYK nets used this.
             sum += @as(i64, us) * @as(i64, net.output_weights[h]);
             sum += @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
         }
     }
 
     if (use_screlu) {
-        // SCReLU accumulates an extra QA factor relative to CReLU.
         sum = @divTrunc(sum, QA);
     }
     sum += net.output_bias;
 
     const score = @divTrunc(sum * SCALE, QA * QB);
     return @intCast(score);
+}
+
+/// Returns score from the side-to-move perspective, same convention as classical eval.
+/// This is the full-recompute path (non-incremental). Kept for fallback/gensfen use.
+pub fn evaluate(net: *const Network, b: *Board, use_screlu: bool) i32 {
+    const acc = initAccumulators(net, b);
+    const stm_is_white = b.board.move == .white;
+    return evaluateFromAccumulators(net, &acc, stm_is_white, use_screlu);
 }
