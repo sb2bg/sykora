@@ -131,17 +131,27 @@ def annotate_with_stockfish(
     depth: int,
     timeout_per_pos: float = 30.0,
 ) -> list[int]:
-    """Return Stockfish cp evals (white-relative) for a batch of FENs."""
+    """Return Stockfish cp evals (white-relative) for a batch of FENs.
+
+    Raises on fatal SF crash (caller handles restart).
+    Individual position timeouts fall back to cp=0.
+    """
     scores = []
     for fen in fens:
         board = chess.Board(fen)
-        info = sf.analyse(
-            board,
-            chess.engine.Limit(depth=depth, time=timeout_per_pos),
-        )
-        score = info["score"].white().score(mate_score=10000)
-        # Clamp to ±5000 cp
-        scores.append(max(-5000, min(5000, score if score is not None else 0)))
+        try:
+            info = sf.analyse(
+                board,
+                chess.engine.Limit(depth=depth, time=timeout_per_pos),
+            )
+            score = info["score"].white().score(mate_score=10000)
+            scores.append(max(-5000, min(5000, score if score is not None else 0)))
+        except chess.engine.EngineTerminatedError:
+            # SF process died — re-raise so caller can restart
+            raise
+        except chess.engine.EngineError:
+            # SF protocol error on this position — skip it, keep going
+            scores.append(0)
     return scores
 
 
@@ -325,7 +335,7 @@ def main() -> None:
                         help='Stockfish Threads option (default: 1)')
     parser.add_argument('--sf-hash-mb', type=int, default=32,
                         help='Stockfish Hash option in MB (default: 32)')
-    parser.add_argument('--sf-restart-retries', type=int, default=1,
+    parser.add_argument('--sf-restart-retries', type=int, default=5,
                         help='How many times to restart Stockfish after annotation failure')
     parser.add_argument('--min-move', type=int, default=8,
                         help='Skip positions before this half-move number')
