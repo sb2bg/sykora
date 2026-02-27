@@ -129,12 +129,16 @@ def annotate_with_stockfish(
     fens: list[str],
     sf: chess.engine.SimpleEngine,
     depth: int,
+    timeout_per_pos: float = 30.0,
 ) -> list[int]:
     """Return Stockfish cp evals (white-relative) for a batch of FENs."""
     scores = []
     for fen in fens:
         board = chess.Board(fen)
-        info = sf.analyse(board, chess.engine.Limit(depth=depth))
+        info = sf.analyse(
+            board,
+            chess.engine.Limit(depth=depth, time=timeout_per_pos),
+        )
         score = info["score"].white().score(mate_score=10000)
         # Clamp to ±5000 cp
         scores.append(max(-5000, min(5000, score if score is not None else 0)))
