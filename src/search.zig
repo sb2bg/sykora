@@ -191,6 +191,9 @@ pub const SearchEngine = struct {
     nnue_blend: i32,
     nnue_scale: i32,
     nnue_screlu: bool,
+    // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
+    acc_stack: ?[]nnue.AccumulatorPair,
+    acc_ply: u32,
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
 
@@ -227,6 +230,8 @@ pub const SearchEngine = struct {
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
             .nnue_screlu = nnue_screlu,
+            .acc_stack = null,
+            .acc_ply = 0,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
         };
@@ -250,6 +255,53 @@ pub const SearchEngine = struct {
         self.eval_cache_values[idx] = value;
     }
 
+    /// Allocate and initialize the incremental accumulator stack for NNUE.
+    fn initAccumulatorStack(self: *Self) !void {
+        if (self.use_nnue and self.nnue_net != null) {
+            const stack = self.allocator.alloc(nnue.AccumulatorPair, 128) catch return;
+            self.acc_stack = stack;
+            stack[0] = nnue.initAccumulators(self.nnue_net.?, self.board);
+            self.acc_ply = 0;
+        }
+    }
+
+    fn deinitAccumulatorStack(self: *Self) void {
+        if (self.acc_stack) |stack| {
+            self.allocator.free(stack);
+            self.acc_stack = null;
+        }
+    }
+
+    /// Update accumulators incrementally after a move.
+    inline fn pushAccumulator(self: *Self, move: Move, undo: Board.Undo) void {
+        if (self.acc_stack) |stack| {
+            const net = self.nnue_net.?;
+            nnue.updateAccumulators(
+                net,
+                &stack[self.acc_ply],
+                &stack[self.acc_ply + 1],
+                move.from(),
+                move.to(),
+                undo.moved_piece,
+                undo.mover_color,
+                undo.captured_piece,
+                undo.captured_square,
+                move.promotion(),
+                undo.castle_rook_from != null,
+                undo.castle_rook_from,
+                undo.castle_rook_to,
+            );
+            self.acc_ply += 1;
+        }
+    }
+
+    /// Restore accumulator state after unmaking a move.
+    inline fn popAccumulator(self: *Self) void {
+        if (self.acc_stack != null) {
+            self.acc_ply -= 1;
+        }
+    }
+
     inline fn evaluatePosition(self: *Self) i32 {
         // Cache static evals only when NNUE is enabled, since NNUE eval is much costlier.
         const hash = self.board.zobrist_hasher.zobrist_hash;
@@ -262,7 +314,16 @@ pub const SearchEngine = struct {
         var score: i32 = undefined;
         if (self.use_nnue) {
             if (self.nnue_net) |net| {
-                const nn_raw = nnue.evaluate(net, self.board, self.nnue_screlu);
+                // Use incremental accumulators if available, otherwise full recompute
+                const nn_raw = if (self.acc_stack) |stack|
+                    nnue.evaluateFromAccumulators(
+                        net,
+                        &stack[self.acc_ply],
+                        self.board.board.move == .white,
+                        self.nnue_screlu,
+                    )
+                else
+                    nnue.evaluate(net, self.board, self.nnue_screlu);
                 const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
                     score = nn;
@@ -320,6 +381,10 @@ pub const SearchEngine = struct {
         // Initialize position history
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
         self.history_count = 1;
+
+        // Initialize incremental NNUE accumulators at root position
+        try self.initAccumulatorStack();
+        defer self.deinitAccumulatorStack();
 
         // Calculate time limit
         const time_limit = self.calculateTimeLimit(options);
@@ -732,6 +797,7 @@ pub const SearchEngine = struct {
 
             // Make move
             const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.pushAccumulator(move, undo);
             self.previous_move = move;
             self.nodes_searched += 1;
             const gives_check = self.board.isInCheck(self.board.board.move);
@@ -811,6 +877,7 @@ pub const SearchEngine = struct {
             }
 
             // Unmake move
+            self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
             self.previous_move = old_previous;
             self.history_count = old_hist_count; // Restore history count
@@ -1088,11 +1155,13 @@ pub const SearchEngine = struct {
 
             // Make move
             const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.pushAccumulator(move, undo);
 
             // Recursive search
             const score = -try self.quiescence(-beta, -alpha, ply + 1);
 
             // Unmake move
+            self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
 
             if (score >= beta) {
