@@ -252,7 +252,7 @@ pub const Uci = struct {
             .uci => {
                 try self.writeStdout("id name {s} {s}", .{ name, version });
                 try self.writeStdout("id author {s}", .{author});
-                var stdout_buf: [1024]u8 = undefined;
+                var stdout_buf: [1024]u8 = undefined; // TODO: if options list grows large, may need dynamic allocation here
                 var stdout_writer = self.stdout.writer(&stdout_buf);
                 try self.options.printOptions(&stdout_writer.interface);
                 stdout_writer.interface.flush() catch return UciError.IOError;
