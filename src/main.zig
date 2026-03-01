@@ -25,12 +25,13 @@ fn tryMain() MainError!void {
     const allocator = gpa.allocator();
 
     // Check for subcommands via CLI args
-    var args_iter = std.process.args();
-    _ = args_iter.next(); // skip argv[0]
+    // Use argsAlloc for cross-platform compatibility (Windows needs allocator).
+    const args = std.process.argsAlloc(allocator) catch return error.GensfenError;
+    defer std.process.argsFree(allocator, args);
 
-    if (args_iter.next()) |subcmd| {
-        if (std.mem.eql(u8, subcmd, "gensfen")) {
-            return runGensfen(&args_iter, allocator);
+    if (args.len > 1) {
+        if (std.mem.eql(u8, args[1], "gensfen")) {
+            return runGensfenFromSlice(args[2..], allocator);
         }
         // "uci" or unrecognized → fall through to UCI mode
     }
@@ -45,18 +46,16 @@ fn tryMain() MainError!void {
     try uci_interface.run();
 }
 
-fn runGensfen(args_iter: *std.process.ArgIterator, allocator: std.mem.Allocator) MainError!void {
-    // Collect remaining args
-    var args_list = std.ArrayList([]const u8).empty;
-    defer args_list.deinit(allocator);
-    while (args_iter.next()) |arg| {
-        args_list.append(allocator, arg) catch return error.GensfenError;
+fn runGensfenFromSlice(args: []const [:0]u8, allocator: std.mem.Allocator) MainError!void {
+    // Convert [:0]u8 slices to []const u8 slices for parseArgs
+    var arg_slices = std.ArrayList([]const u8).empty;
+    defer arg_slices.deinit(allocator);
+    for (args) |arg| {
+        arg_slices.append(allocator, arg) catch return error.GensfenError;
     }
 
-    const opts = gensfen.parseArgs(args_list.items) catch {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Usage: sykora gensfen --output FILE --games N --depth D [--random-plies N] [--seed N] [--sample-pct N]\n", .{}) catch "";
-        std.fs.File.stderr().writeAll(msg) catch {};
+    const opts = gensfen.parseArgs(arg_slices.items) catch {
+        std.log.err("Usage: sykora gensfen --output FILE --games N --depth D [--random-plies N] [--seed N] [--sample-pct N]\n", .{});
         return error.GensfenError;
     };
 

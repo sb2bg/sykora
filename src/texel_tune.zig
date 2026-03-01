@@ -17,19 +17,16 @@ const Board = @import("bitboard.zig").Board;
 const eval = @import("evaluation.zig");
 const EvalParams = eval.EvalParams;
 
-const stdout_file = std.fs.File.stdout();
-const stderr_file = std.fs.File.stderr();
-
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    stdout_file.writeAll(s) catch {};
+    std.fs.File.stdout().writeAll(s) catch {};
 }
 
 fn eprint(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    stderr_file.writeAll(s) catch {};
+    std.fs.File.stderr().writeAll(s) catch {};
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -141,7 +138,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 }
 
 fn printUsage() void {
-    stderr_file.writeAll(
+    std.fs.File.stderr().writeAll(
         \\Usage: sykora-texel [options]
         \\
         \\Options:
