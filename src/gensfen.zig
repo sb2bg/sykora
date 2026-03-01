@@ -149,33 +149,15 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
         opts.games, opts.depth, opts.random_plies, opts.sample_pct,
     });
 
-    // Pre-allocate position buffer (max positions per game ≈ max_ply * sample_pct / 100)
-    const max_positions_per_game: usize = @min(opts.max_ply, 512);
-    var pos_buf = try allocator.alloc(BulletRecord, max_positions_per_game);
-    defer allocator.free(pos_buf);
-
-    // Persistent search engine — reused across moves within a game.
-    // Board is copied per-move, but killer/history tables carry over within a game.
-    var search_board = Board.startpos();
-    var engine = SearchEngine.init(
-        &search_board,
-        allocator,
-        &stop_flag,
-        &tt,
-        false, // no NNUE — HCE only
-        null,
-        0,
-        100,
-        false,
-    );
-    engine.uci_output = null;
-
     var game_num: u32 = 0;
     while (game_num < opts.games) : (game_num += 1) {
         var b = Board.startpos();
         var game_hashes: [512]u64 = undefined;
         var hash_count: usize = 0;
-        var pos_count: usize = 0;
+
+        // Buffer positions until game result is known
+        var positions = std.ArrayList(BulletRecord).empty;
+        defer positions.deinit(allocator);
 
         // Random opening phase
         var random_ply: u32 = 0;
@@ -211,6 +193,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 // Checkmate or stalemate
                 const stm = b.board.move;
                 if (b.isInCheck(stm)) {
+                    // Checkmate — side to move lost
                     game_result = if (stm == .white) RESULT_BLACK_WIN else RESULT_WHITE_WIN;
                 } else {
                     game_result = RESULT_DRAW;
@@ -224,18 +207,13 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 break;
             }
 
-            // Repetition detection — halfmove-bounded, same-side-only scan
+            // Repetition detection
             if (hash_count >= 4) {
                 const current_hash = b.zobrist_hasher.zobrist_hash;
-                const halfmove: usize = @intCast(b.board.halfmove_clock);
-                const max_back = @min(halfmove, hash_count);
                 var rep_count: u32 = 0;
-                var plies_back: usize = 2;
-                while (plies_back <= max_back) : (plies_back += 2) {
-                    if (game_hashes[hash_count - plies_back] == current_hash) {
-                        rep_count += 1;
-                        if (rep_count >= 2) break;
-                    }
+                var i: usize = 0;
+                while (i < hash_count) : (i += 1) {
+                    if (game_hashes[i] == current_hash) rep_count += 1;
                 }
                 if (rep_count >= 2) {
                     game_result = RESULT_DRAW;
@@ -243,14 +221,23 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 }
             }
 
-            // Search — reuse engine, just update the board and history
+            // Search
             stop_flag.store(false, .seq_cst);
-            search_board = b;
-            engine.board = &search_board;
+            var search_board = b;
+            var engine = SearchEngine.init(
+                &search_board,
+                allocator,
+                &stop_flag,
+                &tt,
+                false, // no NNUE — HCE only
+                null,
+                0,
+                100,
+                false,
+            );
+            engine.uci_output = null;
             if (hash_count > 0) {
                 engine.setGameHistory(game_hashes[0..hash_count]);
-            } else {
-                engine.setGameHistory(&.{});
             }
 
             const search_result = engine.search(.{
@@ -270,6 +257,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
             }
 
             if (adj_count >= ADJ_COUNT_NEEDED) {
+                // Adjudicate: side with positive eval wins
                 const stm = b.board.move;
                 if (score_stm > 0) {
                     game_result = if (stm == .white) RESULT_WHITE_WIN else RESULT_BLACK_WIN;
@@ -289,15 +277,12 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 }
             };
 
-            // Maybe record position (fixed buffer, no heap allocation)
+            // Maybe record position
             if (ply >= opts.min_ply and ply <= opts.max_ply) {
                 const stm = b.board.move;
                 if (!b.isInCheck(stm)) {
                     if (random.intRangeLessThan(u32, 0, 100) < opts.sample_pct) {
-                        if (pos_count < pos_buf.len) {
-                            pos_buf[pos_count] = boardToBulletRecord(&b, score_white);
-                            pos_count += 1;
-                        }
+                        try positions.append(allocator, boardToBulletRecord(&b, score_white));
                     }
                 }
             }
@@ -319,12 +304,12 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
 
         // Write all buffered positions with final game result
         const result = game_result orelse RESULT_DRAW;
-        for (pos_buf[0..pos_count]) |*rec| {
+        for (positions.items) |*rec| {
             rec.result = result;
             const bytes: *const [32]u8 = @ptrCast(rec);
             try bw.interface.writeAll(bytes);
         }
-        total_positions += pos_count;
+        total_positions += positions.items.len;
 
         // Progress report
         if (opts.report_interval > 0 and (game_num + 1) % opts.report_interval == 0) {
