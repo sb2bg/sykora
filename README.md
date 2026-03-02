@@ -1,12 +1,12 @@
 # Sykora
 
-[![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
-[![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
+[![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
+[![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
 
 <img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="200" alt="Sykora Logo">
 
-Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, a full alpha-beta search with LMR/null-move/futility pruning, Lazy SMP parallel search, a hand-tuned classical evaluation, and an experimental NNUE path. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
+Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, a full alpha-beta search with LMR/null-move/futility pruning, Lazy SMP parallel search, a hand-tuned classical evaluation, and NNUE evaluation trained via the [Bullet](https://github.com/jw1912/bullet) trainer. An NNUE net is embedded in the binary and enabled by default. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
 
 ## Features
 
@@ -51,16 +51,19 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 
 ### Evaluation
 
-- Classical handcrafted evaluation with:
+- **NNUE evaluation** (default, embedded in binary):
+  - `768 -> Nx2 -> 1` architecture with SCReLU activation
+  - Trained on high-depth self-play data via the Bullet trainer
+  - Incremental accumulator updates during search
+  - Custom `SYKNNUE2` network format with auto-detected activation type
+  - Backward-compatible with `SYKNNUE1` format (defaults to ReLU)
+  - Blendable with classical eval via `NnueBlend` (default: 100 = pure NNUE)
+- **Classical handcrafted evaluation** (fallback):
   - Material and piece-square tables
   - Pawn structure terms (isolated/doubled/backward/passed)
   - Mobility terms
   - King safety and castling terms
   - Endgame mop-up/king activity terms
-- Optional NNUE evaluation (`SYKNNUE1` format), including:
-  - Classical/NNUE blend (`NnueBlend`)
-  - NNUE output scaling (`NnueScale`)
-  - Optional SCReLU path (`NnueSCReLU`)
 
 ### Parallel Search
 
@@ -90,16 +93,17 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 
 ## UCI Options
 
-Sykora currently exposes the following options:
+| Option           | Type   | Default | Description                                                |
+| ---------------- | ------ | ------- | ---------------------------------------------------------- |
+| `Debug Log File` | string | `""`    | Path for debug logging                                     |
+| `UseNNUE`        | bool   | `true`  | Enable NNUE evaluation (embedded net loads automatically)  |
+| `EvalFile`       | string | `""`    | Path to external `.sknnue` file (overrides embedded net)   |
+| `NnueBlend`      | int    | `100`   | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
+| `NnueScale`      | int    | `100`   | NNUE output scaling factor (10..400)                       |
+| `Threads`        | int    | `1`     | Search threads (1..64, Lazy SMP)                           |
+| `Hash`           | int    | `64`    | Transposition table size in MB (1..4096)                   |
 
-- `Debug Log File` (string)
-- `UseNNUE` (`true`/`false`)
-- `EvalFile` (path to `.sknnue`)
-- `NnueBlend` (`0..100`)
-- `NnueScale` (`10..400`)
-- `NnueSCReLU` (`true`/`false`)
-- `Threads` (`1..64`)
-- `Hash` (`1..4096` MB)
+The activation function (ReLU or SCReLU) is auto-detected from the network file header -- no manual configuration needed.
 
 ## Prerequisites
 
@@ -125,7 +129,7 @@ To build the project, run:
 zig build
 ```
 
-This will create an executable named `sykora` in the `zig-out/bin` directory.
+This will create an executable named `sykora` in the `zig-out/bin` directory. The embedded NNUE net (`src/net.sknnue`) is compiled into the binary -- no external files needed to play at full strength.
 
 ## Running
 
@@ -140,6 +144,8 @@ Or directly run the executable:
 ```bash
 ./zig-out/bin/sykora
 ```
+
+The engine starts with NNUE enabled and the embedded net loaded. No configuration is required for normal use.
 
 ## Play On Lichess
 
@@ -188,10 +194,6 @@ To run Strategic Test Suite (STS) EPD files (requires `python-chess`):
 
 ```bash
 python utils/sts/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-out/bin/sykora --movetime-ms 300
-
-# Example with NNUE options
-python utils/sts/sts.py --epd /path/to/sts --engine ./zig-out/bin/sykora --movetime-ms 300 \
-  --engine-opt UseNNUE=true --engine-opt EvalFile=nnue/syk_nnue_v11_h128_d10.sknnue --engine-opt NnueBlend=2
 ```
 
 To run engine-vs-engine self-play (also requires `python-chess`):
@@ -272,105 +274,124 @@ python utils/tuning/tune_loop.py --candidate-label "quick-iter"
 python utils/tuning/tune_loop.py --candidate-label "confirm" --sp-games 120 --sp-movetime-ms 150 --max-p-value 0.2
 ```
 
-Legacy wrapper paths under `utils/` are kept for compatibility, but new docs use the canonical subfolders.
+## NNUE
 
-## NNUE (Experimental)
+Sykora uses a `768 -> Nx2 -> 1` NNUE architecture with dual-perspective accumulator updates and SCReLU activation, trained via the [Bullet](https://github.com/jw1912/bullet) trainer.
 
-Sykora now exposes two UCI options:
+### How It Works
 
-- `UseNNUE` (`true`/`false`)
-- `EvalFile` (path to network file)
+- The embedded net (`src/net.sknnue`) is compiled into the binary and loaded automatically at startup.
+- NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`).
+- The activation function (ReLU or SCReLU) is stored in the network file header and auto-detected on load.
+- To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
+- To blend NNUE with classical eval, lower `NnueBlend` (e.g., `50` for 50/50, `0` for classical only).
 
-Example UCI sequence:
+### Network Format (SYKNNUE2)
 
-```text
-setoption name EvalFile value /absolute/path/to/net.sknnue
-setoption name UseNNUE value true
-setoption name NnueBlend value 2
-isready
+```
+8 bytes   magic: "SYKNNUE2"
+u16       version: 2
+u16       hidden_size
+u8        activation_type (0=ReLU, 1=SCReLU)
+i32       output_bias
+i16[hidden_size]                accumulator biases
+i16[768 * hidden_size]          input -> accumulator weights
+i16[2 * hidden_size]            output weights (stm half, nstm half)
 ```
 
-Current implementation uses a simple Sykora-specific NNUE format (`SYKNNUE1`), not Stockfish `.nnue`.
-To use pretrained weights immediately, use a net trained/exported for this format.
+All values are little-endian. The older `SYKNNUE1` format (no activation byte, defaults to ReLU) is still supported for backward compatibility.
 
-Bullet-first dataset prep (for large Leela/lc0 chunk sets):
+### Training Pipeline
+
+Training uses the [Bullet](https://github.com/jw1912/bullet) NNUE trainer with CUDA. Two data formats are supported:
+
+**Using binpack data:**
 
 ```bash
-python utils/nnue/bullet/prepare_lc0_dataset.py \
-  --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
-  --output-dir nnue/data/bullet/leela_run3 \
-  --manifest-name shards.txt
-
-python utils/nnue/bullet/inspect_lc0_v6.py \
-  --source-dir /Users/sullivanbognar/Downloads/training-run3--20210605-0521 \
-  --max-files 32 --records-per-file 8 \
-  --output-json nnue/data/bullet/leela_run3/inspect.json
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset data/training.binpack \
+  --data-format binpack \
+  --bullet-repo nnue/bullet_repo \
+  --output-root nnue/models/bullet \
+  --hidden 256 --end-superbatch 320 --threads 8
 ```
 
-Bullet training pipeline (current canonical path):
+**Using BulletFormat .data files:**
 
 ```bash
-# 1) Build teacher-labeled Bullet text (own/self-play + external PGNs)
-python utils/nnue/bullet/make_teacher_text_dataset.py \
-  --pgn-glob "history/matches/**/*.pgn" \
-  --pgn-glob "datasets/fishtest/**/*.pgn.gz" \
-  --output nnue/data/bullet/train/teacher_text.txt \
-  --stockfish /path/to/stockfish \
-  --depth 12 --threads 1 --hash-mb 256 \
-  --sample-rate 0.2 --min-ply 12 --max-ply 220 \
-  --skip-check --skip-captures --cp-clip 2500
-
-# 2) Convert + shuffle/interleave to BulletFormat .data
-python utils/nnue/bullet/pack_dataset.py \
-  --text-input nnue/data/bullet/train/teacher_text.txt \
-  --output nnue/data/bullet/train/train_main.data \
-  --shuffle-mem-mb 4096 --convert-threads 8
-
-# 2b) One-command mixed data build (bounded fishtest + self-play + label + pack)
-python utils/nnue/bullet/build_mixed_dataset.py \
-  --fishtest-hours 72 --fishtest-max-runs 4 --fishtest-max-games 150000 \
-  --include-existing-fishtest \
-  --selfplay-games 80 --selfplay-movetime-ms 120 \
-  --skip-check --skip-captures --dedupe-fen
-
-# Tiny smoke test preset (good for fast pipeline checks)
-./utils/nnue/bullet/run_small_data_smoke.sh
-
-# 3) Launch long Bullet run (4070 Ti SUPER defaults)
 python utils/nnue/bullet/train_cuda_longrun.py \
   --dataset nnue/data/bullet/train/train_main.data \
   --bullet-repo nnue/bullet_repo \
   --output-root nnue/models/bullet \
   --hidden 256 --end-superbatch 320 --threads 8
+```
 
-# 3b) Apple Silicon / CPU sanity training (for pipeline validation)
-python utils/nnue/bullet/train_apple_silicon_test.py \
-  --dataset nnue/data/bullet/train/train_main.data \
-  --bullet-repo nnue/bullet_repo \
-  --output-root nnue/models/bullet_cpu_test \
-  --hidden 64 --end-superbatch 1 --threads 6
+**Multiple datasets** can be passed space-separated:
 
-# 4) Gate checkpoints (STS + optional self-play) and promote
+```bash
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset data/set1.binpack data/set2.binpack \
+  --data-format binpack \
+  ...
+```
+
+**Resuming from a checkpoint:**
+
+```bash
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset data/test80.binpack \
+  --data-format binpack \
+  --resume nnue/models/bullet/<run_id>/checkpoints/<checkpoint>/raw.bin \
+  --start-superbatch 161 --end-superbatch 320 \
+  ...
+```
+
+### Self-Play Data Generation
+
+Sykora can generate its own training data via the `gensfen` command:
+
+```bash
+# Generate positions using the engine's own evaluation
+./zig-out/bin/sykora gensfen output.data depth 7 count 1000000 threads 4
+```
+
+### Exporting a Trained Net
+
+Convert a Bullet checkpoint to `.sknnue`:
+
+```bash
+# From quantised.bin (default after Bullet training)
+python utils/nnue/bullet/bullet_quantised_to_sknnue.py \
+  nnue/models/bullet/<run_id>/checkpoints/<checkpoint>/quantised.bin \
+  output.sknnue --activation screlu
+
+# From NPZ export
+python utils/nnue/bullet/export_npz_to_sknnue.py \
+  checkpoint.npz output.sknnue --activation screlu
+```
+
+### Embedding a New Net
+
+To update the embedded net in the binary:
+
+```bash
+cp output.sknnue src/net.sknnue
+zig build
+```
+
+### Gating Checkpoints
+
+```bash
 python utils/nnue/bullet/gate_checkpoints.py \
   --checkpoints-dir nnue/models/bullet/<run_id>/checkpoints \
   --engine ./zig-out/bin/sykora \
-  --blend 2 --nnue-scale 100 \
+  --blend 100 --nnue-scale 100 \
   --sts-epd epd --sts-movetime-ms 40 --sts-max-positions 400 \
   --selfplay-games 80 --selfplay-movetime-ms 120 --selfplay-top-k 3 \
   --threads 1 --hash-mb 64 \
   --min-elo 0 --max-p-value 0.25 \
   --promote-to nnue/syk_nnue_best.sknnue
 ```
-
-To compare Sykora against Stockfish running a specific net:
-
-```bash
-python utils/match/selfplay.py ./zig-out/bin/sykora /opt/homebrew/bin/stockfish --name1 sykora --name2 stockfish-nnue --engine2-opt EvalFile=nnue/nn-49c1193b131c.nnue --games 40 --movetime-ms 150
-```
-
-Some Stockfish builds reject external `EvalFile`; in that case use the default embedded net or a matching Stockfish build.
-
-`NnueBlend` lets you blend NNUE with classical eval (0 = classical only, 100 = pure NNUE). Current default is `2`.
 
 Full process spec: `specs/nnue_training_spec.md`.
 
