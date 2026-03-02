@@ -14,8 +14,8 @@ INPUT_SIZE = 768
 QA = 255
 QB = 64
 SCALE = 400
-MAGIC = b"SYKNNUE1"
-FORMAT_VERSION = 1
+MAGIC = b"SYKNNUE2"
+FORMAT_VERSION = 2
 
 
 def flip_vertical(square: int) -> int:
@@ -60,6 +60,7 @@ def write_syk_nnue(
     input_weights_i16: List[int],
     output_weights_i16: List[int],
     output_bias_i32: int,
+    activation_type: int = 1,
 ) -> None:
     if hidden_size <= 0:
         raise ValueError("hidden_size must be > 0")
@@ -75,6 +76,7 @@ def write_syk_nnue(
         handle.write(MAGIC)
         handle.write(struct.pack("<H", FORMAT_VERSION))
         handle.write(struct.pack("<H", hidden_size))
+        handle.write(struct.pack("<B", activation_type))
         handle.write(struct.pack("<i", int(output_bias_i32)))
         handle.write(_pack_i16(input_biases_i16))
         handle.write(_pack_i16(input_weights_i16))

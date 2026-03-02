@@ -9,8 +9,9 @@ pub const QA: i32 = 255;
 pub const QB: i32 = 64;
 pub const SCALE: i32 = 400;
 
-const MAGIC = "SYKNNUE1";
-const FORMAT_VERSION: u16 = 1;
+const MAGIC_V2 = "SYKNNUE2";
+const MAGIC_V1 = "SYKNNUE1";
+const FORMAT_VERSION: u16 = 2;
 
 pub const LoadError = error{
     OutOfMemory,
@@ -26,9 +27,10 @@ pub const LoadError = error{
 };
 
 /// Simple NNUE format used by Sykora (little-endian):
-/// - 8 bytes  magic: "SYKNNUE1"
-/// - u16      version: 1
+/// - 8 bytes  magic: "SYKNNUE2"
+/// - u16      version: 2
 /// - u16      hidden_size
+/// - u8       activation_type (0=ReLU, 1=SCReLU)
 /// - i32      output_bias
 /// - i16[hidden_size]                accumulator biases
 /// - i16[INPUT_SIZE * hidden_size]   input -> accumulator weights
@@ -36,6 +38,7 @@ pub const LoadError = error{
 pub const Network = struct {
     allocator: std.mem.Allocator,
     hidden_size: u16,
+    activation_type: u8, // 0 = ReLU, 1 = SCReLU
     biases: []i16,
     input_weights: []i16,
     output_weights: []i16,
@@ -60,19 +63,26 @@ pub const Network = struct {
             return mapReadError(err);
         };
 
-        if (!std.mem.eql(u8, magic_buf[0..], MAGIC)) {
+        const is_v2 = std.mem.eql(u8, magic_buf[0..], MAGIC_V2);
+        const is_v1 = std.mem.eql(u8, magic_buf[0..], MAGIC_V1);
+        if (!is_v2 and !is_v1) {
             return error.InvalidNetwork;
         }
 
         const version = try readInt(u16, &reader.interface);
-        if (version != FORMAT_VERSION) {
-            return error.UnsupportedVersion;
-        }
+        if (is_v2 and version != 2) return error.UnsupportedVersion;
+        if (is_v1 and version != 1) return error.UnsupportedVersion;
 
         const hidden_size_u16 = try readInt(u16, &reader.interface);
         const hidden_size: usize = @intCast(hidden_size_u16);
         if (hidden_size == 0) return error.InvalidNetwork;
         if (hidden_size > MAX_HIDDEN_SIZE) return error.NetworkTooLarge;
+
+        // V2 has activation_type byte; V1 defaults to ReLU (0)
+        const activation_type: u8 = if (is_v2)
+            try readInt(u8, &reader.interface)
+        else
+            0;
 
         const output_bias = try readInt(i32, &reader.interface);
 
@@ -99,6 +109,7 @@ pub const Network = struct {
         return Network{
             .allocator = allocator,
             .hidden_size = hidden_size_u16,
+            .activation_type = activation_type,
             .biases = biases,
             .input_weights = input_weights,
             .output_weights = output_weights,
@@ -287,9 +298,9 @@ pub fn evaluateFromAccumulators(
     net: *const Network,
     acc: *const AccumulatorPair,
     stm_is_white: bool,
-    use_screlu: bool,
 ) i32 {
     const hidden_size: usize = @intCast(net.hidden_size);
+    const use_screlu = net.activation_type == 1;
     var sum: i64 = 0;
 
     for (0..hidden_size) |h| {
@@ -319,8 +330,8 @@ pub fn evaluateFromAccumulators(
 
 /// Returns score from the side-to-move perspective, same convention as classical eval.
 /// This is the full-recompute path (non-incremental). Kept for fallback/gensfen use.
-pub fn evaluate(net: *const Network, b: *Board, use_screlu: bool) i32 {
+pub fn evaluate(net: *const Network, b: *Board) i32 {
     const acc = initAccumulators(net, b);
     const stm_is_white = b.board.move == .white;
-    return evaluateFromAccumulators(net, &acc, stm_is_white, use_screlu);
+    return evaluateFromAccumulators(net, &acc, stm_is_white);
 }

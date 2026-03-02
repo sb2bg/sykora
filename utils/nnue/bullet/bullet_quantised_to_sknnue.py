@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Bullet simple quantised.bin -> Sykora SYKNNUE1.
+"""Convert Bullet simple quantised.bin -> Sykora SYKNNUE2.
 
 Supports the common Bullet save format from `examples/simple.rs` / `1_simple.rs`:
   l0w (i16, QA) | l0b (i16, QA) | l1w (i16, QB) | l1b (i16, QA*QB) | padding
@@ -13,9 +13,9 @@ from typing import Optional
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert Bullet quantised.bin to SYKNNUE1.")
+    parser = argparse.ArgumentParser(description="Convert Bullet quantised.bin to SYKNNUE2.")
     parser.add_argument("--input", required=True, help="Path to Bullet quantised.bin")
-    parser.add_argument("--output-net", required=True, help="Output SYKNNUE1 .sknnue path")
+    parser.add_argument("--output-net", required=True, help="Output SYKNNUE2 .sknnue path")
     parser.add_argument(
         "--hidden-size",
         type=int,
@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
         "--strict-padding",
         action="store_true",
         help="Require all trailing bytes to be Bullet's known padding pattern",
+    )
+    parser.add_argument(
+        "--activation",
+        choices=["relu", "screlu"],
+        default="screlu",
+        help="Activation type to embed in net file (default: screlu)",
     )
     return parser.parse_args()
 
@@ -118,6 +124,8 @@ def main() -> int:
 
     from common import write_syk_nnue  # noqa: E402
 
+    activation_type = 1 if args.activation == "screlu" else 0
+
     out_path = Path(args.output_net)
     write_syk_nnue(
         out_path,
@@ -126,6 +134,7 @@ def main() -> int:
         input_weights_i16=input_weights.astype(np.int16).tolist(),
         output_weights_i16=output_weights.astype(np.int16).tolist(),
         output_bias_i32=output_bias_i16,
+        activation_type=activation_type,
     )
 
     print(f"Input: {in_path}")

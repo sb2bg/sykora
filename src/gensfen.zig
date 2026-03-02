@@ -233,7 +233,6 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 null,
                 0,
                 100,
-                false,
             );
             engine.uci_output = null;
             if (hash_count > 0) {

@@ -190,7 +190,6 @@ pub const SearchEngine = struct {
     nnue_net: ?*const nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
-    nnue_screlu: bool,
     // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
     acc_stack: ?[]nnue.AccumulatorPair,
     acc_ply: u32,
@@ -206,7 +205,6 @@ pub const SearchEngine = struct {
         nnue_net: ?*const nnue.Network,
         nnue_blend: i32,
         nnue_scale: i32,
-        nnue_screlu: bool,
     ) Self {
         return Self{
             .board = board_ptr,
@@ -229,7 +227,6 @@ pub const SearchEngine = struct {
             .nnue_net = nnue_net,
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
-            .nnue_screlu = nnue_screlu,
             .acc_stack = null,
             .acc_ply = 0,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
@@ -320,10 +317,9 @@ pub const SearchEngine = struct {
                         net,
                         &stack[self.acc_ply],
                         self.board.board.move == .white,
-                        self.nnue_screlu,
                     )
                 else
-                    nnue.evaluate(net, self.board, self.nnue_screlu);
+                    nnue.evaluate(net, self.board);
                 const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
                     score = nn;

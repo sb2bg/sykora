@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a float-domain NPZ checkpoint into Sykora SYKNNUE1 format.
+"""Convert a float-domain NPZ checkpoint into Sykora SYKNNUE2 format.
 
 Expected arrays in NPZ:
 - input_weights: shape [768, hidden]
@@ -24,7 +24,7 @@ from common import INPUT_SIZE, QA, QB, write_syk_nnue  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export NPZ checkpoint to SYKNNUE1 net.")
+    parser = argparse.ArgumentParser(description="Export NPZ checkpoint to SYKNNUE2 net.")
     parser.add_argument("--input", required=True, help="Input .npz checkpoint")
     parser.add_argument("--output-net", required=True, help="Output .sknnue path")
     parser.add_argument(
@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
         "--output-weights-key", default="output_weights", help="NPZ key for output weights"
     )
     parser.add_argument("--output-bias-key", default="output_bias", help="NPZ key for output bias")
+    parser.add_argument(
+        "--activation",
+        choices=["relu", "screlu"],
+        default="screlu",
+        help="Activation type to embed in net file (default: screlu)",
+    )
     return parser.parse_args()
 
 
@@ -106,6 +112,8 @@ def main() -> int:
     ).astype(np.int16)
     output_bias_i32 = int(round(output_bias * float(QA * QB)))
 
+    activation_type = 1 if args.activation == "screlu" else 0
+
     out_path = Path(args.output_net)
     write_syk_nnue(
         out_path,
@@ -114,6 +122,7 @@ def main() -> int:
         input_weights_i16=input_weights_i16.tolist(),
         output_weights_i16=output_weights_i16.tolist(),
         output_bias_i32=output_bias_i32,
+        activation_type=activation_type,
     )
 
     print(f"Input: {in_path}")

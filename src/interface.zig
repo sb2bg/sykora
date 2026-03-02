@@ -38,7 +38,6 @@ pub const Uci = struct {
     nnue_network: ?nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
-    nnue_screlu: bool,
     position_hash_history: [512]u64,
     position_hash_count: usize,
     tt: TranspositionTable,
@@ -77,9 +76,8 @@ pub const Uci = struct {
             .use_nnue = false,
             .eval_file_path = null,
             .nnue_network = null,
-            .nnue_blend = 2,
+            .nnue_blend = 100,
             .nnue_scale = 100,
-            .nnue_screlu = false,
             .position_hash_history = undefined,
             .position_hash_count = 0,
             .tt = tt,
@@ -116,7 +114,7 @@ pub const Uci = struct {
         try uci_ptr.options.items.append(allocator, Option{
             .name = "NnueBlend",
             .type = .spin,
-            .default_value = "2",
+            .default_value = "100",
             .min_value = 0,
             .max_value = 100,
             .on_changed = handleNnueBlendChange,
@@ -129,13 +127,6 @@ pub const Uci = struct {
             .min_value = 10,
             .max_value = 400,
             .on_changed = handleNnueScaleChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "NnueSCReLU",
-            .type = .check,
-            .default_value = "false",
-            .on_changed = handleNnueScReluChange,
             .context = uci_ptr,
         });
         try uci_ptr.options.items.append(allocator, Option{
@@ -426,7 +417,7 @@ pub const Uci = struct {
         // Spawn helper threads for Lazy SMP (num_threads - 1 helpers)
         const num_helpers = self.num_threads - 1;
         for (0..num_helpers) |i| {
-            self.helper_threads[i] = std.Thread.spawn(.{}, helperSearch, .{
+            self.helper_threads[i] = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, helperSearch, .{
                 self,
                 i,
                 go_opts,
@@ -447,7 +438,6 @@ pub const Uci = struct {
             net_ptr,
             self.nnue_blend,
             self.nnue_scale,
-            self.nnue_screlu,
         );
 
         search_engine.uci_output = self.stdout;
@@ -512,7 +502,6 @@ pub const Uci = struct {
             net_ptr,
             self.nnue_blend,
             self.nnue_scale,
-            self.nnue_screlu,
         );
 
         // No UCI output from helpers
@@ -523,16 +512,11 @@ pub const Uci = struct {
             search_engine.setGameHistory(&.{});
         }
 
-        // Depth stagger: even-indexed helpers start at depth 2
-        const start_depth: u32 = if (idx % 2 == 0) 2 else 1;
+        // Depth stagger: cycle through start depths 1-4 for tree diversity
+        const start_depth: u32 = 1 + @as(u32, @intCast(idx % 4));
 
         const search_opts = SearchOptions{
-            .infinite = go_opts.infinite orelse false,
-            .move_time = go_opts.move_time,
-            .wtime = go_opts.wtime,
-            .btime = go_opts.btime,
-            .winc = go_opts.winc,
-            .binc = go_opts.binc,
+            .infinite = true,
             .depth = go_opts.depth,
             .start_depth = start_depth,
         };
@@ -777,18 +761,6 @@ pub const Uci = struct {
         }
         self.hash_size_mb = parsed;
         self.tt.resize(parsed) catch return UciError.OutOfMemory;
-    }
-
-    fn handleNnueScReluChange(self: *Self, value: []const u8) UciError!void {
-        if (std.mem.eql(u8, value, "true")) {
-            self.nnue_screlu = true;
-            return;
-        }
-        if (std.mem.eql(u8, value, "false")) {
-            self.nnue_screlu = false;
-            return;
-        }
-        return UciError.InvalidArgument;
     }
 
     fn resetPositionHistory(self: *Self) void {
