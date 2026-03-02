@@ -3,6 +3,8 @@ const board = @import("bitboard.zig");
 const Board = board.Board;
 const piece = @import("piece.zig");
 
+pub const EMBEDDED_NET = @embedFile("net.sknnue");
+
 pub const INPUT_SIZE: usize = 768; // 2 colors * 6 piece types * 64 squares
 pub const MAX_HIDDEN_SIZE: usize = 4096;
 pub const QA: i32 = 255;
@@ -48,6 +50,64 @@ pub const Network = struct {
         self.allocator.free(self.biases);
         self.allocator.free(self.input_weights);
         self.allocator.free(self.output_weights);
+    }
+
+    pub fn loadFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
+        if (data.len < 8) return error.InvalidNetwork;
+
+        const is_v2 = std.mem.eql(u8, data[0..8], MAGIC_V2);
+        const is_v1 = std.mem.eql(u8, data[0..8], MAGIC_V1);
+        if (!is_v2 and !is_v1) return error.InvalidNetwork;
+
+        var pos: usize = 8;
+
+        const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        if (is_v2 and version != 2) return error.UnsupportedVersion;
+        if (is_v1 and version != 1) return error.UnsupportedVersion;
+
+        const hidden_size_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        const hidden_size: usize = @intCast(hidden_size_u16);
+        if (hidden_size == 0) return error.InvalidNetwork;
+        if (hidden_size > MAX_HIDDEN_SIZE) return error.NetworkTooLarge;
+
+        const activation_type: u8 = if (is_v2) blk: {
+            if (pos >= data.len) return error.InvalidNetwork;
+            const v = data[pos];
+            pos += 1;
+            break :blk v;
+        } else 0;
+
+        const output_bias = readBytesInt(i32, data, &pos) orelse return error.InvalidNetwork;
+
+        const biases = try allocator.alloc(i16, hidden_size);
+        errdefer allocator.free(biases);
+        for (biases) |*v| {
+            v.* = readBytesInt(i16, data, &pos) orelse return error.InvalidNetwork;
+        }
+
+        const input_len = INPUT_SIZE * hidden_size;
+        const input_weights = try allocator.alloc(i16, input_len);
+        errdefer allocator.free(input_weights);
+        for (input_weights) |*w| {
+            w.* = readBytesInt(i16, data, &pos) orelse return error.InvalidNetwork;
+        }
+
+        const output_len = 2 * hidden_size;
+        const output_weights = try allocator.alloc(i16, output_len);
+        errdefer allocator.free(output_weights);
+        for (output_weights) |*w| {
+            w.* = readBytesInt(i16, data, &pos) orelse return error.InvalidNetwork;
+        }
+
+        return Network{
+            .allocator = allocator,
+            .hidden_size = hidden_size_u16,
+            .activation_type = activation_type,
+            .biases = biases,
+            .input_weights = input_weights,
+            .output_weights = output_weights,
+            .output_bias = output_bias,
+        };
     }
 
     pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) LoadError!Network {
@@ -135,6 +195,14 @@ fn mapReadError(err: anyerror) LoadError {
         error.EndOfStream => error.InvalidNetwork,
         else => error.IOError,
     };
+}
+
+fn readBytesInt(comptime T: type, data: []const u8, pos: *usize) ?T {
+    const size = @sizeOf(T);
+    if (pos.* + size > data.len) return null;
+    const bytes = data[pos.*..][0..size];
+    pos.* += size;
+    return std.mem.readInt(T, bytes, .little);
 }
 
 fn readInt(comptime T: type, reader: *std.Io.Reader) LoadError!T {

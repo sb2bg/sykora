@@ -73,7 +73,7 @@ pub const Uci = struct {
             .search_thread = null,
             .best_move = board.Move.init(0, 0, null), // null move
             .log_file = null,
-            .use_nnue = false,
+            .use_nnue = true,
             .eval_file_path = null,
             .nnue_network = null,
             .nnue_blend = 100,
@@ -89,6 +89,12 @@ pub const Uci = struct {
 
         uci_ptr.resetPositionHistory();
 
+        // Load embedded NNUE net
+        uci_ptr.nnue_network = nnue.Network.loadFromBytes(allocator, nnue.EMBEDDED_NET) catch null;
+        if (uci_ptr.nnue_network == null) {
+            uci_ptr.use_nnue = false;
+        }
+
         // Add logging option
         try uci_ptr.options.items.append(allocator, Option{
             .name = "Debug Log File",
@@ -100,7 +106,7 @@ pub const Uci = struct {
         try uci_ptr.options.items.append(allocator, Option{
             .name = "UseNNUE",
             .type = .check,
-            .default_value = "false",
+            .default_value = "true",
             .on_changed = handleUseNnueChange,
             .context = uci_ptr,
         });
