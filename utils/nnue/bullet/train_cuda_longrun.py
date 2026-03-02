@@ -17,7 +17,7 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch Bullet NNUE training runs.")
-    parser.add_argument("--dataset", required=True, help="Input BulletFormat .data dataset")
+    parser.add_argument("--dataset", required=True, nargs="+", help="Input dataset file(s) (.data or .binpack)")
     parser.add_argument("--bullet-repo", default="nnue/bullet_repo", help="Path to Bullet repository")
     parser.add_argument("--output-root", default="nnue/models/bullet", help="Training run root")
     parser.add_argument("--run-id", default="", help="Run identifier (default: utc timestamp)")
@@ -37,6 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-rate", type=int, default=1, help="Save every N superbatches")
     parser.add_argument("--threads", type=int, default=8, help="Bullet training/data threads")
 
+    # Data format
+    parser.add_argument(
+        "--data-format",
+        choices=["bullet", "binpack"],
+        default="bullet",
+        help="Dataset format: bullet (.data) or binpack (.binpack) (default: bullet)",
+    )
+    parser.add_argument("--binpack-buffer-mb", type=int, default=1024, help="SfBinpackLoader buffer size in MB")
+    parser.add_argument("--binpack-threads", type=int, default=4, help="SfBinpackLoader decompression threads")
+
     parser.add_argument(
         "--resume",
         default="",
@@ -49,10 +59,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    dataset = Path(args.dataset)
-    if not dataset.is_file():
-        print(f"Dataset not found: {dataset}", file=sys.stderr)
-        return 1
+    datasets = [Path(d) for d in args.dataset]
+    for dataset in datasets:
+        if not dataset.is_file():
+            print(f"Dataset not found: {dataset}", file=sys.stderr)
+            return 1
+
+    # Auto-detect format from file extension if not explicitly set
+    data_format = args.data_format
+    if data_format == "bullet" and any(str(d).endswith(".binpack") for d in datasets):
+        data_format = "binpack"
+        print("Auto-detected binpack format from file extension")
+
+    # SfBinpackLoader takes semicolon-separated paths
+    dataset_str = ";".join(str(d.resolve()) for d in datasets)
 
     bullet_repo = Path(args.bullet_repo)
     if not bullet_repo.is_dir():
@@ -83,7 +103,7 @@ def main() -> int:
     env = os.environ.copy()
     env.update(
         {
-            "SYK_DATASET": str(dataset.resolve()),
+            "SYK_DATASET": dataset_str,
             "SYK_HIDDEN": str(args.hidden),
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
@@ -94,6 +114,9 @@ def main() -> int:
             "SYK_THREADS": str(args.threads),
             "SYK_OUTPUT_DIR": str(ckpt_dir.resolve()),
             "SYK_NET_ID": run_id,
+            "SYK_DATA_FORMAT": data_format,
+            "SYK_BINPACK_BUFFER_MB": str(args.binpack_buffer_mb),
+            "SYK_BINPACK_THREADS": str(args.binpack_threads),
         }
     )
     if args.resume:
@@ -105,7 +128,8 @@ def main() -> int:
         "run_id": run_id,
         "generated_at_utc": datetime.datetime.now(datetime.UTC).isoformat(),
         "bullet_repo": str(bullet_repo.resolve()),
-        "dataset": str(dataset.resolve()),
+        "datasets": [str(d.resolve()) for d in datasets],
+        "data_format": data_format,
         "output_dir": str(run_dir.resolve()),
         "checkpoint_dir": str(ckpt_dir.resolve()),
         "command": cmd,
@@ -121,6 +145,9 @@ def main() -> int:
             "SYK_THREADS": env["SYK_THREADS"],
             "SYK_OUTPUT_DIR": env["SYK_OUTPUT_DIR"],
             "SYK_NET_ID": env["SYK_NET_ID"],
+            "SYK_DATA_FORMAT": env["SYK_DATA_FORMAT"],
+            "SYK_BINPACK_BUFFER_MB": env["SYK_BINPACK_BUFFER_MB"],
+            "SYK_BINPACK_THREADS": env["SYK_BINPACK_THREADS"],
             "SYK_RESUME": env.get("SYK_RESUME", ""),
         },
     }
@@ -130,7 +157,9 @@ def main() -> int:
 
     print(f"Run ID: {run_id}")
     print(f"Run dir: {run_dir}")
-    print(f"Dataset: {dataset}")
+    print(f"Data format: {data_format}")
+    for d in datasets:
+        print(f"  Dataset: {d}")
     print(f"Metadata: {meta_path}")
     print("$", " ".join(cmd))
 
