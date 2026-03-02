@@ -15,3 +15,5 @@ zig-cache/
 /benchmark_games/
 old_versions/
 *.pyc
+.DS_Store
+data/nnue/*.data
