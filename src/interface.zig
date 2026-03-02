@@ -18,7 +18,7 @@ const nnue = @import("nnue.zig");
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
-const version = "0.2.0";
+const version = "0.2.1";
 
 pub const Uci = struct {
     const Self = @This();
