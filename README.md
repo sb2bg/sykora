@@ -395,44 +395,6 @@ python utils/nnue/bullet/gate_checkpoints.py \
 
 Full process spec: `specs/nnue_training_spec.md`.
 
-## Restructuring Roadmap
-
-The project has outgrown a few single large files. A staged refactor is planned to improve maintainability while keeping behavior stable and benchmark-driven.
-
-### Phase 1 (Search split)
-
-- Split `src/search.zig` into focused modules under `src/search/`:
-  - `core.zig` (iterative deepening, alpha-beta entry points)
-  - `move_picker.zig`
-  - `tt.zig`
-  - `history.zig` (killer/history/counter tables)
-  - `quiescence.zig`
-  - `see.zig`
-  - `repetition.zig`
-
-### Phase 2 (Board/movegen split)
-
-- Split `src/bitboard.zig` into modules under `src/board/`:
-  - `state.zig` (bitboard state + helpers)
-  - `attacks.zig` (tables/magic attacks)
-  - `movegen.zig`
-  - `make_unmake.zig`
-  - `perft.zig`
-  - `fen_io.zig`
-
-### Phase 3 (UCI/interface split)
-
-- Split `src/interface.zig` into:
-  - UCI loop and command dispatch
-  - option handlers
-  - search thread orchestration / SMP glue
-
-### Safety Rules During Refactor
-
-- Preserve current UCI behavior and option names.
-- Require perft suite pass after each phase.
-- Require STS/self-play sanity checks before landing large refactors.
-
 ## Documentation
 
 - `engine-interface.md` - Detailed documentation of the engine interface
