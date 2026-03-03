@@ -476,59 +476,54 @@ fn evaluateWithL2(
     // L2 weights are stored as [2 * hidden_size * l2_size] row-major:
     //   for each L2 neuron j: weights[j * 2*hidden_size .. (j+1) * 2*hidden_size]
 
-    // L2 forward pass: for each L2 neuron, dot product with L1 activations
-    var l2_acc: [256]i64 = undefined; // max l2_size we'll support
+    // Precompute L1 SCReLU activations: [stm | nstm], length 2 * hidden_size
+    // For SCReLU: store clamped^2 (QA^2 scale). For ReLU: store clamped (QA scale).
+    // Bullet stores affine(2*hl_size, l2_size) weights as [input, output] = [2*hl_size, l2_size]
+    var l1_acts: [2 * MAX_HIDDEN_SIZE]i32 = undefined;
+    for (0..hidden_size) |h| {
+        const clamped = clampToQa(if (stm_is_white) acc.white[h] else acc.black[h]);
+        l1_acts[h] = if (use_screlu) clamped * clamped else clamped;
+    }
+    for (0..hidden_size) |h| {
+        const clamped = clampToQa(if (stm_is_white) acc.black[h] else acc.white[h]);
+        l1_acts[hidden_size + h] = if (use_screlu) clamped * clamped else clamped;
+    }
+
+    // L2 matmul
+    var l2_acc: [256]i32 = undefined;
+    const total_inputs = 2 * hidden_size;
     for (0..l2_size) |j| {
         var dot: i64 = 0;
-        const w_base = j * 2 * hidden_size;
-
-        // STM half
-        for (0..hidden_size) |h| {
-            const raw = if (stm_is_white) acc.white[h] else acc.black[h];
-            const activated = clampToQa(raw);
-            const l1_val: i64 = if (use_screlu) @as(i64, activated) * @as(i64, activated) else @as(i64, activated);
-            dot += l1_val * @as(i64, l2_weights[w_base + h]);
+        for (0..total_inputs) |i| {
+            dot += @as(i64, l1_acts[i]) * @as(i64, l2_weights[i * l2_size + j]);
         }
-
-        // NSTM half
-        for (0..hidden_size) |h| {
-            const raw = if (stm_is_white) acc.black[h] else acc.white[h];
-            const activated = clampToQa(raw);
-            const l1_val: i64 = if (use_screlu) @as(i64, activated) * @as(i64, activated) else @as(i64, activated);
-            dot += l1_val * @as(i64, l2_weights[w_base + hidden_size + h]);
-        }
-
-        // L1 activations are in QA (or QA^2 for SCReLU); weights are in QB=64
-        // For SCReLU: dot is QA^2 * QB scale, divide by QA to get QA * QB
+        // SCReLU: dot at QA^2 * QB, /QA -> QA*QB. Add bias (QA) * QB. /QB -> QA.
         if (use_screlu) {
             dot = @divTrunc(dot, QA);
         }
-        // Now dot is QA * QB scale; add bias (also QA scale, but we need QA * QB? No.)
-        // Actually: L2 biases are quantized at QA=255 scale in the trainer.
-        // After the division, dot is at QA*QB scale. Bias is at QA scale.
-        // We need them at the same scale. Multiply bias by QB.
         dot += @as(i64, l2_biases[j]) * QB;
-        l2_acc[j] = dot;
+        l2_acc[j] = @intCast(@divTrunc(dot, QB));
     }
 
-    // L2 activation (SCReLU) + output layer
-    // L2 activations are at QA*QB scale. Clamp to [0, QA*QB] for SCReLU.
+    // L2 SCReLU + output layer (same pattern as single-layer)
+    // l2_acc is at QA scale. Clamp to [0, QA], square -> QA^2.
+    // Output weights at QB -> QA^2 * QB per term.
     var sum: i64 = 0;
-    const qa_qb: i64 = QA * QB;
     for (0..l2_size) |j| {
-        var v = l2_acc[j];
-        // Clamp to [0, QA*QB]
-        if (v < 0) v = 0;
-        if (v > qa_qb) v = qa_qb;
-        // SCReLU: v * v / (QA*QB), then multiply by output weight
-        // Output weights quantized at QB=64
-        sum += @divTrunc(v * v * @as(i64, net.output_weights[j]), qa_qb);
+        const activated = clampToQa(l2_acc[j]);
+        if (use_screlu) {
+            sum += @as(i64, activated) * @as(i64, activated) * @as(i64, net.output_weights[j]);
+        } else {
+            sum += @as(i64, activated) * @as(i64, net.output_weights[j]);
+        }
     }
 
-    // Output bias is at QA*QB scale
+    if (use_screlu) {
+        sum = @divTrunc(sum, QA);
+    }
     sum += net.output_bias;
 
-    const score = @divTrunc(sum * SCALE, qa_qb);
+    const score = @divTrunc(sum * SCALE, QA * QB);
     return @intCast(score);
 }
 
