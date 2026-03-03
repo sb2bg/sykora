@@ -6,7 +6,8 @@ const piece = @import("piece.zig");
 pub const EMBEDDED_NET = @embedFile("net.sknnue");
 
 pub const INPUT_SIZE: usize = 768; // 2 colors * 6 piece types * 64 squares
-pub const MAX_HIDDEN_SIZE: usize = 4096;
+pub const MAX_HIDDEN_SIZE: usize = 512;
+pub const MAX_L2_SIZE: usize = 256;
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
 pub const SCALE: i32 = 400;
@@ -82,6 +83,7 @@ pub const Network = struct {
         else
             0;
         const l2_size: usize = @intCast(l2_size_u16);
+        if (l2_size > MAX_L2_SIZE) return error.NetworkTooLarge;
 
         if (pos >= data.len) return error.InvalidNetwork;
         const activation_type: u8 = data[pos];
@@ -176,6 +178,7 @@ pub const Network = struct {
         else
             0;
         const l2_size: usize = @intCast(l2_size_u16);
+        if (l2_size > MAX_L2_SIZE) return error.NetworkTooLarge;
 
         const activation_type: u8 = try readInt(u8, &reader.interface);
 
@@ -471,14 +474,9 @@ fn evaluateWithL2(
     const l2_weights = net.l2_weights.?;
     const l2_biases = net.l2_biases.?;
 
-    // Compute L1 activations (SCReLU/ReLU on accumulator values)
-    // Input to L2 is [stm_activations | nstm_activations], length = 2 * hidden_size
-    // L2 weights are stored as [2 * hidden_size * l2_size] row-major:
-    //   for each L2 neuron j: weights[j * 2*hidden_size .. (j+1) * 2*hidden_size]
-
-    // Precompute L1 SCReLU activations: [stm | nstm], length 2 * hidden_size
+    // Precompute L1 activations: [stm | nstm], length 2 * hidden_size
     // For SCReLU: store clamped^2 (QA^2 scale). For ReLU: store clamped (QA scale).
-    // Bullet stores affine(2*hl_size, l2_size) weights as [input, output] = [2*hl_size, l2_size]
+    // L2 weights are stored as [input, output] = [2*hidden_size, l2_size] (input-major)
     var l1_acts: [2 * MAX_HIDDEN_SIZE]i32 = undefined;
     for (0..hidden_size) |h| {
         const clamped = clampToQa(if (stm_is_white) acc.white[h] else acc.black[h]);
@@ -490,7 +488,7 @@ fn evaluateWithL2(
     }
 
     // L2 matmul
-    var l2_acc: [256]i32 = undefined;
+    var l2_acc: [MAX_L2_SIZE]i32 = undefined;
     const total_inputs = 2 * hidden_size;
     for (0..l2_size) |j| {
         var dot: i64 = 0;
