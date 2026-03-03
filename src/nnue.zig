@@ -11,9 +11,9 @@ pub const QA: i32 = 255;
 pub const QB: i32 = 64;
 pub const SCALE: i32 = 400;
 
+const MAGIC_V3 = "SYKNNUE3";
 const MAGIC_V2 = "SYKNNUE2";
-const MAGIC_V1 = "SYKNNUE1";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 
 pub const LoadError = error{
     OutOfMemory,
@@ -28,54 +28,64 @@ pub const LoadError = error{
     NetworkTooLarge,
 };
 
-/// Simple NNUE format used by Sykora (little-endian):
-/// - 8 bytes  magic: "SYKNNUE2"
-/// - u16      version: 2
-/// - u16      hidden_size
-/// - u8       activation_type (0=ReLU, 1=SCReLU)
-/// - i32      output_bias
-/// - i16[hidden_size]                accumulator biases
-/// - i16[INPUT_SIZE * hidden_size]   input -> accumulator weights
-/// - i16[2 * hidden_size]            output weights (stm half, nstm half)
+/// NNUE format used by Sykora (little-endian).
+///
+/// V2 (single layer):
+///   magic "SYKNNUE2", version 2, hidden_size, activation_type, output_bias,
+///   biases[hidden_size], input_weights[768*hidden_size], output_weights[2*hidden_size]
+///
+/// V3 (two layers):
+///   magic "SYKNNUE3", version 3, hidden_size, l2_size, activation_type, output_bias,
+///   biases[hidden_size], input_weights[768*hidden_size],
+///   l2_weights[2*hidden_size*l2_size], l2_biases[l2_size], output_weights[l2_size]
 pub const Network = struct {
     allocator: std.mem.Allocator,
     hidden_size: u16,
+    l2_size: u16, // 0 = single layer (V2 compat)
     activation_type: u8, // 0 = ReLU, 1 = SCReLU
     biases: []i16,
     input_weights: []i16,
-    output_weights: []i16,
+    l2_weights: ?[]i16, // L1 concat -> L2, shape [2 * hidden_size * l2_size]
+    l2_biases: ?[]i16, // L2 biases, shape [l2_size]
+    output_weights: []i16, // shape [2*hidden_size] if l2_size==0, [l2_size] if l2_size>0
     output_bias: i32,
 
     pub fn deinit(self: *Network) void {
         self.allocator.free(self.biases);
         self.allocator.free(self.input_weights);
+        if (self.l2_weights) |w| self.allocator.free(w);
+        if (self.l2_biases) |b| self.allocator.free(b);
         self.allocator.free(self.output_weights);
     }
 
     pub fn loadFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
         if (data.len < 8) return error.InvalidNetwork;
 
+        const is_v3 = std.mem.eql(u8, data[0..8], MAGIC_V3);
         const is_v2 = std.mem.eql(u8, data[0..8], MAGIC_V2);
-        const is_v1 = std.mem.eql(u8, data[0..8], MAGIC_V1);
-        if (!is_v2 and !is_v1) return error.InvalidNetwork;
+        if (!is_v3 and !is_v2) return error.InvalidNetwork;
 
         var pos: usize = 8;
 
         const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        if (is_v3 and version != 3) return error.UnsupportedVersion;
         if (is_v2 and version != 2) return error.UnsupportedVersion;
-        if (is_v1 and version != 1) return error.UnsupportedVersion;
 
         const hidden_size_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
         const hidden_size: usize = @intCast(hidden_size_u16);
         if (hidden_size == 0) return error.InvalidNetwork;
         if (hidden_size > MAX_HIDDEN_SIZE) return error.NetworkTooLarge;
 
-        const activation_type: u8 = if (is_v2) blk: {
-            if (pos >= data.len) return error.InvalidNetwork;
-            const v = data[pos];
-            pos += 1;
-            break :blk v;
-        } else 0;
+        // V3 has l2_size after hidden_size
+        const l2_size_u16: u16 = if (is_v3)
+            readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork
+        else
+            0;
+        const l2_size: usize = @intCast(l2_size_u16);
+
+        if (pos >= data.len) return error.InvalidNetwork;
+        const activation_type: u8 = data[pos];
+        pos += 1;
 
         const output_bias = readBytesInt(i32, data, &pos) orelse return error.InvalidNetwork;
 
@@ -92,7 +102,26 @@ pub const Network = struct {
             w.* = readBytesInt(i16, data, &pos) orelse return error.InvalidNetwork;
         }
 
-        const output_len = 2 * hidden_size;
+        // L2 weights/biases (V3 only)
+        var l2_weights: ?[]i16 = null;
+        var l2_biases: ?[]i16 = null;
+        if (l2_size > 0) {
+            const l2w = try allocator.alloc(i16, 2 * hidden_size * l2_size);
+            errdefer allocator.free(l2w);
+            for (l2w) |*w| {
+                w.* = readBytesInt(i16, data, &pos) orelse return error.InvalidNetwork;
+            }
+            l2_weights = l2w;
+
+            const l2b = try allocator.alloc(i16, l2_size);
+            errdefer allocator.free(l2b);
+            for (l2b) |*v| {
+                v.* = readBytesInt(i16, data, &pos) orelse return error.InvalidNetwork;
+            }
+            l2_biases = l2b;
+        }
+
+        const output_len: usize = if (l2_size > 0) l2_size else 2 * hidden_size;
         const output_weights = try allocator.alloc(i16, output_len);
         errdefer allocator.free(output_weights);
         for (output_weights) |*w| {
@@ -102,9 +131,12 @@ pub const Network = struct {
         return Network{
             .allocator = allocator,
             .hidden_size = hidden_size_u16,
+            .l2_size = l2_size_u16,
             .activation_type = activation_type,
             .biases = biases,
             .input_weights = input_weights,
+            .l2_weights = l2_weights,
+            .l2_biases = l2_biases,
             .output_weights = output_weights,
             .output_bias = output_bias,
         };
@@ -123,26 +155,29 @@ pub const Network = struct {
             return mapReadError(err);
         };
 
+        const is_v3 = std.mem.eql(u8, magic_buf[0..], MAGIC_V3);
         const is_v2 = std.mem.eql(u8, magic_buf[0..], MAGIC_V2);
-        const is_v1 = std.mem.eql(u8, magic_buf[0..], MAGIC_V1);
-        if (!is_v2 and !is_v1) {
+        if (!is_v3 and !is_v2) {
             return error.InvalidNetwork;
         }
 
         const version = try readInt(u16, &reader.interface);
+        if (is_v3 and version != 3) return error.UnsupportedVersion;
         if (is_v2 and version != 2) return error.UnsupportedVersion;
-        if (is_v1 and version != 1) return error.UnsupportedVersion;
 
         const hidden_size_u16 = try readInt(u16, &reader.interface);
         const hidden_size: usize = @intCast(hidden_size_u16);
         if (hidden_size == 0) return error.InvalidNetwork;
         if (hidden_size > MAX_HIDDEN_SIZE) return error.NetworkTooLarge;
 
-        // V2 has activation_type byte; V1 defaults to ReLU (0)
-        const activation_type: u8 = if (is_v2)
-            try readInt(u8, &reader.interface)
+        // V3 has l2_size after hidden_size
+        const l2_size_u16: u16 = if (is_v3)
+            try readInt(u16, &reader.interface)
         else
             0;
+        const l2_size: usize = @intCast(l2_size_u16);
+
+        const activation_type: u8 = try readInt(u8, &reader.interface);
 
         const output_bias = try readInt(i32, &reader.interface);
 
@@ -159,7 +194,26 @@ pub const Network = struct {
             w.* = try readInt(i16, &reader.interface);
         }
 
-        const output_len = 2 * hidden_size;
+        // L2 weights/biases (V3 only)
+        var l2_weights: ?[]i16 = null;
+        var l2_biases: ?[]i16 = null;
+        if (l2_size > 0) {
+            const l2w = try allocator.alloc(i16, 2 * hidden_size * l2_size);
+            errdefer allocator.free(l2w);
+            for (l2w) |*w| {
+                w.* = try readInt(i16, &reader.interface);
+            }
+            l2_weights = l2w;
+
+            const l2b = try allocator.alloc(i16, l2_size);
+            errdefer allocator.free(l2b);
+            for (l2b) |*v| {
+                v.* = try readInt(i16, &reader.interface);
+            }
+            l2_biases = l2b;
+        }
+
+        const output_len: usize = if (l2_size > 0) l2_size else 2 * hidden_size;
         const output_weights = try allocator.alloc(i16, output_len);
         errdefer allocator.free(output_weights);
         for (output_weights) |*w| {
@@ -169,9 +223,12 @@ pub const Network = struct {
         return Network{
             .allocator = allocator,
             .hidden_size = hidden_size_u16,
+            .l2_size = l2_size_u16,
             .activation_type = activation_type,
             .biases = biases,
             .input_weights = input_weights,
+            .l2_weights = l2_weights,
+            .l2_biases = l2_biases,
             .output_weights = output_weights,
             .output_bias = output_bias,
         };
@@ -368,7 +425,13 @@ pub fn evaluateFromAccumulators(
     stm_is_white: bool,
 ) i32 {
     const hidden_size: usize = @intCast(net.hidden_size);
+    const l2_size: usize = @intCast(net.l2_size);
     const use_screlu = net.activation_type == 1;
+
+    if (l2_size > 0) {
+        return evaluateWithL2(net, acc, stm_is_white, hidden_size, l2_size, use_screlu);
+    }
+
     var sum: i64 = 0;
 
     for (0..hidden_size) |h| {
@@ -393,6 +456,79 @@ pub fn evaluateFromAccumulators(
     sum += net.output_bias;
 
     const score = @divTrunc(sum * SCALE, QA * QB);
+    return @intCast(score);
+}
+
+/// Two-layer evaluation: L1 activations -> L2 forward -> output
+fn evaluateWithL2(
+    net: *const Network,
+    acc: *const AccumulatorPair,
+    stm_is_white: bool,
+    hidden_size: usize,
+    l2_size: usize,
+    use_screlu: bool,
+) i32 {
+    const l2_weights = net.l2_weights.?;
+    const l2_biases = net.l2_biases.?;
+
+    // Compute L1 activations (SCReLU/ReLU on accumulator values)
+    // Input to L2 is [stm_activations | nstm_activations], length = 2 * hidden_size
+    // L2 weights are stored as [2 * hidden_size * l2_size] row-major:
+    //   for each L2 neuron j: weights[j * 2*hidden_size .. (j+1) * 2*hidden_size]
+
+    // L2 forward pass: for each L2 neuron, dot product with L1 activations
+    var l2_acc: [256]i64 = undefined; // max l2_size we'll support
+    for (0..l2_size) |j| {
+        var dot: i64 = 0;
+        const w_base = j * 2 * hidden_size;
+
+        // STM half
+        for (0..hidden_size) |h| {
+            const raw = if (stm_is_white) acc.white[h] else acc.black[h];
+            const activated = clampToQa(raw);
+            const l1_val: i64 = if (use_screlu) @as(i64, activated) * @as(i64, activated) else @as(i64, activated);
+            dot += l1_val * @as(i64, l2_weights[w_base + h]);
+        }
+
+        // NSTM half
+        for (0..hidden_size) |h| {
+            const raw = if (stm_is_white) acc.black[h] else acc.white[h];
+            const activated = clampToQa(raw);
+            const l1_val: i64 = if (use_screlu) @as(i64, activated) * @as(i64, activated) else @as(i64, activated);
+            dot += l1_val * @as(i64, l2_weights[w_base + hidden_size + h]);
+        }
+
+        // L1 activations are in QA (or QA^2 for SCReLU); weights are in QB=64
+        // For SCReLU: dot is QA^2 * QB scale, divide by QA to get QA * QB
+        if (use_screlu) {
+            dot = @divTrunc(dot, QA);
+        }
+        // Now dot is QA * QB scale; add bias (also QA scale, but we need QA * QB? No.)
+        // Actually: L2 biases are quantized at QA=255 scale in the trainer.
+        // After the division, dot is at QA*QB scale. Bias is at QA scale.
+        // We need them at the same scale. Multiply bias by QB.
+        dot += @as(i64, l2_biases[j]) * QB;
+        l2_acc[j] = dot;
+    }
+
+    // L2 activation (SCReLU) + output layer
+    // L2 activations are at QA*QB scale. Clamp to [0, QA*QB] for SCReLU.
+    var sum: i64 = 0;
+    const qa_qb: i64 = QA * QB;
+    for (0..l2_size) |j| {
+        var v = l2_acc[j];
+        // Clamp to [0, QA*QB]
+        if (v < 0) v = 0;
+        if (v > qa_qb) v = qa_qb;
+        // SCReLU: v * v / (QA*QB), then multiply by output weight
+        // Output weights quantized at QB=64
+        sum += @divTrunc(v * v * @as(i64, net.output_weights[j]), qa_qb);
+    }
+
+    // Output bias is at QA*QB scale
+    sum += net.output_bias;
+
+    const score = @divTrunc(sum * SCALE, qa_qb);
     return @intCast(score);
 }
 

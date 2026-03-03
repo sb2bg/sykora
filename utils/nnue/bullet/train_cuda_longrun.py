@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument("--hidden", type=int, default=256, help="Hidden size for 1_simple")
+    parser.add_argument("--l2-size", type=int, default=0, help="L2 hidden size (0 = single layer, >0 = two layers)")
     parser.add_argument("--start-superbatch", type=int, default=1, help="Start superbatch")
     parser.add_argument("--end-superbatch", type=int, default=320, help="End superbatch")
     parser.add_argument("--lr-start", type=float, default=0.0010, help="Initial LR")
@@ -100,11 +101,14 @@ def main() -> int:
 
     final_lr = args.lr_final if args.lr_final > 0 else args.lr_start * (0.3**5)
 
+    l2_size = args.l2_size
+
     env = os.environ.copy()
     env.update(
         {
             "SYK_DATASET": dataset_str,
             "SYK_HIDDEN": str(args.hidden),
+            "SYK_L2_SIZE": str(l2_size),
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
             "SYK_START_SUPERBATCH": str(args.start_superbatch),
@@ -136,6 +140,7 @@ def main() -> int:
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],
             "SYK_HIDDEN": env["SYK_HIDDEN"],
+            "SYK_L2_SIZE": env["SYK_L2_SIZE"],
             "SYK_LR_START": env["SYK_LR_START"],
             "SYK_LR_FINAL": env["SYK_LR_FINAL"],
             "SYK_START_SUPERBATCH": env["SYK_START_SUPERBATCH"],

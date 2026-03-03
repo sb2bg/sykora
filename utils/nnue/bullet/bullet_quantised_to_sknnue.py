@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Convert Bullet simple quantised.bin -> Sykora SYKNNUE2.
+"""Convert Bullet simple quantised.bin -> Sykora SYKNNUE2/SYKNNUE3.
 
 Supports the common Bullet save format from `examples/simple.rs` / `1_simple.rs`:
-  l0w (i16, QA) | l0b (i16, QA) | l1w (i16, QB) | l1b (i16, QA*QB) | padding
+  Single layer: l0w (i16, QA) | l0b (i16, QA) | l1w (i16, QB) | l1b (i16, QA*QB) | padding
+  Two layers:   l0w | l0b | l1w (i16, QB) | l1b (i16, QA) | l2w (i16, QB) | l2b (i16, QA*QB) | padding
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ from typing import Optional
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert Bullet quantised.bin to SYKNNUE2.")
+    parser = argparse.ArgumentParser(description="Convert Bullet quantised.bin to SYKNNUE2/3.")
     parser.add_argument("--input", required=True, help="Path to Bullet quantised.bin")
-    parser.add_argument("--output-net", required=True, help="Output SYKNNUE2 .sknnue path")
+    parser.add_argument("--output-net", required=True, help="Output .sknnue path")
     parser.add_argument(
         "--hidden-size",
         type=int,
@@ -23,6 +24,12 @@ def parse_args() -> argparse.Namespace:
         help="Hidden size (0 = infer from file length)",
     )
     parser.add_argument("--input-size", type=int, default=768, help="Input feature size (default: 768)")
+    parser.add_argument(
+        "--l2-size",
+        type=int,
+        default=0,
+        help="L2 hidden size (0 = single layer / SYKNNUE2, >0 = two layers / SYKNNUE3)",
+    )
     parser.add_argument(
         "--strict-padding",
         action="store_true",
@@ -57,6 +64,17 @@ def infer_hidden_size(total_len: int, input_size: int) -> Optional[tuple[int, in
     return None
 
 
+def compute_payload_len(hidden: int, input_size: int, l2_size: int) -> int:
+    """Compute expected payload length in bytes for given architecture."""
+    if l2_size > 0:
+        # l0w + l0b + l1w + l1b + l2w + l2b
+        n_i16 = (input_size * hidden) + hidden + (2 * hidden * l2_size) + l2_size + l2_size + 1
+    else:
+        # l0w + l0b + l1w + l1b
+        n_i16 = (input_size * hidden) + hidden + (2 * hidden) + 1
+    return n_i16 * 2
+
+
 def main() -> int:
     args = parse_args()
 
@@ -67,16 +85,20 @@ def main() -> int:
     raw = in_path.read_bytes()
     total_len = len(raw)
     input_size = args.input_size
-    stride = 2 * input_size + 6
+    l2_size = args.l2_size
 
     if args.hidden_size > 0:
         hidden = args.hidden_size
-        payload_len = stride * hidden + 2
+        payload_len = compute_payload_len(hidden, input_size, l2_size)
         if payload_len > total_len:
             raise ValueError(
                 f"Hidden size {hidden} implies payload {payload_len} bytes > file length {total_len}"
             )
     else:
+        if l2_size > 0:
+            raise ValueError(
+                "Cannot infer hidden size with --l2-size > 0; pass --hidden-size explicitly."
+            )
         inferred = infer_hidden_size(total_len, input_size)
         if inferred is None:
             raise ValueError(
@@ -99,21 +121,12 @@ def main() -> int:
 
     # Interpret as little-endian i16 stream.
     vals = np.frombuffer(payload, dtype="<i2")
-    expected_i16 = input_size * hidden + hidden + (2 * hidden) + 1
-    if vals.size != expected_i16:
-        raise ValueError(
-            f"Unexpected i16 count: got {vals.size}, expected {expected_i16} "
-            f"(hidden={hidden}, input={input_size})"
-        )
 
     i = 0
     input_weights = vals[i : i + input_size * hidden]
     i += input_size * hidden
     input_biases = vals[i : i + hidden]
     i += hidden
-    output_weights = vals[i : i + 2 * hidden]
-    i += 2 * hidden
-    output_bias_i16 = int(vals[i])
 
     # Shared writer is under utils/nnue/common.py
     import sys
@@ -126,16 +139,45 @@ def main() -> int:
 
     activation_type = 1 if args.activation == "screlu" else 0
 
-    out_path = Path(args.output_net)
-    write_syk_nnue(
-        out_path,
-        hidden_size=hidden,
-        input_biases_i16=input_biases.astype(np.int16).tolist(),
-        input_weights_i16=input_weights.astype(np.int16).tolist(),
-        output_weights_i16=output_weights.astype(np.int16).tolist(),
-        output_bias_i32=output_bias_i16,
-        activation_type=activation_type,
-    )
+    if l2_size > 0:
+        # Two-layer: l1w -> l1b -> l2w -> l2b
+        l2_weights = vals[i : i + 2 * hidden * l2_size]
+        i += 2 * hidden * l2_size
+        l2_biases = vals[i : i + l2_size]
+        i += l2_size
+        output_weights = vals[i : i + l2_size]
+        i += l2_size
+        output_bias_i16 = int(vals[i])
+
+        out_path = Path(args.output_net)
+        write_syk_nnue(
+            out_path,
+            hidden_size=hidden,
+            input_biases_i16=input_biases.astype(np.int16).tolist(),
+            input_weights_i16=input_weights.astype(np.int16).tolist(),
+            output_weights_i16=output_weights.astype(np.int16).tolist(),
+            output_bias_i32=output_bias_i16,
+            activation_type=activation_type,
+            l2_size=l2_size,
+            l2_weights_i16=l2_weights.astype(np.int16).tolist(),
+            l2_biases_i16=l2_biases.astype(np.int16).tolist(),
+        )
+        print(f"L2 size: {l2_size}")
+    else:
+        output_weights = vals[i : i + 2 * hidden]
+        i += 2 * hidden
+        output_bias_i16 = int(vals[i])
+
+        out_path = Path(args.output_net)
+        write_syk_nnue(
+            out_path,
+            hidden_size=hidden,
+            input_biases_i16=input_biases.astype(np.int16).tolist(),
+            input_weights_i16=input_weights.astype(np.int16).tolist(),
+            output_weights_i16=output_weights.astype(np.int16).tolist(),
+            output_bias_i32=output_bias_i16,
+            activation_type=activation_type,
+        )
 
     print(f"Input: {in_path}")
     print(f"Total bytes: {total_len}")
