@@ -621,9 +621,8 @@ pub const SearchEngine = struct {
             }
         }
 
-        // Internal Iterative Reduction (IIR) — reduce depth by 1 on non-PV nodes
-        // when no TT move is available at sufficient depth.
-        if (!is_pv_node and tt_move == null and search_depth >= 4) {
+        // Internal Iterative Reduction (IIR) — reduce depth by 1 when no TT move at sufficient depth
+        if (tt_move == null and search_depth >= 4) {
             search_depth -= 1;
         }
 
