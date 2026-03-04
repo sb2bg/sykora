@@ -15,6 +15,8 @@ const SearchEngine = search_module.SearchEngine;
 const SearchOptions = search_module.SearchOptions;
 const TranspositionTable = search_module.TranspositionTable;
 const nnue = @import("nnue.zig");
+const smp = @import("smp.zig");
+const option_handlers = @import("option_handlers.zig");
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
@@ -43,17 +45,8 @@ pub const Uci = struct {
     tt: TranspositionTable,
     num_threads: usize,
     hash_size_mb: usize,
-    helper_threads: [MAX_HELPERS]?std.Thread,
-    helper_results: [MAX_HELPERS]HelperResult,
-
-    // Helper thread state for Lazy SMP
-    const MAX_HELPERS = 63;
-    const HelperResult = struct {
-        best_move: board.Move,
-        score: i32,
-        depth: u32,
-        nodes: usize,
-    };
+    helper_threads: [smp.MAX_HELPERS]?std.Thread,
+    helper_results: [smp.MAX_HELPERS]smp.HelperResult,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -83,8 +76,8 @@ pub const Uci = struct {
             .tt = tt,
             .num_threads = 1,
             .hash_size_mb = default_hash_mb,
-            .helper_threads = [_]?std.Thread{null} ** MAX_HELPERS,
-            .helper_results = [_]HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** MAX_HELPERS,
+            .helper_threads = [_]?std.Thread{null} ** smp.MAX_HELPERS,
+            .helper_results = [_]smp.HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** smp.MAX_HELPERS,
         };
 
         uci_ptr.resetPositionHistory();
@@ -95,64 +88,7 @@ pub const Uci = struct {
             uci_ptr.use_nnue = false;
         }
 
-        // Add logging option
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "Debug Log File",
-            .type = .string,
-            .default_value = "<empty>",
-            .on_changed = handleLogFileChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "UseNNUE",
-            .type = .check,
-            .default_value = "true",
-            .on_changed = handleUseNnueChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "EvalFile",
-            .type = .string,
-            .default_value = "<empty>",
-            .on_changed = handleEvalFileChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "NnueBlend",
-            .type = .spin,
-            .default_value = "100",
-            .min_value = 0,
-            .max_value = 100,
-            .on_changed = handleNnueBlendChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "NnueScale",
-            .type = .spin,
-            .default_value = "100",
-            .min_value = 10,
-            .max_value = 400,
-            .on_changed = handleNnueScaleChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "Threads",
-            .type = .spin,
-            .default_value = "1",
-            .min_value = 1,
-            .max_value = 64,
-            .on_changed = handleThreadsChange,
-            .context = uci_ptr,
-        });
-        try uci_ptr.options.items.append(allocator, Option{
-            .name = "Hash",
-            .type = .spin,
-            .default_value = "64",
-            .min_value = 1,
-            .max_value = 4096,
-            .on_changed = handleHashChange,
-            .context = uci_ptr,
-        });
+        try option_handlers.registerOptions(uci_ptr);
 
         try uci_ptr.writeStdout("{s} version {s} by {s}", .{ name, version, author });
         return uci_ptr;
@@ -178,12 +114,6 @@ pub const Uci = struct {
         self.tt.deinit();
         self.options.deinit();
         self.allocator.destroy(self);
-    }
-
-    fn elapsedMs(start: std.time.Instant) i64 {
-        const now = std.time.Instant.now() catch return 0;
-        const ns = now.since(start);
-        return @intCast(@divFloor(ns, std.time.ns_per_ms));
     }
 
     pub fn run(self: *Self) UciError!void {
@@ -222,25 +152,12 @@ pub const Uci = struct {
 
             self.handleCommand(command) catch |err| {
                 if (err == UciError.Quit) {
-                    try self.terminateSearch();
+                    try smp.terminateSearch(self);
                     return;
                 }
 
                 try self.writeInfoString("{s}", .{uciErr.getErrorDescriptor(err)});
             };
-        }
-    }
-
-    fn terminateSearch(self: *Self) !void {
-        self.stop_search.store(true, .seq_cst);
-
-        if (self.search_thread) |thread| {
-            // time to see how long it takes to join the thread
-            const start = std.time.Instant.now() catch return UciError.IOError;
-            thread.join(); // block until it finishes
-            self.search_thread = null;
-            const duration = elapsedMs(start);
-            try self.writeInfoString("search thread joined in {d}ms", .{duration});
         }
     }
 
@@ -262,7 +179,7 @@ pub const Uci = struct {
                 try self.writeStdout("readyok", .{});
             },
             .ucinewgame => {
-                try self.terminateSearch();
+                try smp.terminateSearch(self);
                 self.board = Board.startpos();
                 self.resetPositionHistory();
                 self.tt.clear();
@@ -297,17 +214,17 @@ pub const Uci = struct {
                 try self.writeStdout("key {x}", .{self.board.zobrist_hasher.zobrist_hash});
             },
             .go => |go_opts| {
-                try self.terminateSearch();
+                try smp.terminateSearch(self);
                 try self.writeInfoString("{any}", .{go_opts});
                 try self.writeInfoString("starting search thread", .{});
                 self.stop_search.store(false, .seq_cst);
                 self.best_move = board.Move.init(0, 0, null);
 
                 // Use larger stack size (8MB) for search thread due to large SearchEngine struct
-                self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, Uci.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
+                self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, smp.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
             },
             .stop => {
-                try self.terminateSearch();
+                try smp.terminateSearch(self);
             },
             .ponderhit => {
                 return error.Unimplemented;
@@ -358,7 +275,7 @@ pub const Uci = struct {
                             const depth_start = std.time.Instant.now() catch return UciError.IOError;
                             var stats = board.Board.PerftStats{};
                             try self.board.perftWithStats(@intCast(d), &stats);
-                            const depth_time = elapsedMs(depth_start);
+                            const depth_time = smp.elapsedMs(depth_start);
 
                             try self.writeStdout("{d: >5} | {d: >10} | {d: >10} | {d: >4} | {d: >7} | {d: >10} | {d: >6} | {d: >9} | {d: >6} | {d: >10} | {d: >8}", .{
                                 d,
@@ -375,7 +292,7 @@ pub const Uci = struct {
                             });
                         }
 
-                        const total_time = elapsedMs(start_time);
+                        const total_time = smp.elapsedMs(start_time);
 
                         try self.writeStdout("", .{});
                         try self.writeStdout("Total time: {d}ms", .{total_time});
@@ -391,7 +308,7 @@ pub const Uci = struct {
                         var stdout_writer = self.stdout.writer(&stdout_buf);
                         const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), &stdout_writer.interface);
                         stdout_writer.interface.flush() catch return UciError.IOError;
-                        const total_time = elapsedMs(start_time);
+                        const total_time = smp.elapsedMs(start_time);
                         const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;
 
                         try self.writeStdout("", .{});
@@ -407,243 +324,7 @@ pub const Uci = struct {
         }
     }
 
-    fn search(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
-        try self.writeInfoString("search thread started", .{});
-
-        const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
-        const use_nnue_for_search = self.use_nnue and net_ptr != null;
-
-        // Include the current position in game history so the search detects
-        // cycles back to the root position (prevents phantom perpetual scores).
-        const prior_count = self.position_hash_count;
-
-        // Age TT before search (caller responsibility now)
-        self.tt.nextAge();
-
-        // Spawn helper threads for Lazy SMP (num_threads - 1 helpers)
-        const num_helpers = self.num_threads - 1;
-        for (0..num_helpers) |i| {
-            self.helper_threads[i] = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, helperSearch, .{
-                self,
-                i,
-                go_opts,
-                net_ptr,
-                use_nnue_for_search,
-                prior_count,
-            }) catch null;
-        }
-
-        // Main thread search
-        var search_board = self.board;
-        var search_engine = SearchEngine.init(
-            &search_board,
-            self.allocator,
-            &self.stop_search,
-            &self.tt,
-            use_nnue_for_search,
-            net_ptr,
-            self.nnue_blend,
-            self.nnue_scale,
-        );
-
-        search_engine.uci_output = self.stdout;
-        if (prior_count > 0) {
-            search_engine.setGameHistory(self.position_hash_history[0..prior_count]);
-        } else {
-            search_engine.setGameHistory(&.{});
-        }
-
-        const search_opts = SearchOptions{
-            .infinite = go_opts.infinite orelse false,
-            .move_time = go_opts.move_time,
-            .wtime = go_opts.wtime,
-            .btime = go_opts.btime,
-            .winc = go_opts.winc,
-            .binc = go_opts.binc,
-            .depth = go_opts.depth,
-        };
-
-        const result = search_engine.search(search_opts) catch {
-            self.stop_search.store(true, .seq_cst);
-            self.joinHelpers(num_helpers);
-            return UciError.IOError;
-        };
-
-        // Main thread done — stop all helpers
-        self.stop_search.store(true, .seq_cst);
-        self.joinHelpers(num_helpers);
-
-        // Vote on best move if multi-threaded
-        if (num_helpers > 0) {
-            self.best_move = self.voteBestMove(result, num_helpers);
-        } else {
-            self.best_move = result.best_move;
-        }
-
-        // Sum nodes across all threads
-        var total_nodes = result.nodes;
-        for (0..num_helpers) |i| {
-            total_nodes += self.helper_results[i].nodes;
-        }
-
-        try self.writeInfoString("search thread stopped, total nodes {d}", .{total_nodes});
-        try self.writeStdout("bestmove {f}", .{self.best_move});
-    }
-
-    fn helperSearch(
-        self: *Self,
-        idx: usize,
-        go_opts: uci_command.GoOptions,
-        net_ptr: ?*const nnue.Network,
-        use_nnue_for_search: bool,
-        prior_count: usize,
-    ) void {
-        var helper_board = self.board;
-        var search_engine = SearchEngine.init(
-            &helper_board,
-            self.allocator,
-            &self.stop_search,
-            &self.tt,
-            use_nnue_for_search,
-            net_ptr,
-            self.nnue_blend,
-            self.nnue_scale,
-        );
-
-        // No UCI output from helpers
-        search_engine.uci_output = null;
-        if (prior_count > 0) {
-            search_engine.setGameHistory(self.position_hash_history[0..prior_count]);
-        } else {
-            search_engine.setGameHistory(&.{});
-        }
-
-        // Depth stagger: cycle through start depths 1-4 for tree diversity
-        const start_depth: u32 = 1 + @as(u32, @intCast(idx % 4));
-
-        const search_opts = SearchOptions{
-            .infinite = true,
-            .depth = go_opts.depth,
-            .start_depth = start_depth,
-        };
-
-        const result = search_engine.search(search_opts) catch {
-            self.helper_results[idx] = .{
-                .best_move = board.Move.init(0, 0, null),
-                .score = 0,
-                .depth = 0,
-                .nodes = 0,
-            };
-            return;
-        };
-
-        self.helper_results[idx] = .{
-            .best_move = result.best_move,
-            .score = result.score,
-            .depth = result.depth,
-            .nodes = result.nodes,
-        };
-    }
-
-    fn joinHelpers(self: *Self, num_helpers: usize) void {
-        for (0..num_helpers) |i| {
-            if (self.helper_threads[i]) |thread| {
-                thread.join();
-                self.helper_threads[i] = null;
-            }
-        }
-    }
-
-    fn voteBestMove(self: *Self, main_result: search_module.SearchResult, num_helpers: usize) board.Move {
-        // Collect all results (main + helpers)
-        const max_voters = MAX_HELPERS + 1;
-        var moves: [max_voters]board.Move = undefined;
-        var scores: [max_voters]i32 = undefined;
-        var depths: [max_voters]u32 = undefined;
-        var count: usize = 0;
-
-        // Add main thread result
-        if (main_result.best_move.from() != 0 or main_result.best_move.to() != 0) {
-            moves[count] = main_result.best_move;
-            scores[count] = main_result.score;
-            depths[count] = main_result.depth;
-            count += 1;
-        }
-
-        // Add helper results
-        for (0..num_helpers) |i| {
-            const hr = self.helper_results[i];
-            if (hr.best_move.from() != 0 or hr.best_move.to() != 0) {
-                moves[count] = hr.best_move;
-                scores[count] = hr.score;
-                depths[count] = hr.depth;
-                count += 1;
-            }
-        }
-
-        if (count == 0) return main_result.best_move;
-        if (count == 1) return moves[0];
-
-        // Find worst score for normalization
-        var worst_score: i32 = scores[0];
-        for (0..count) |i| {
-            if (scores[i] < worst_score) worst_score = scores[i];
-        }
-
-        // Vote: each thread votes for its move, weighted by depth + score bonus
-        // We accumulate votes per unique move
-        var vote_moves: [max_voters]board.Move = undefined;
-        var vote_weights: [max_voters]i32 = undefined;
-        var vote_best_depth: [max_voters]u32 = undefined;
-        var vote_best_score: [max_voters]i32 = undefined;
-        var num_unique: usize = 0;
-
-        for (0..count) |i| {
-            const weight = @as(i32, @intCast(depths[i])) + @divTrunc(scores[i] - worst_score, 10);
-
-            // Find if this move already exists in votes
-            var found: bool = false;
-            for (0..num_unique) |j| {
-                if (vote_moves[j].from() == moves[i].from() and
-                    vote_moves[j].to() == moves[i].to() and
-                    board.Move.eqlPromotion(vote_moves[j].promotion(), moves[i].promotion()))
-                {
-                    vote_weights[j] += weight;
-                    if (depths[i] > vote_best_depth[j] or
-                        (depths[i] == vote_best_depth[j] and scores[i] > vote_best_score[j]))
-                    {
-                        vote_best_depth[j] = depths[i];
-                        vote_best_score[j] = scores[i];
-                    }
-                    found = true;
-                    break;
-                }
-            }
-
-            if (!found) {
-                vote_moves[num_unique] = moves[i];
-                vote_weights[num_unique] = weight;
-                vote_best_depth[num_unique] = depths[i];
-                vote_best_score[num_unique] = scores[i];
-                num_unique += 1;
-            }
-        }
-
-        // Pick move with highest total vote weight
-        var best_idx: usize = 0;
-        for (1..num_unique) |i| {
-            if (vote_weights[i] > vote_weights[best_idx] or
-                (vote_weights[i] == vote_weights[best_idx] and vote_best_depth[i] > vote_best_depth[best_idx]) or
-                (vote_weights[i] == vote_weights[best_idx] and vote_best_depth[i] == vote_best_depth[best_idx] and vote_best_score[i] > vote_best_score[best_idx]))
-            {
-                best_idx = i;
-            }
-        }
-
-        return vote_moves[best_idx];
-    }
-
-    fn writeStdout(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
+    pub fn writeStdout(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
         const line = std.fmt.allocPrint(self.allocator, fmt, args) catch return UciError.OutOfMemory;
         defer self.allocator.free(line);
 
@@ -657,7 +338,7 @@ pub const Uci = struct {
         }
     }
 
-    fn writeInfoString(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
+    pub fn writeInfoString(self: *Self, comptime fmt: []const u8, args: anytype) UciError!void {
         if (!self.debug) {
             return;
         }
@@ -666,107 +347,6 @@ pub const Uci = struct {
         defer self.allocator.free(line);
 
         try self.writeStdout("info string {s}", .{line});
-    }
-
-    fn handleLogFileChange(self: *Self, value: []const u8) UciError!void {
-        if (self.log_file) |file| {
-            file.close();
-            self.log_file = null;
-        }
-
-        if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
-            return;
-        }
-
-        self.log_file = std.fs.cwd().openFile(value, .{ .mode = .read_write }) catch
-            std.fs.cwd().createFile(value, .{}) catch return UciError.IOError;
-
-        self.log_file.?.seekFromEnd(0) catch return UciError.IOError;
-    }
-
-    fn handleUseNnueChange(self: *Self, value: []const u8) UciError!void {
-        if (std.mem.eql(u8, value, "true")) {
-            self.use_nnue = true;
-            return;
-        }
-        if (std.mem.eql(u8, value, "false")) {
-            self.use_nnue = false;
-            return;
-        }
-        return UciError.InvalidArgument;
-    }
-
-    fn handleEvalFileChange(self: *Self, value: []const u8) UciError!void {
-        if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
-            if (self.nnue_network) |*network| {
-                network.deinit();
-                self.nnue_network = null;
-            }
-            if (self.eval_file_path) |old_path| {
-                self.allocator.free(old_path);
-                self.eval_file_path = null;
-            }
-            return;
-        }
-
-        var loaded = nnue.Network.loadFromFile(self.allocator, value) catch |err| {
-            return switch (err) {
-                nnue.LoadError.OutOfMemory => UciError.OutOfMemory,
-                nnue.LoadError.InvalidNetwork,
-                nnue.LoadError.UnsupportedVersion,
-                nnue.LoadError.NetworkTooLarge,
-                => UciError.InvalidArgument,
-                else => UciError.IOError,
-            };
-        };
-
-        const dup_path = self.allocator.dupe(u8, value) catch {
-            loaded.deinit();
-            return UciError.OutOfMemory;
-        };
-
-        if (self.nnue_network) |*old_network| {
-            old_network.deinit();
-        }
-        if (self.eval_file_path) |old_path| {
-            self.allocator.free(old_path);
-        }
-
-        self.nnue_network = loaded;
-        self.eval_file_path = dup_path;
-    }
-
-    fn handleNnueBlendChange(self: *Self, value: []const u8) UciError!void {
-        const parsed = std.fmt.parseInt(i32, value, 10) catch return UciError.InvalidArgument;
-        if (parsed < 0 or parsed > 100) {
-            return UciError.InvalidArgument;
-        }
-        self.nnue_blend = parsed;
-    }
-
-    fn handleNnueScaleChange(self: *Self, value: []const u8) UciError!void {
-        const parsed = std.fmt.parseInt(i32, value, 10) catch return UciError.InvalidArgument;
-        if (parsed < 10 or parsed > 400) {
-            return UciError.InvalidArgument;
-        }
-        self.nnue_scale = parsed;
-    }
-
-    fn handleThreadsChange(self: *Self, value: []const u8) UciError!void {
-        const parsed = std.fmt.parseInt(usize, value, 10) catch return UciError.InvalidArgument;
-        if (parsed < 1 or parsed > 64) {
-            return UciError.InvalidArgument;
-        }
-        self.num_threads = parsed;
-    }
-
-    fn handleHashChange(self: *Self, value: []const u8) UciError!void {
-        const parsed = std.fmt.parseInt(usize, value, 10) catch return UciError.InvalidArgument;
-        if (parsed < 1 or parsed > 4096) {
-            return UciError.InvalidArgument;
-        }
-        self.hash_size_mb = parsed;
-        self.tt.resize(parsed) catch return UciError.OutOfMemory;
     }
 
     fn resetPositionHistory(self: *Self) void {
