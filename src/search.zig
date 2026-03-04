@@ -53,6 +53,7 @@ pub const SearchResult = struct {
 
 const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
+const STATIC_EVAL_STACK_SIZE = 256;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
 const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 const SEE_CAPTURE_SCALE: i32 = 128;
@@ -65,8 +66,6 @@ const REPETITION_MEDIUM_ADV_CP: i32 = 50;
 const REPETITION_LARGE_ADV_CP: i32 = 80;
 const REPETITION_HUGE_ADV_CP: i32 = 120;
 const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
-const REPETITION_CYCLE_EVAL_THRESHOLD_CP: i32 = 80;
-const REPETITION_CYCLE_PENALTY_CP: i32 = 200;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
 
 fn elapsedMs(start: std.time.Instant) i64 {
@@ -162,6 +161,8 @@ const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
 // Razoring parameters
 const RAZOR_MARGIN: i32 = 400;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
+const MAIN_SEE_PRUNE_MAX_DEPTH: u32 = 4;
+const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
 
 pub const SearchEngine = struct {
     const Self = @This();
@@ -195,6 +196,7 @@ pub const SearchEngine = struct {
     acc_ply: u32,
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
+    static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
 
     pub fn init(
         board_ptr: *Board,
@@ -231,6 +233,7 @@ pub const SearchEngine = struct {
             .acc_ply = 0,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
+            .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
         };
     }
 
@@ -374,6 +377,7 @@ pub const SearchEngine = struct {
         self.history.age(); // Age history instead of clearing
         self.counter_moves.clear();
         self.previous_move = null;
+        self.static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE;
         // Initialize position history
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
         self.history_count = 1;
@@ -628,6 +632,16 @@ pub const SearchEngine = struct {
 
         // Static evaluation for pruning decisions
         const static_eval = if (!in_check) self.evaluatePosition() else -INF;
+        const improving = blk: {
+            if (in_check or ply < 2 or ply >= STATIC_EVAL_STACK_SIZE) {
+                break :blk false;
+            }
+            const prev_eval = self.static_eval_stack[ply - 2];
+            break :blk prev_eval != -INF and static_eval > prev_eval;
+        };
+        if (ply < STATIC_EVAL_STACK_SIZE) {
+            self.static_eval_stack[ply] = static_eval;
+        }
 
         // Reverse futility pruning (static null move pruning)
         // If static eval is far above beta at shallow depths, prune immediately
@@ -647,10 +661,15 @@ pub const SearchEngine = struct {
         }
 
         // Null move pruning - try giving opponent a free move
-        if (do_null and !is_pv_node and !in_check and depth >= NULL_MOVE_MIN_DEPTH and static_eval >= beta_adj) {
+        if (do_null and
+            !is_pv_node and
+            !in_check and
+            depth >= NULL_MOVE_MIN_DEPTH and
+            static_eval >= beta_adj)
+        {
             // Don't do null move if we're in a pawn endgame or have very little material
-            const our_non_pawn_material = countMaterial(self.board.board, self.board.board.move) -
-                @as(i32, @intCast(@popCount(self.board.board.getColorBitboard(self.board.board.move) & self.board.board.getKindBitboard(.pawn)))) * eval.PAWN_VALUE;
+            const stm = self.board.board.move;
+            const our_non_pawn_material = nonPawnMaterial(self.board.board, stm);
 
             if (our_non_pawn_material > eval.BISHOP_VALUE) {
                 // Save state
@@ -714,7 +733,8 @@ pub const SearchEngine = struct {
         // Futility pruning - if we're way behind and near the leaf, prune quiet moves
         var futile = false;
         if (!is_pv_node and !in_check and depth <= 3) {
-            const futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(depth));
+            var futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(depth));
+            if (improving) futility_margin += 80;
             if (static_eval + futility_margin < alpha) {
                 futile = true;
             }
@@ -765,16 +785,33 @@ pub const SearchEngine = struct {
 
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
+                const improving_lmp_bonus: u32 = if (improving) 2 else 0;
+                const quiet_lmp_limit = lmpQuietMoveLimit(search_depth) + improving_lmp_bonus;
 
                 // Late Move Pruning (LMP): at shallow non-PV nodes, trim low-history late quiets.
                 if (!is_pv_node and
                     !in_check and
                     search_depth <= LMP_MAX_DEPTH and
                     moves_searched > 0 and
-                    quiets_seen > lmpQuietMoveLimit(search_depth) and
+                    quiets_seen > quiet_lmp_limit and
                     !self.killer_moves.isKiller(move, ply) and
                     self.history.getForColor(move, color) <= 0)
                 {
+                    continue;
+                }
+            }
+
+            // SEE capture pruning - trim clearly losing captures at shallow non-PV nodes.
+            if (!is_pv_node and
+                !in_check and
+                is_capture and
+                !is_promotion and
+                moves_searched > 0 and
+                search_depth <= MAIN_SEE_PRUNE_MAX_DEPTH)
+            {
+                const see_score = staticExchangeEvalPosition(self.board.board, move);
+                const see_margin = MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+                if (see_score < -see_margin) {
                     continue;
                 }
             }
@@ -804,7 +841,6 @@ pub const SearchEngine = struct {
                 self.position_history[self.history_count] = self.board.zobrist_hasher.zobrist_hash;
                 self.history_count += 1;
             }
-            const repetition_matches_after_move = self.repetitionMatchCount();
             const extension: u32 = if (ply == 0 and
                 search_depth >= 2 and
                 root_pawn_endgame)
@@ -824,8 +860,9 @@ pub const SearchEngine = struct {
                 !gives_check)
             {
                 // Base reduction from pre-computed log table
+                const move_number = moves_searched + 1;
                 const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
-                const m_idx = @min(moves_searched, LMR_TABLE_MAX_MOVES - 1);
+                const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
                 var reduction: i32 = lmr_table[d_idx][m_idx];
 
                 // History modulation: good history reduces less, bad history reduces more
@@ -833,13 +870,19 @@ pub const SearchEngine = struct {
                 reduction -= @divTrunc(hist_score, 8192);
 
                 // Killer and counter moves get reduced less
-                if (self.killer_moves.isKiller(move, ply)) {
+                const is_killer = self.killer_moves.isKiller(move, ply);
+                var is_counter_move = false;
+                if (counter_move) |cm| {
+                    is_counter_move = cm.from() == move.from() and cm.to() == move.to();
+                }
+                if (is_killer) {
                     reduction -= 1;
                 }
-                if (counter_move) |cm| {
-                    if (cm.from() == move.from() and cm.to() == move.to()) {
-                        reduction -= 1;
-                    }
+                if (is_counter_move) {
+                    reduction -= 1;
+                }
+                if (improving) {
+                    reduction -= 1;
                 }
 
                 // PV nodes get reduced less
@@ -885,15 +928,6 @@ pub const SearchEngine = struct {
             }
 
             moves_searched += 1;
-
-            // Avoid entering obvious twofold cycles when we're already clearly better.
-            if (repetition_matches_after_move == 1 and !is_capture and !is_promotion) {
-                if (static_eval >= REPETITION_CYCLE_EVAL_THRESHOLD_CP) {
-                    score -= REPETITION_CYCLE_PENALTY_CP;
-                } else if (static_eval <= -REPETITION_CYCLE_EVAL_THRESHOLD_CP) {
-                    score += REPETITION_CYCLE_PENALTY_CP;
-                }
-            }
 
             // Track quiet moves for history updates
             if (!is_capture and !is_promotion and quiets_tried_count < 64) {
@@ -1054,6 +1088,12 @@ pub const SearchEngine = struct {
             return contempt;
         }
         return DRAW_SCORE;
+    }
+
+    fn nonPawnMaterial(b: board.BitBoard, color: piece.Color) i32 {
+        const color_bb = b.getColorBitboard(color);
+        const pawn_count = @as(i32, @intCast(@popCount(color_bb & b.getKindBitboard(.pawn))));
+        return countMaterial(b, color) - pawn_count * eval.PAWN_VALUE;
     }
 
     fn countMaterial(b: board.BitBoard, color: piece.Color) i32 {
