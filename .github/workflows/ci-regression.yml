@@ -55,16 +55,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install chess
 
-      - name: Resolve previous commit
+      - name: Resolve previous code commit
         id: prev
         shell: bash
         run: |
           set -euo pipefail
-          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            echo "sha=$(git rev-parse HEAD^)" >> "$GITHUB_OUTPUT"
-          else
+          if ! git rev-parse --verify HEAD^ >/dev/null 2>&1; then
             echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          prev_sha="$(git rev-list -n 1 HEAD^ -- ':(glob)**/*.zig' || true)"
+          echo "sha=${prev_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Build candidate engine
         shell: bash
