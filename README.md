@@ -3,6 +3,7 @@
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
+[![CI Regression](https://github.com/sb2bg/sykora/actions/workflows/ci-regression.yml/badge.svg)](https://github.com/sb2bg/sykora/actions/workflows/ci-regression.yml)
 
 <img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="200" alt="Sykora Logo">
 
@@ -217,6 +218,20 @@ python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 80 --ou
 ```
 
 The script prints an estimated Elo difference (`candidate - baseline`), a 95% confidence interval, and a p-value versus equal strength.
+
+Status codes (useful for CI):
+
+- `utils/sts/sts.py`
+  - `0`: success
+  - `1`: runtime/input error (missing EPD, engine startup failure, parse failure, etc.)
+  - `2`: invalid CLI options (for example malformed `--engine-opt`)
+- `utils/match/selfplay.py`
+  - `0`: candidate score > baseline score
+  - `1`: baseline score > candidate score
+  - `2`: exact tie
+  - `>2`: unexpected failure (engine/protocol/runtime error)
+
+The `CI Regression` workflow (`.github/workflows/ci-regression.yml`) runs STS on the current build, then self-play versus `HEAD^`. By default it fails when the candidate loses and allows ties (`SELFPLAY_ALLOW_TIES=true`).
 
 To compare current working tree against your configured baseline in one command:
 
