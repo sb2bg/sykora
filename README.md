@@ -3,7 +3,7 @@
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
-[![CI Regression](https://github.com/sb2bg/sykora/actions/workflows/ci-regression.yml/badge.svg)](https://github.com/sb2bg/sykora/actions/workflows/ci-regression.yml)
+[![Release SPRT](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml/badge.svg)](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml)
 
 <img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="200" alt="Sykora Logo">
 
@@ -219,6 +219,28 @@ python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 80 --ou
 
 The script prints an estimated Elo difference (`candidate - baseline`), a 95% confidence interval, and a p-value versus equal strength.
 
+To run a batched SPRT locally (faster decision-oriented A/B test):
+
+```bash
+python utils/match/sprt.py ./old_sykora ./zig-out/bin/sykora \
+  --name1 old --name2 new \
+  --elo0 -30 --elo1 30 \
+  --alpha 0.10 --beta 0.10 \
+  --games-per-batch 12 --max-games 360 \
+  --movetime-ms 80 --max-plies 220 \
+  --threads 1 --hash-mb 64 \
+  --shuffle-openings \
+  --summary-json sprt_summary.json
+```
+
+Exit codes from `sprt.py`:
+- `0`: candidate accepted as stronger (or practical stronger threshold reached)
+- `1`: candidate accepted as weaker
+- `2`: inconclusive at max games
+- `3`: runner/configuration failure
+
+The `Release SPRT` workflow (`.github/workflows/sprt.yml`) runs automatically on `v*` tag pushes and compares the new tag against the previous `v*` tag.
+
 Status codes (useful for CI):
 
 - `utils/sts/sts.py`
@@ -230,8 +252,6 @@ Status codes (useful for CI):
   - `1`: baseline score > candidate score
   - `2`: exact tie
   - `>2`: unexpected failure (engine/protocol/runtime error)
-
-The `CI Regression` workflow (`.github/workflows/ci-regression.yml`) runs STS on the current build, then self-play versus `HEAD^`. By default it fails when the candidate loses and allows ties (`SELFPLAY_ALLOW_TIES=true`).
 
 To compare current working tree against your configured baseline in one command:
 
