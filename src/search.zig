@@ -53,7 +53,7 @@ pub const SearchResult = struct {
 
 const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
-const STATIC_EVAL_STACK_SIZE = 256;
+const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
 const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 const SEE_CAPTURE_SCALE: i32 = 128;
