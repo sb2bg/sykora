@@ -110,6 +110,10 @@ inline fn lmpQuietMoveLimit(depth: u32) u32 {
     };
 }
 
+inline fn addLmpQuietMoveBonus(limit: u32, bonus: u32) u32 {
+    return std.math.add(u32, limit, bonus) catch std.math.maxInt(u32);
+}
+
 inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
     const loss = -see_score;
     if (loss < eval.PAWN_VALUE) return 0;
@@ -786,7 +790,7 @@ pub const SearchEngine = struct {
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
                 const improving_lmp_bonus: u32 = if (improving) 2 else 0;
-                const quiet_lmp_limit = lmpQuietMoveLimit(search_depth) + improving_lmp_bonus;
+                const quiet_lmp_limit = addLmpQuietMoveBonus(lmpQuietMoveLimit(search_depth), improving_lmp_bonus);
 
                 // Late Move Pruning (LMP): at shallow non-PV nodes, trim low-history late quiets.
                 if (!is_pv_node and
@@ -1368,3 +1372,8 @@ pub const SearchEngine = struct {
         file.writeAll("\n") catch return;
     }
 };
+
+test "addLmpQuietMoveBonus saturates instead of wrapping" {
+    try std.testing.expectEqual(@as(u32, 18), addLmpQuietMoveBonus(16, 2));
+    try std.testing.expectEqual(std.math.maxInt(u32), addLmpQuietMoveBonus(std.math.maxInt(u32), 2));
+}
