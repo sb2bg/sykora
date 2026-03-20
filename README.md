@@ -57,7 +57,6 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
   - Trained on high-depth self-play data via the Bullet trainer
   - Incremental accumulator updates during search
   - Custom `SYKNNUE2` network format with auto-detected activation type
-  - Backward-compatible with `SYKNNUE1` format (defaults to ReLU)
   - Blendable with classical eval via `NnueBlend` (default: 100 = pure NNUE)
 - **Classical handcrafted evaluation** (fallback):
   - Material and piece-square tables
@@ -334,7 +333,7 @@ i16[768 * hidden_size]          input -> accumulator weights
 i16[2 * hidden_size]            output weights (stm half, nstm half)
 ```
 
-All values are little-endian. The older `SYKNNUE1` format (no activation byte, defaults to ReLU) is still supported for backward compatibility.
+All values are little-endian.
 
 ### Training Pipeline
 
