@@ -17,7 +17,6 @@ pub const Option = struct {
     min_value: ?i32 = null,
     max_value: ?i32 = null,
     var_values: ?[][]const u8 = null,
-    current_value: ?[]const u8 = null,
     on_changed: ?*const fn (*Uci, []const u8) UciError!void = null,
     context: ?*Uci = null,
 };
@@ -59,36 +58,32 @@ pub const Options = struct {
         if (self.getOption(name)) |option| {
             switch (option.type) {
                 .check => {
-                    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "false")) {
-                        option.current_value = value;
+                    if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
+                        return error.InvalidArgument;
                     }
                 },
                 .spin => {
-                    if (option.min_value) |min| {
-                        if (option.max_value) |max| {
-                            const val = std.fmt.parseInt(i32, value, 10) catch return error.InvalidArgument;
-                            if (val >= min and val <= max) {
-                                option.current_value = value;
-                            }
-                        }
+                    const min = option.min_value orelse return error.InvalidArgument;
+                    const max = option.max_value orelse return error.InvalidArgument;
+                    const val = std.fmt.parseInt(i32, value, 10) catch return error.InvalidArgument;
+                    if (val < min or val > max) {
+                        return error.InvalidArgument;
                     }
                 },
                 .combo => {
-                    if (option.var_values) |vars| {
-                        for (vars) |variant| {
-                            if (std.mem.eql(u8, variant, value)) {
-                                option.current_value = value;
-                                break;
-                            }
+                    const vars = option.var_values orelse return error.InvalidArgument;
+                    for (vars) |variant| {
+                        if (std.mem.eql(u8, variant, value)) {
+                            break;
                         }
+                    } else {
+                        return error.InvalidArgument;
                     }
                 },
                 .button => {
-                    // Button options don't have values
+                    return error.InvalidArgument;
                 },
-                .string => {
-                    option.current_value = value;
-                },
+                .string => {},
             }
 
             if (option.on_changed) |callback| {

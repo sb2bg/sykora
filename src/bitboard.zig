@@ -400,28 +400,7 @@ pub const Board = struct {
     pub fn generateLegalMoves(self: *Self, moves: *MoveList) !void {
         var pseudo_legal = MoveList.init();
         try self.generatePseudoLegalMoves(&pseudo_legal);
-
-        const color = self.board.move;
-
-        // Filter out moves that leave the king in check
-        // Optimize by saving/restoring state only once per move
-        for (pseudo_legal.slice()) |move| {
-            // Save state
-            const old_board = self.board;
-
-            // Make move
-            self.applyMoveUncheckedForLegality(move);
-
-            // Check if our king is in check after the move (illegal)
-            const legal = !self.isInCheck(color);
-
-            // Restore state
-            self.board = old_board;
-
-            if (legal) {
-                moves.append(move);
-            }
-        }
+        movegen.filterLegalMoves(self, &pseudo_legal, moves, self.board.move);
     }
 
     pub const PerftStats = struct {

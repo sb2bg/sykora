@@ -24,25 +24,27 @@ from common import INPUT_SIZE, QA, QB, write_syk_nnue  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export NPZ checkpoint to SYKNNUE2/3 net.")
+    parser = argparse.ArgumentParser(
+        description="Export NPZ checkpoint to SYKNNUE2 net."
+    )
     parser.add_argument("--input", required=True, help="Input .npz checkpoint")
     parser.add_argument("--output-net", required=True, help="Output .sknnue path")
     parser.add_argument(
-        "--input-weights-key", default="input_weights", help="NPZ key for input->hidden weights"
+        "--input-weights-key",
+        default="input_weights",
+        help="NPZ key for input->hidden weights",
     )
-    parser.add_argument("--input-bias-key", default="input_bias", help="NPZ key for hidden biases")
     parser.add_argument(
-        "--output-weights-key", default="output_weights", help="NPZ key for output weights"
+        "--input-bias-key", default="input_bias", help="NPZ key for hidden biases"
     )
-    parser.add_argument("--output-bias-key", default="output_bias", help="NPZ key for output bias")
     parser.add_argument(
-        "--l2-size",
-        type=int,
-        default=0,
-        help="L2 hidden size (0 = single layer, >0 = two layers / SYKNNUE3)",
+        "--output-weights-key",
+        default="output_weights",
+        help="NPZ key for output weights",
     )
-    parser.add_argument("--l2-weights-key", default="l2_weights", help="NPZ key for L1->L2 weights")
-    parser.add_argument("--l2-bias-key", default="l2_bias", help="NPZ key for L2 biases")
+    parser.add_argument(
+        "--output-bias-key", default="output_bias", help="NPZ key for output bias"
+    )
     parser.add_argument(
         "--activation",
         choices=["relu", "screlu"],
@@ -78,10 +80,14 @@ def main() -> int:
         input_weights = np.asarray(ckpt[args.input_weights_key], dtype=np.float32)
         input_bias = np.asarray(ckpt[args.input_bias_key], dtype=np.float32).reshape(-1)
         output_weights = np.asarray(ckpt[args.output_weights_key], dtype=np.float32)
-        output_bias = float(np.asarray(ckpt[args.output_bias_key], dtype=np.float32).reshape(-1)[0])
+        output_bias = float(
+            np.asarray(ckpt[args.output_bias_key], dtype=np.float32).reshape(-1)[0]
+        )
 
     if input_weights.ndim != 2:
-        raise ValueError(f"input_weights must be rank-2, got shape {input_weights.shape}")
+        raise ValueError(
+            f"input_weights must be rank-2, got shape {input_weights.shape}"
+        )
     if input_weights.shape[0] != INPUT_SIZE:
         raise ValueError(
             f"input_weights first dim must be INPUT_SIZE={INPUT_SIZE}, got {input_weights.shape[0]}"
@@ -93,36 +99,27 @@ def main() -> int:
             f"input_bias length mismatch: expected {hidden_size}, got {input_bias.shape[0]}"
         )
 
-    l2_size = args.l2_size
-
-    if l2_size > 0:
-        # For L2 nets, output_weights connects L2 -> output (length = l2_size)
-        output_weights = output_weights.reshape(-1)
-        if output_weights.shape[0] != l2_size:
+    if output_weights.ndim == 2:
+        if output_weights.shape == (2, hidden_size):
+            output_weights = output_weights.reshape(-1)
+        elif output_weights.shape == (hidden_size, 2):
+            output_weights = output_weights.T.reshape(-1)
+        else:
             raise ValueError(
-                f"output_weights length mismatch for L2 net: expected {l2_size}, "
-                f"got {output_weights.shape[0]}"
+                "2D output_weights must be shape [2, hidden] or [hidden, 2], "
+                f"got {output_weights.shape}"
             )
     else:
-        if output_weights.ndim == 2:
-            if output_weights.shape == (2, hidden_size):
-                output_weights = output_weights.reshape(-1)
-            elif output_weights.shape == (hidden_size, 2):
-                output_weights = output_weights.T.reshape(-1)
-            else:
-                raise ValueError(
-                    "2D output_weights must be shape [2, hidden] or [hidden, 2], "
-                    f"got {output_weights.shape}"
-                )
-        else:
-            output_weights = output_weights.reshape(-1)
+        output_weights = output_weights.reshape(-1)
 
-        if output_weights.shape[0] != 2 * hidden_size:
-            raise ValueError(
-                f"output_weights length mismatch: expected {2 * hidden_size}, got {output_weights.shape[0]}"
-            )
+    if output_weights.shape[0] != 2 * hidden_size:
+        raise ValueError(
+            f"output_weights length mismatch: expected {2 * hidden_size}, got {output_weights.shape[0]}"
+        )
 
-    input_bias_i16 = np.clip(np.rint(input_bias * float(QA)), -32768, 32767).astype(np.int16)
+    input_bias_i16 = np.clip(np.rint(input_bias * float(QA)), -32768, 32767).astype(
+        np.int16
+    )
     input_weights_i16 = np.clip(
         np.rint(input_weights.reshape(-1) * float(QA)), -32768, 32767
     ).astype(np.int16)
@@ -133,34 +130,6 @@ def main() -> int:
 
     activation_type = 1 if args.activation == "screlu" else 0
 
-    l2_kwargs = {}
-    if l2_size > 0:
-        l2_w_key = args.l2_weights_key
-        l2_b_key = args.l2_bias_key
-        with np.load(in_path) as ckpt2:
-            if l2_w_key not in ckpt2 or l2_b_key not in ckpt2:
-                raise KeyError(f"Missing L2 NPZ keys: need '{l2_w_key}' and '{l2_b_key}'")
-            l2_weights = np.asarray(ckpt2[l2_w_key], dtype=np.float32).reshape(-1)
-            l2_bias = np.asarray(ckpt2[l2_b_key], dtype=np.float32).reshape(-1)
-
-        if l2_weights.shape[0] != 2 * hidden_size * l2_size:
-            raise ValueError(
-                f"l2_weights length mismatch: expected {2 * hidden_size * l2_size}, "
-                f"got {l2_weights.shape[0]}"
-            )
-        if l2_bias.shape[0] != l2_size:
-            raise ValueError(
-                f"l2_bias length mismatch: expected {l2_size}, got {l2_bias.shape[0]}"
-            )
-
-        l2_weights_i16 = np.clip(np.rint(l2_weights * float(QB)), -32768, 32767).astype(np.int16)
-        l2_bias_i16 = np.clip(np.rint(l2_bias * float(QA)), -32768, 32767).astype(np.int16)
-        l2_kwargs = {
-            "l2_size": l2_size,
-            "l2_weights_i16": l2_weights_i16.tolist(),
-            "l2_biases_i16": l2_bias_i16.tolist(),
-        }
-
     out_path = Path(args.output_net)
     write_syk_nnue(
         out_path,
@@ -170,13 +139,10 @@ def main() -> int:
         output_weights_i16=output_weights_i16.tolist(),
         output_bias_i32=output_bias_i32,
         activation_type=activation_type,
-        **l2_kwargs,
     )
 
     print(f"Input: {in_path}")
     print(f"Hidden size: {hidden_size}")
-    if l2_size > 0:
-        print(f"L2 size: {l2_size}")
     print(f"Wrote: {out_path}")
     return 0
 

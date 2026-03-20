@@ -28,6 +28,19 @@ inline fn appendMove(moves: anytype, from: anytype, to: anytype, promo: ?pieceIn
     moves.append(MoveT.init(@intCast(from), @intCast(to), promo));
 }
 
+pub fn filterLegalMoves(self: anytype, pseudo_moves: anytype, moves: anytype, color: pieceInfo.Color) void {
+    for (pseudo_moves.slice()) |move| {
+        const old_board = self.board;
+        self.applyMoveUncheckedForLegality(move);
+        const legal = !self.isInCheck(color);
+        self.board = old_board;
+
+        if (legal) {
+            moves.append(move);
+        }
+    }
+}
+
 pub fn generatePseudoLegalMoves(self: anytype, moves: anytype) !void {
     const color = self.board.move;
     const our_pieces = self.board.getColorBitboard(color);
@@ -86,24 +99,7 @@ pub fn generateLegalCaptures(self: anytype, moves: anytype) void {
     generateCaptures(self, &pseudo_captures);
 
     const color = self.board.move;
-
-    for (pseudo_captures.slice()) |move| {
-        // Save state
-        const old_board = self.board;
-
-        // Make move
-        self.applyMoveUncheckedForLegality(move);
-
-        // Check legality
-        const legal = !self.isInCheck(color);
-
-        // Restore state
-        self.board = old_board;
-
-        if (legal) {
-            moves.append(move);
-        }
-    }
+    filterLegalMoves(self, &pseudo_captures, moves, color);
 }
 
 /// Generate only quiet (non-capture, non-promotion) moves
@@ -138,24 +134,7 @@ pub fn generateLegalQuietMoves(self: anytype, moves: anytype) void {
     generateQuietMoves(self, &pseudo_quiets);
 
     const color = self.board.move;
-
-    for (pseudo_quiets.slice()) |move| {
-        // Save state
-        const old_board = self.board;
-
-        // Make move
-        self.applyMoveUncheckedForLegality(move);
-
-        // Check legality
-        const legal = !self.isInCheck(color);
-
-        // Restore state
-        self.board = old_board;
-
-        if (legal) {
-            moves.append(move);
-        }
-    }
+    filterLegalMoves(self, &pseudo_quiets, moves, color);
 }
 
 // ========== Capture move generators ==========

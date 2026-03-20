@@ -82,8 +82,7 @@ pub const Uci = struct {
 
         uci_ptr.resetPositionHistory();
 
-        // Load embedded NNUE net
-        uci_ptr.nnue_network = nnue.Network.loadFromBytes(allocator, nnue.EMBEDDED_NET) catch null;
+        uci_ptr.reloadEmbeddedNetwork();
         if (uci_ptr.nnue_network == null) {
             uci_ptr.use_nnue = false;
         }
@@ -92,6 +91,13 @@ pub const Uci = struct {
 
         try uci_ptr.writeStdout("{s} version {s} by {s}", .{ name, version, author });
         return uci_ptr;
+    }
+
+    pub fn reloadEmbeddedNetwork(self: *Self) void {
+        if (self.nnue_network) |*network| {
+            network.deinit();
+        }
+        self.nnue_network = nnue.Network.loadFromBytes(self.allocator, nnue.EMBEDDED_NET) catch null;
     }
 
     pub fn deinit(self: *Self) void {

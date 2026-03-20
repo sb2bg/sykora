@@ -17,43 +17,80 @@ TOTAL_RE = re.compile(r"^TOTAL\s+\d+\s+(\d+)\s+(\d+)\s+([0-9.]+)%")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate and promote Bullet checkpoints.")
-    parser.add_argument("--checkpoints-dir", required=True, help="Directory containing Bullet checkpoint folders")
+    parser = argparse.ArgumentParser(
+        description="Evaluate and promote Bullet checkpoints."
+    )
+    parser.add_argument(
+        "--checkpoints-dir",
+        required=True,
+        help="Directory containing Bullet checkpoint folders",
+    )
     parser.add_argument(
         "--converter",
         default="utils/nnue/bullet/bullet_quantised_to_sknnue.py",
         help="Path to quantised->sknnue converter",
     )
-    parser.add_argument("--engine", default="./zig-out/bin/sykora", help="Engine under test")
+    parser.add_argument(
+        "--engine", default="./zig-out/bin/sykora", help="Engine under test"
+    )
 
     parser.add_argument("--blend", type=int, default=2, help="NnueBlend for evaluation")
     parser.add_argument(
-        "--no-screlu",
-        action="store_true",
-        help="Disable NnueSCReLU during eval (SCReLU is enabled by default)",
+        "--nnue-scale", type=int, default=100, help="NnueScale during eval"
     )
-    parser.add_argument("--nnue-scale", type=int, default=100, help="NnueScale during eval")
 
     parser.add_argument("--sts-epd", default="epd", help="STS directory or file")
     parser.add_argument("--sts-movetime-ms", type=int, default=40, help="STS movetime")
-    parser.add_argument("--sts-max-positions", type=int, default=400, help="STS position cap")
+    parser.add_argument(
+        "--sts-max-positions", type=int, default=400, help="STS position cap"
+    )
 
-    parser.add_argument("--selfplay-games", type=int, default=0, help="Self-play games for top nets (0=skip)")
-    parser.add_argument("--selfplay-movetime-ms", type=int, default=80, help="Self-play movetime")
-    parser.add_argument("--selfplay-top-k", type=int, default=3, help="How many top STS nets to self-play")
+    parser.add_argument(
+        "--selfplay-games",
+        type=int,
+        default=0,
+        help="Self-play games for top nets (0=skip)",
+    )
+    parser.add_argument(
+        "--selfplay-movetime-ms", type=int, default=80, help="Self-play movetime"
+    )
+    parser.add_argument(
+        "--selfplay-top-k",
+        type=int,
+        default=3,
+        help="How many top STS nets to self-play",
+    )
 
-    parser.add_argument("--threads", type=int, default=1, help="Threads for STS/self-play")
-    parser.add_argument("--hash-mb", type=int, default=64, help="Hash for STS/self-play")
+    parser.add_argument(
+        "--threads", type=int, default=1, help="Threads for STS/self-play"
+    )
+    parser.add_argument(
+        "--hash-mb", type=int, default=64, help="Hash for STS/self-play"
+    )
 
-    parser.add_argument("--min-elo", type=float, default=0.0, help="Promotion threshold")
-    parser.add_argument("--max-p-value", type=float, default=0.25, help="Promotion threshold")
+    parser.add_argument(
+        "--min-elo", type=float, default=0.0, help="Promotion threshold"
+    )
+    parser.add_argument(
+        "--max-p-value", type=float, default=0.25, help="Promotion threshold"
+    )
 
-    parser.add_argument("--output-dir", default="", help="Optional directory for reports and converted nets")
-    parser.add_argument("--promote-to", default="", help="Optional destination .sknnue path for promoted net")
+    parser.add_argument(
+        "--output-dir",
+        default="",
+        help="Optional directory for reports and converted nets",
+    )
+    parser.add_argument(
+        "--promote-to",
+        default="",
+        help="Optional destination .sknnue path for promoted net",
+    )
     return parser.parse_args()
 
 
-def run_capture(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run_capture(
+    cmd: list[str], cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     print("$", " ".join(cmd))
     return subprocess.run(
         cmd,
@@ -86,7 +123,6 @@ def checkpoint_sort_key(path: Path) -> tuple[int, str]:
 
 def main() -> int:
     args = parse_args()
-    screlu = not args.no_screlu
 
     if args.blend < 0 or args.blend > 100:
         print("--blend must be in [0, 100]", file=sys.stderr)
@@ -133,11 +169,18 @@ def main() -> int:
     sp_dir.mkdir(parents=True, exist_ok=True)
 
     ckpts = sorted(
-        [p for p in ckpt_root.iterdir() if p.is_dir() and (p / "quantised.bin").is_file()],
+        [
+            p
+            for p in ckpt_root.iterdir()
+            if p.is_dir() and (p / "quantised.bin").is_file()
+        ],
         key=checkpoint_sort_key,
     )
     if not ckpts:
-        print(f"No checkpoints with quantised.bin found under: {ckpt_root}", file=sys.stderr)
+        print(
+            f"No checkpoints with quantised.bin found under: {ckpt_root}",
+            file=sys.stderr,
+        )
         return 1
 
     records: list[dict] = []
@@ -179,9 +222,7 @@ def main() -> int:
             "--engine-opt",
             f"NnueBlend={args.blend}",
             "--engine-opt",
-                f"NnueScale={args.nnue_scale}",
-                "--engine-opt",
-                f"NnueSCReLU={'true' if screlu else 'false'}",
+            f"NnueScale={args.nnue_scale}",
         ]
         sts_proc = run_capture(sts_cmd)
         sts_log = sts_dir / f"{ckpt.name}.txt"
@@ -202,7 +243,9 @@ def main() -> int:
         }
         records.append(rec)
 
-    records.sort(key=lambda r: (r["sts"]["score_pct"], r["checkpoint_name"]), reverse=True)
+    records.sort(
+        key=lambda r: (r["sts"]["score_pct"], r["checkpoint_name"]), reverse=True
+    )
 
     top_k = records[: min(args.selfplay_top_k, len(records))]
 
@@ -234,8 +277,6 @@ def main() -> int:
                 f"NnueBlend={args.blend}",
                 "--engine2-opt",
                 f"NnueScale={args.nnue_scale}",
-                "--engine2-opt",
-                f"NnueSCReLU={'true' if screlu else 'false'}",
                 "--summary-json",
                 str(summary_json),
                 "--quiet",

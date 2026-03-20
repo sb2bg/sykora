@@ -96,14 +96,11 @@ pub fn handleUseNnueChange(self: *Uci, value: []const u8) UciError!void {
 
 pub fn handleEvalFileChange(self: *Uci, value: []const u8) UciError!void {
     if (std.mem.eql(u8, value, "<empty>") or value.len == 0) {
-        if (self.nnue_network) |*network| {
-            network.deinit();
-            self.nnue_network = null;
-        }
         if (self.eval_file_path) |old_path| {
             self.allocator.free(old_path);
             self.eval_file_path = null;
         }
+        self.reloadEmbeddedNetwork();
         return;
     }
 

@@ -17,16 +17,32 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch Bullet NNUE training runs.")
-    parser.add_argument("--dataset", required=True, nargs="+", help="Input dataset file(s) (.data or .binpack)")
-    parser.add_argument("--bullet-repo", default="nnue/bullet_repo", help="Path to Bullet repository")
-    parser.add_argument("--output-root", default="nnue/models/bullet", help="Training run root")
-    parser.add_argument("--run-id", default="", help="Run identifier (default: utc timestamp)")
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        nargs="+",
+        help="Input dataset file(s) (.data or .binpack)",
+    )
+    parser.add_argument(
+        "--bullet-repo", default="nnue/bullet_repo", help="Path to Bullet repository"
+    )
+    parser.add_argument(
+        "--output-root", default="nnue/models/bullet", help="Training run root"
+    )
+    parser.add_argument(
+        "--run-id", default="", help="Run identifier (default: utc timestamp)"
+    )
 
     # Architecture/training knobs (defaults are intentionally long-run)
-    parser.add_argument("--hidden", type=int, default=256, help="Hidden size for 1_simple")
-    parser.add_argument("--l2-size", type=int, default=0, help="L2 hidden size (0 = single layer, >0 = two layers)")
-    parser.add_argument("--start-superbatch", type=int, default=1, help="Start superbatch")
-    parser.add_argument("--end-superbatch", type=int, default=320, help="End superbatch")
+    parser.add_argument(
+        "--hidden", type=int, default=256, help="Hidden size for 1_simple"
+    )
+    parser.add_argument(
+        "--start-superbatch", type=int, default=1, help="Start superbatch"
+    )
+    parser.add_argument(
+        "--end-superbatch", type=int, default=320, help="End superbatch"
+    )
     parser.add_argument("--lr-start", type=float, default=0.0010, help="Initial LR")
     parser.add_argument(
         "--lr-final",
@@ -34,9 +50,15 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Final LR (0 = use lr_start * 0.3^5)",
     )
-    parser.add_argument("--wdl", type=float, default=0.75, help="WDL blend used by Bullet")
-    parser.add_argument("--save-rate", type=int, default=1, help="Save every N superbatches")
-    parser.add_argument("--threads", type=int, default=8, help="Bullet training/data threads")
+    parser.add_argument(
+        "--wdl", type=float, default=0.75, help="WDL blend used by Bullet"
+    )
+    parser.add_argument(
+        "--save-rate", type=int, default=1, help="Save every N superbatches"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=8, help="Bullet training/data threads"
+    )
 
     # Data format
     parser.add_argument(
@@ -45,15 +67,27 @@ def parse_args() -> argparse.Namespace:
         default="bullet",
         help="Dataset format: bullet (.data) or binpack (.binpack) (default: bullet)",
     )
-    parser.add_argument("--binpack-buffer-mb", type=int, default=1024, help="SfBinpackLoader buffer size in MB")
-    parser.add_argument("--binpack-threads", type=int, default=4, help="SfBinpackLoader decompression threads")
+    parser.add_argument(
+        "--binpack-buffer-mb",
+        type=int,
+        default=1024,
+        help="SfBinpackLoader buffer size in MB",
+    )
+    parser.add_argument(
+        "--binpack-threads",
+        type=int,
+        default=4,
+        help="SfBinpackLoader decompression threads",
+    )
 
     parser.add_argument(
         "--resume",
         default="",
         help="Optional checkpoint path to resume from (<checkpoint_dir>/raw.bin or checkpoint dir)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Print command/env and exit")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print command/env and exit"
+    )
     return parser.parse_args()
 
 
@@ -93,7 +127,9 @@ def main() -> int:
         print("--save-rate and --threads must be > 0", file=sys.stderr)
         return 2
 
-    run_id = args.run_id.strip() or datetime.datetime.now(datetime.UTC).strftime("run_%Y%m%dT%H%M%SZ")
+    run_id = args.run_id.strip() or datetime.datetime.now(datetime.UTC).strftime(
+        "run_%Y%m%dT%H%M%SZ"
+    )
     output_root = Path(args.output_root)
     run_dir = output_root / run_id
     ckpt_dir = run_dir / "checkpoints"
@@ -101,14 +137,11 @@ def main() -> int:
 
     final_lr = args.lr_final if args.lr_final > 0 else args.lr_start * (0.3**5)
 
-    l2_size = args.l2_size
-
     env = os.environ.copy()
     env.update(
         {
             "SYK_DATASET": dataset_str,
             "SYK_HIDDEN": str(args.hidden),
-            "SYK_L2_SIZE": str(l2_size),
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
             "SYK_START_SUPERBATCH": str(args.start_superbatch),
@@ -140,7 +173,6 @@ def main() -> int:
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],
             "SYK_HIDDEN": env["SYK_HIDDEN"],
-            "SYK_L2_SIZE": env["SYK_L2_SIZE"],
             "SYK_LR_START": env["SYK_LR_START"],
             "SYK_LR_FINAL": env["SYK_LR_FINAL"],
             "SYK_START_SUPERBATCH": env["SYK_START_SUPERBATCH"],
