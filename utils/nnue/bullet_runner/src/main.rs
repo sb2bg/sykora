@@ -1,21 +1,21 @@
 use bullet_lib::{
     game::{
         formats::sfbinpack::{
-            TrainingDataEntry,
             chess::{piecetype::PieceType as SfPieceType, r#move::MoveType},
+            TrainingDataEntry,
         },
-        inputs::{ChessBucketsMirrored, get_num_buckets},
+        inputs::{get_num_buckets, ChessBucketsMirrored},
     },
     nn::{
-        InitSettings, Shape,
         optimiser::{AdamW, AdamWParams},
+        InitSettings, Shape,
     },
     trainer::{
         save::SavedFormat,
-        schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
+        schedule::{lr, wdl, TrainingSchedule, TrainingSteps},
         settings::LocalSettings,
     },
-    value::{ValueTrainerBuilder, loader::DirectSequentialDataLoader},
+    value::{loader::DirectSequentialDataLoader, ValueTrainerBuilder},
 };
 use std::env;
 
@@ -34,11 +34,17 @@ const BUCKET_LAYOUT: [usize; 32] = [
 const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
 
 fn env_usize(name: &str, default: usize) -> usize {
-    env::var(name).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(default)
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
 }
 
 fn env_f32(name: &str, default: f32) -> f32 {
-    env::var(name).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(default)
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(default)
 }
 
 fn env_string(name: &str, default: &str) -> String {
@@ -69,7 +75,11 @@ fn main() {
             SavedFormat::id("l0w")
                 .transform(|store, weights| {
                     let factoriser = store.get("l0f").values.repeat(NUM_INPUT_BUCKETS);
-                    weights.into_iter().zip(factoriser).map(|(a, b)| a + b).collect()
+                    weights
+                        .into_iter()
+                        .zip(factoriser)
+                        .map(|(a, b)| a + b)
+                        .collect()
                 })
                 .round()
                 .quantise::<i16>(255),
@@ -99,8 +109,12 @@ fn main() {
         min_weight: -0.99,
         ..Default::default()
     };
-    trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
-    trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
+    trainer
+        .optimiser
+        .set_params_for_weight("l0w", stricter_clipping);
+    trainer
+        .optimiser
+        .set_params_for_weight("l0f", stricter_clipping);
 
     let schedule = TrainingSchedule {
         net_id,
@@ -148,7 +162,10 @@ fn main() {
                 "Using SfBinpackLoader: buffer={}MB, threads={}",
                 binpack_buffer_mb, binpack_threads
             );
-            println!("Input layout: mirrored king buckets ({} buckets)", NUM_INPUT_BUCKETS);
+            println!(
+                "Input layout: mirrored king buckets ({} buckets)",
+                NUM_INPUT_BUCKETS
+            );
             for p in &dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -157,8 +174,6 @@ fn main() {
                 entry.ply >= 16
                     && !entry.pos.is_checked(entry.pos.side_to_move())
                     && entry.score.unsigned_abs() <= 10000
-                    && entry.mv.mtype() == MoveType::Normal
-                    && entry.pos.piece_at(entry.mv.to()).piece_type() == SfPieceType::None
             }
             println!("Filter: ply>=16, not in check, |score|<=10000, normal moves, quiet only");
 
@@ -173,7 +188,10 @@ fn main() {
         }
         _ => {
             println!("Using DirectSequentialDataLoader (bullet format)");
-            println!("Input layout: mirrored king buckets ({} buckets)", NUM_INPUT_BUCKETS);
+            println!(
+                "Input layout: mirrored king buckets ({} buckets)",
+                NUM_INPUT_BUCKETS
+            );
             for p in &dataset_paths {
                 println!("  Dataset: {}", p);
             }
