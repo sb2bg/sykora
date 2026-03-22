@@ -1,0 +1,15 @@
+[package]
+name = "sykora-bullet-runner"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["cuda"]
+cpu = ["bullet_lib/cpu"]
+cuda = ["bullet_lib/cuda"]
+hip = ["bullet_lib/hip"]
+hip-cuda = ["bullet_lib/hip-cuda"]
+multigpu = ["bullet_lib/multigpu"]
+
+[dependencies]
+bullet_lib = { path = "../../../nnue/bullet_repo/crates/bullet_lib", default-features = false }
