@@ -14,12 +14,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
+from bootstrap import DEFAULT_BULLET_REPO, ensure_bullet_repo  # noqa: E402
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pack NNUE training data for Bullet.")
     parser.add_argument(
         "--bullet-utils",
-        default="nnue/bullet_repo/target/release/bullet-utils",
+        default=str(DEFAULT_BULLET_REPO / "target" / "release" / "bullet-utils"),
         help="Path to bullet-utils binary",
     )
     parser.add_argument(
@@ -84,8 +90,13 @@ def main() -> int:
 
     bullet_utils = Path(args.bullet_utils)
     if not bullet_utils.is_file():
-        print(f"bullet-utils not found: {bullet_utils}", file=sys.stderr)
-        return 1
+        default_bullet_utils = DEFAULT_BULLET_REPO / "target" / "release" / "bullet-utils"
+        if bullet_utils.resolve() == default_bullet_utils.resolve():
+            ensure_bullet_repo(DEFAULT_BULLET_REPO, build_utils=True)
+            bullet_utils = default_bullet_utils
+        if not bullet_utils.is_file():
+            print(f"bullet-utils not found: {bullet_utils}", file=sys.stderr)
+            return 1
 
     text_inputs = expand_paths(args.text_input)
     data_inputs = expand_paths(args.data_input)

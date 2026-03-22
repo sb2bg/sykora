@@ -122,6 +122,14 @@ python -m pip install chess
 python -m pip install berserk python-dotenv
 ```
 
+For NNUE training on a fresh machine, bootstrap the Bullet dependency once:
+
+```bash
+python3 utils/nnue/bullet/bootstrap.py --build-utils
+```
+
+The tracked training runner lives under `utils/nnue/bullet_runner/`; datasets, checkpoints, and Bullet build output remain untracked.
+
 ## Building
 
 To build the project, run:

@@ -15,6 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
+from bootstrap import DEFAULT_BULLET_REPO, ensure_bullet_repo  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 def default_threads() -> int:
     n = os.cpu_count() or 4
@@ -24,7 +32,11 @@ def default_threads() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch Bullet CPU sanity training runs.")
     parser.add_argument("--dataset", required=True, help="Input BulletFormat .data dataset")
-    parser.add_argument("--bullet-repo", default="nnue/bullet_repo", help="Path to Bullet repository")
+    parser.add_argument(
+        "--bullet-repo",
+        default=str(DEFAULT_BULLET_REPO),
+        help="Path to Bullet repository",
+    )
     parser.add_argument(
         "--output-root",
         default="nnue/models/bullet_cpu_test",
@@ -72,10 +84,7 @@ def main() -> int:
         print(f"Dataset not found: {dataset}", file=sys.stderr)
         return 1
 
-    bullet_repo = Path(args.bullet_repo)
-    if not bullet_repo.is_dir():
-        print(f"Bullet repo not found: {bullet_repo}", file=sys.stderr)
-        return 1
+    bullet_repo = ensure_bullet_repo(Path(args.bullet_repo))
 
     if args.hidden <= 0:
         print("--hidden must be > 0", file=sys.stderr)
@@ -117,12 +126,13 @@ def main() -> int:
     if args.resume:
         env["SYK_RESUME"] = str(Path(args.resume).resolve())
 
+    manifest = REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "Cargo.toml"
     cmd = [
         "cargo",
         "run",
         "-r",
-        "--example",
-        "sykora_bucketed",
+        "--manifest-path",
+        str(manifest),
         "--features",
         "cpu",
         "--no-default-features",
@@ -168,7 +178,7 @@ def main() -> int:
         return 0
 
     try:
-        subprocess.run(cmd, cwd=str(bullet_repo), env=env, check=True)
+        subprocess.run(cmd, cwd=str(REPO_ROOT), env=env, check=True)
     except subprocess.CalledProcessError as exc:
         print(f"Training failed with exit code {exc.returncode}", file=sys.stderr)
         return exc.returncode
