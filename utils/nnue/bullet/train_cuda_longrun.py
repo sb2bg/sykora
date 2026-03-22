@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run Bullet training with long-run defaults for an RTX 4070 Ti SUPER.
 
-This wraps `cargo run -r --example 1_simple` and records run metadata.
+This wraps `cargo run -r --example sykora_bucketed` and records run metadata.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument(
-        "--hidden", type=int, default=256, help="Hidden size for 1_simple"
+        "--hidden", type=int, default=128, help="Hidden size for sykora_bucketed"
     )
     parser.add_argument(
         "--start-superbatch", type=int, default=1, help="Start superbatch"
@@ -159,7 +159,7 @@ def main() -> int:
     if args.resume:
         env["SYK_RESUME"] = str(Path(args.resume).resolve())
 
-    cmd = ["cargo", "run", "-r", "--example", "1_simple"]
+    cmd = ["cargo", "run", "-r", "--example", "sykora_bucketed"]
 
     meta = {
         "run_id": run_id,

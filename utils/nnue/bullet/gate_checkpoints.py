@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
         "--engine", default="./zig-out/bin/sykora", help="Engine under test"
     )
 
-    parser.add_argument("--blend", type=int, default=2, help="NnueBlend for evaluation")
+    parser.add_argument("--blend", type=int, default=100, help="NnueBlend for evaluation")
     parser.add_argument(
         "--nnue-scale", type=int, default=100, help="NnueScale during eval"
     )
@@ -308,7 +308,6 @@ def main() -> int:
         "engine": str(engine.resolve()),
         "eval": {
             "blend": args.blend,
-            "screlu": screlu,
             "nnue_scale": args.nnue_scale,
             "sts_epd": args.sts_epd,
             "sts_movetime_ms": args.sts_movetime_ms,

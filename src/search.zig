@@ -171,6 +171,17 @@ const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
 pub const SearchEngine = struct {
     const Self = @This();
 
+    const TtProbeResult = struct {
+        tt_move: ?Move,
+        cutoff: ?i32,
+    };
+
+    const StaticEvalContext = struct {
+        static_eval: i32,
+        improving: bool,
+        futile: bool,
+    };
+
     board: *Board,
     allocator: std.mem.Allocator,
     stop_search: *std.atomic.Value(bool),
@@ -282,6 +293,7 @@ pub const SearchEngine = struct {
             const net = self.nnue_net.?;
             nnue.updateAccumulators(
                 net,
+                self.board,
                 &stack[self.acc_ply],
                 &stack[self.acc_ply + 1],
                 move.from(),
@@ -371,7 +383,7 @@ pub const SearchEngine = struct {
     }
 
     /// Run a search and return the best move
-    pub fn search(self: *Self, options: SearchOptions) !SearchResult {
+    pub fn search(self: *Self, options: SearchOptions) anyerror!SearchResult {
         const start_time = std.time.Instant.now() catch unreachable;
 
         // Reset search state
@@ -563,8 +575,234 @@ pub const SearchEngine = struct {
         return time_for_move;
     }
 
+    fn probeTransposition(
+        self: *Self,
+        search_depth: u32,
+        ply: u32,
+        is_pv_node: bool,
+        alpha: i32,
+        beta_adj: i32,
+    ) TtProbeResult {
+        var tt_move: ?Move = null;
+        if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
+            if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
+                tt_move = entry.best_move;
+            }
+
+            if (!is_pv_node and entry.depth >= search_depth) {
+                const tt_score = scoreFromTT(entry.score, ply);
+                switch (entry.bound) {
+                    .exact => return .{ .tt_move = tt_move, .cutoff = tt_score },
+                    .lower_bound => {
+                        if (tt_score >= beta_adj) return .{ .tt_move = tt_move, .cutoff = tt_score };
+                    },
+                    .upper_bound => {
+                        if (tt_score <= alpha) return .{ .tt_move = tt_move, .cutoff = tt_score };
+                    },
+                }
+            }
+        }
+
+        return .{ .tt_move = tt_move, .cutoff = null };
+    }
+
+    inline fn applyInternalIterativeReduction(tt_move: ?Move, search_depth: u32) u32 {
+        if (tt_move == null and search_depth >= 4) {
+            return search_depth - 1;
+        }
+        return search_depth;
+    }
+
+    fn computeStaticEvalContext(
+        self: *Self,
+        in_check: bool,
+        ply: u32,
+        depth: u32,
+        is_pv_node: bool,
+        alpha: i32,
+        beta_adj: i32,
+    ) StaticEvalContext {
+        const static_eval = if (!in_check) self.evaluatePosition() else -INF;
+        const improving = blk: {
+            if (in_check or ply < 2 or ply >= STATIC_EVAL_STACK_SIZE) {
+                break :blk false;
+            }
+            const prev_eval = self.static_eval_stack[ply - 2];
+            break :blk prev_eval != -INF and static_eval > prev_eval;
+        };
+        if (ply < STATIC_EVAL_STACK_SIZE) {
+            self.static_eval_stack[ply] = static_eval;
+        }
+
+        var futile = false;
+        if (!is_pv_node and !in_check and depth <= 3) {
+            var futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(depth));
+            if (improving) futility_margin += 80;
+            if (static_eval + futility_margin < alpha) {
+                futile = true;
+            }
+        }
+
+        _ = beta_adj;
+        return .{
+            .static_eval = static_eval,
+            .improving = improving,
+            .futile = futile,
+        };
+    }
+
+    inline fn tryReverseFutilityPrune(
+        is_pv_node: bool,
+        in_check: bool,
+        depth: u32,
+        static_eval: i32,
+        beta_adj: i32,
+    ) ?i32 {
+        if (!is_pv_node and !in_check and depth <= 5) {
+            const rfp_margin = 80 * @as(i32, @intCast(depth));
+            if (static_eval - rfp_margin >= beta_adj) {
+                return static_eval;
+            }
+        }
+        return null;
+    }
+
+    fn tryRazoring(
+        self: *Self,
+        is_pv_node: bool,
+        in_check: bool,
+        depth: u32,
+        static_eval: i32,
+        alpha: i32,
+        beta_adj: i32,
+        ply: u32,
+    ) !?i32 {
+        if (!is_pv_node and !in_check and depth <= 2 and static_eval + RAZOR_MARGIN < alpha) {
+            const razor_score = try self.quiescence(alpha, beta_adj, ply);
+            if (razor_score < alpha) {
+                return razor_score;
+            }
+        }
+        return null;
+    }
+
+    fn tryNullMovePrune(
+        self: *Self,
+        do_null: bool,
+        is_pv_node: bool,
+        in_check: bool,
+        depth: u32,
+        static_eval: i32,
+        beta_adj: i32,
+        ply: u32,
+    ) !?i32 {
+        if (!(do_null and
+            !is_pv_node and
+            !in_check and
+            depth >= NULL_MOVE_MIN_DEPTH and
+            static_eval >= beta_adj))
+        {
+            return null;
+        }
+
+        const stm = self.board.board.move;
+        const our_non_pawn_material = nonPawnMaterial(self.board.board, stm);
+        if (our_non_pawn_material <= eval.BISHOP_VALUE) return null;
+
+        const old_board = self.board.board;
+        const old_hash = self.board.zobrist_hasher.zobrist_hash;
+        const old_move = self.board.board.move;
+        const old_ep_file = Board.epFileForHash(self.board.board);
+
+        self.board.board.move = if (self.board.board.move == .white) .black else .white;
+        self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomTurn;
+
+        if (old_ep_file) |f| {
+            self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[f];
+        }
+        self.board.board.en_passant_square = null;
+
+        if (self.board.board.halfmove_clock < std.math.maxInt(u8)) {
+            self.board.board.halfmove_clock += 1;
+        }
+        if (old_move == .black and self.board.board.fullmove_number < std.math.maxInt(u16)) {
+            self.board.board.fullmove_number += 1;
+        }
+
+        var reduction: u32 = NULL_MOVE_REDUCTION;
+        if (depth > 6) reduction += 1;
+        if (static_eval - beta_adj > 200) reduction += 1;
+        reduction = @min(reduction, depth - 1);
+
+        const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, depth -| reduction, ply + 1, false);
+
+        self.board.board = old_board;
+        self.board.zobrist_hasher.zobrist_hash = old_hash;
+
+        if (null_score < beta_adj) return null;
+        if (eval.isMateScore(null_score)) return beta_adj;
+
+        if (depth >= NULL_MOVE_VERIFICATION_DEPTH) {
+            const verify_score = try self.alphaBeta(beta_adj - 1, beta_adj, depth - reduction, ply, false);
+            if (verify_score >= beta_adj) {
+                return null_score;
+            }
+            return null;
+        }
+
+        return null_score;
+    }
+
+    fn updateQuietHeuristicsOnBetaCutoff(
+        self: *Self,
+        move: Move,
+        search_depth: u32,
+        ply: u32,
+        color: piece.Color,
+        old_previous: ?Move,
+        quiets_tried: []const Move,
+    ) void {
+        self.killer_moves.add(move, ply);
+        self.history.update(move, search_depth, color);
+
+        if (old_previous) |prev| {
+            self.counter_moves.update(prev, move);
+        }
+
+        for (quiets_tried) |quiet| {
+            if (quiet.from() != move.from() or quiet.to() != move.to()) {
+                self.history.penalize(quiet, search_depth, color);
+            }
+        }
+    }
+
+    fn storeAlphaBetaResult(
+        self: *Self,
+        best_score: i32,
+        original_alpha: i32,
+        beta_adj: i32,
+        search_depth: u32,
+        ply: u32,
+        best_move: ?Move,
+    ) void {
+        const bound: TTEntryBound = if (best_score <= original_alpha)
+            .upper_bound
+        else if (best_score >= beta_adj)
+            .lower_bound
+        else
+            .exact;
+        const score_to_store = scoreToTT(best_score, ply);
+        self.tt.store(
+            self.board.zobrist_hasher.zobrist_hash,
+            @intCast(search_depth),
+            score_to_store,
+            bound,
+            best_move orelse Move.init(0, 0, null),
+        );
+    }
+
     /// Alpha-beta search (negamax variant) with various pruning techniques
-    fn alphaBeta(self: *Self, alpha_in: i32, beta: i32, depth: u32, ply: u32, do_null: bool) !i32 {
+    fn alphaBeta(self: *Self, alpha_in: i32, beta: i32, depth: u32, ply: u32, do_null: bool) anyerror!i32 {
         // Quiescence at depth 0
         if (depth == 0) {
             return self.quiescence(alpha_in, beta, ply);
@@ -607,141 +845,29 @@ pub const SearchEngine = struct {
 
         const is_pv_node = (beta_adj - alpha) > 1;
 
-        // Probe transposition table (and track whether we have a TT move for IIR)
-        var tt_move: ?Move = null;
-        if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
-            if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
-                tt_move = entry.best_move;
-            }
+        const tt_probe = self.probeTransposition(search_depth, ply, is_pv_node, alpha, beta_adj);
+        if (tt_probe.cutoff) |tt_score| {
+            return tt_score;
+        }
+        const tt_move = tt_probe.tt_move;
 
-            // Use TT score for cutoffs (only in non-PV nodes with sufficient depth)
-            if (!is_pv_node and entry.depth >= search_depth) {
-                const tt_score = scoreFromTT(entry.score, ply);
-                switch (entry.bound) {
-                    .exact => return tt_score,
-                    .lower_bound => {
-                        if (tt_score >= beta_adj) return tt_score;
-                    },
-                    .upper_bound => {
-                        if (tt_score <= alpha) return tt_score;
-                    },
-                }
-            }
+        search_depth = applyInternalIterativeReduction(tt_move, search_depth);
+
+        const eval_ctx = self.computeStaticEvalContext(in_check, ply, depth, is_pv_node, alpha, beta_adj);
+        const static_eval = eval_ctx.static_eval;
+        const improving = eval_ctx.improving;
+        const futile = eval_ctx.futile;
+
+        if (tryReverseFutilityPrune(is_pv_node, in_check, depth, static_eval, beta_adj)) |pruned| {
+            return pruned;
         }
 
-        // Internal Iterative Reduction (IIR) — reduce depth by 1 when no TT move at sufficient depth
-        if (tt_move == null and search_depth >= 4) {
-            search_depth -= 1;
+        if (try self.tryRazoring(is_pv_node, in_check, depth, static_eval, alpha, beta_adj, ply)) |razor_score| {
+            return razor_score;
         }
 
-        // Static evaluation for pruning decisions
-        const static_eval = if (!in_check) self.evaluatePosition() else -INF;
-        const improving = blk: {
-            if (in_check or ply < 2 or ply >= STATIC_EVAL_STACK_SIZE) {
-                break :blk false;
-            }
-            const prev_eval = self.static_eval_stack[ply - 2];
-            break :blk prev_eval != -INF and static_eval > prev_eval;
-        };
-        if (ply < STATIC_EVAL_STACK_SIZE) {
-            self.static_eval_stack[ply] = static_eval;
-        }
-
-        // Reverse futility pruning (static null move pruning)
-        // If static eval is far above beta at shallow depths, prune immediately
-        if (!is_pv_node and !in_check and depth <= 5) {
-            const rfp_margin = 80 * @as(i32, @intCast(depth));
-            if (static_eval - rfp_margin >= beta_adj) {
-                return static_eval;
-            }
-        }
-
-        // Razoring - if we're far behind, drop into quiescence
-        if (!is_pv_node and !in_check and depth <= 2 and static_eval + RAZOR_MARGIN < alpha) {
-            const razor_score = try self.quiescence(alpha, beta_adj, ply);
-            if (razor_score < alpha) {
-                return razor_score;
-            }
-        }
-
-        // Null move pruning - try giving opponent a free move
-        if (do_null and
-            !is_pv_node and
-            !in_check and
-            depth >= NULL_MOVE_MIN_DEPTH and
-            static_eval >= beta_adj)
-        {
-            // Don't do null move if we're in a pawn endgame or have very little material
-            const stm = self.board.board.move;
-            const our_non_pawn_material = nonPawnMaterial(self.board.board, stm);
-
-            if (our_non_pawn_material > eval.BISHOP_VALUE) {
-                // Save state
-                const old_board = self.board.board;
-                const old_hash = self.board.zobrist_hasher.zobrist_hash;
-                const old_move = self.board.board.move;
-
-                // Compute EP file contribution BEFORE flipping side (hash was built with old side)
-                const old_ep_file = Board.epFileForHash(self.board.board);
-
-                // Make null move (just flip side to move)
-                self.board.board.move = if (self.board.board.move == .white) .black else .white;
-                self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomTurn;
-
-                // Clear en passant — only XOR if it was actually in the hash
-                if (old_ep_file) |f| {
-                    self.board.zobrist_hasher.zobrist_hash ^= zobrist.RandomEnPassant[f];
-                }
-                self.board.board.en_passant_square = null;
-
-                // Null move is a quiet move for clock purposes.
-                if (self.board.board.halfmove_clock < std.math.maxInt(u8)) {
-                    self.board.board.halfmove_clock += 1;
-                }
-                if (old_move == .black and self.board.board.fullmove_number < std.math.maxInt(u16)) {
-                    self.board.board.fullmove_number += 1;
-                }
-
-                // Search with reduced depth - adaptive reduction based on depth and eval margin
-                var reduction: u32 = NULL_MOVE_REDUCTION;
-                if (depth > 6) reduction += 1;
-                if (static_eval - beta_adj > 200) reduction += 1; // More reduction if we're way ahead
-                reduction = @min(reduction, depth - 1);
-
-                const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, depth -| reduction, ply + 1, false);
-
-                // Restore state
-                self.board.board = old_board;
-                self.board.zobrist_hasher.zobrist_hash = old_hash;
-
-                // Beta cutoff from null move
-                if (null_score >= beta_adj) {
-                    // Don't return mate scores from null move
-                    if (eval.isMateScore(null_score)) {
-                        return beta_adj;
-                    }
-
-                    // Verification search at high depths to avoid zugzwang
-                    if (depth >= NULL_MOVE_VERIFICATION_DEPTH) {
-                        const verify_score = try self.alphaBeta(beta_adj - 1, beta_adj, depth - reduction, ply, false);
-                        if (verify_score >= beta_adj) {
-                            return null_score;
-                        }
-                    } else {
-                        return null_score;
-                    }
-                }
-            }
-        }
-
-        // Futility pruning - if we're way behind and near the leaf, prune quiet moves
-        var futile = false;
-        if (!is_pv_node and !in_check and depth <= 3) {
-            var futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(depth));
-            if (improving) futility_margin += 80;
-            if (static_eval + futility_margin < alpha) {
-                futile = true;
-            }
+        if (try self.tryNullMovePrune(do_null, is_pv_node, in_check, depth, static_eval, beta_adj, ply)) |null_score| {
+            return null_score;
         }
 
         // Use staged move picker for efficient move ordering
@@ -953,20 +1079,14 @@ pub const SearchEngine = struct {
             if (alpha >= beta_adj) {
                 // Update heuristics for non-captures
                 if (!is_capture and !is_promotion) {
-                    self.killer_moves.add(move, ply);
-                    self.history.update(move, search_depth, color);
-
-                    // Update counter move
-                    if (old_previous) |prev| {
-                        self.counter_moves.update(prev, move);
-                    }
-
-                    // Penalize other quiets that were tried before the cutoff
-                    for (quiets_tried[0..quiets_tried_count]) |quiet| {
-                        if (quiet.from() != move.from() or quiet.to() != move.to()) {
-                            self.history.penalize(quiet, search_depth, color);
-                        }
-                    }
+                    self.updateQuietHeuristicsOnBetaCutoff(
+                        move,
+                        search_depth,
+                        ply,
+                        color,
+                        old_previous,
+                        quiets_tried[0..quiets_tried_count],
+                    );
                 }
                 break;
             }
@@ -981,15 +1101,7 @@ pub const SearchEngine = struct {
             }
         }
 
-        // Store in transposition table
-        const bound: TTEntryBound = if (best_score <= original_alpha)
-            .upper_bound
-        else if (best_score >= beta_adj)
-            .lower_bound
-        else
-            .exact;
-        const score_to_store = scoreToTT(best_score, ply);
-        self.tt.store(self.board.zobrist_hasher.zobrist_hash, @intCast(search_depth), score_to_store, bound, best_move orelse Move.init(0, 0, null));
+        self.storeAlphaBetaResult(best_score, original_alpha, beta_adj, search_depth, ply, best_move);
 
         return best_score;
     }
@@ -1114,7 +1226,7 @@ pub const SearchEngine = struct {
     }
 
     /// Quiescence search - search only tactical moves to avoid horizon effect
-    fn quiescence(self: *Self, alpha_in: i32, beta: i32, ply: u32) !i32 {
+    fn quiescence(self: *Self, alpha_in: i32, beta: i32, ply: u32) anyerror!i32 {
         if (self.stop_search.load(.seq_cst)) {
             return 0;
         }

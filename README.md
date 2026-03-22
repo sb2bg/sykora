@@ -53,10 +53,11 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 ### Evaluation
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `768 -> Nx2 -> 1` architecture with SCReLU activation
+  - Backward-compatible `SYKNNUE2`/`SYKNNUE3` loader
+  - Legacy `768 -> Nx2 -> 1` and mirrored king-bucketed sparse-input nets
+  - SCReLU activation with incremental accumulators during search
   - Trained on high-depth self-play data via the Bullet trainer
-  - Incremental accumulator updates during search
-  - Custom `SYKNNUE2` network format with auto-detected activation type
+  - King-bucket training path via `nnue/bullet_repo/examples/sykora_bucketed.rs`
   - Blendable with classical eval via `NnueBlend` (default: 100 = pure NNUE)
 - **Classical handcrafted evaluation** (fallback):
   - Material and piece-square tables

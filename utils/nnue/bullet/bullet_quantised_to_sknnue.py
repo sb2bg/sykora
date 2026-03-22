@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Convert Bullet simple quantised.bin -> Sykora SYKNNUE2.
+"""Convert Bullet quantised.bin -> Sykora SYKNNUE2/SYKNNUE3.
 
-Supports the common Bullet save format from `examples/simple.rs` / `1_simple.rs`:
+Supports:
+  - legacy `768 -> Nx2 -> 1`
+  - mirrored king-bucketed inputs with merged factoriser weights
+
+Expected Bullet save layout:
   l0w (i16, QA) | l0b (i16, QA) | l1w (i16, QB) | l1b (i16, QA*QB) | padding
 """
 
@@ -25,7 +29,10 @@ def parse_args() -> argparse.Namespace:
         help="Hidden size (0 = infer from file length)",
     )
     parser.add_argument(
-        "--input-size", type=int, default=768, help="Input feature size (default: 768)"
+        "--feature-set",
+        choices=["auto", "legacy", "sykora10"],
+        default="auto",
+        help="Input feature set (default: auto)",
     )
     parser.add_argument(
         "--strict-padding",
@@ -67,6 +74,39 @@ def compute_payload_len(hidden: int, input_size: int) -> int:
     return n_i16 * 2
 
 
+def candidate_feature_configs(
+    feature_set: str,
+) -> list[tuple[str, int, list[int] | None, int]]:
+    import sys
+
+    utils_nnue_dir = Path(__file__).resolve().parents[1]
+    if str(utils_nnue_dir) not in sys.path:
+        sys.path.insert(0, str(utils_nnue_dir))
+
+    from common import (  # noqa: E402
+        FEATURE_SET_KING_BUCKETS_MIRRORED,
+        FEATURE_SET_LEGACY,
+        LEGACY_INPUT_SIZE,
+        SYKORA_BUCKET_LAYOUT_32,
+        expand_mirrored_bucket_layout,
+        input_size_for_feature_set,
+    )
+
+    bucket_layout = expand_mirrored_bucket_layout(SYKORA_BUCKET_LAYOUT_32)
+    configs = {
+        "legacy": ("legacy", LEGACY_INPUT_SIZE, None, FEATURE_SET_LEGACY),
+        "sykora10": (
+            "sykora10",
+            input_size_for_feature_set(FEATURE_SET_KING_BUCKETS_MIRRORED, bucket_layout),
+            bucket_layout,
+            FEATURE_SET_KING_BUCKETS_MIRRORED,
+        ),
+    }
+    if feature_set == "auto":
+        return [configs["legacy"], configs["sykora10"]]
+    return [configs[feature_set]]
+
+
 def main() -> int:
     args = parse_args()
 
@@ -76,22 +116,39 @@ def main() -> int:
 
     raw = in_path.read_bytes()
     total_len = len(raw)
-    input_size = args.input_size
+    candidates = candidate_feature_configs(args.feature_set)
+    matches: list[tuple[str, int, list[int] | None, int, int, int]] = []
+    for name, input_size, bucket_layout, feature_id in candidates:
+        if args.hidden_size > 0:
+            hidden = args.hidden_size
+            payload_len = compute_payload_len(hidden, input_size)
+            if payload_len <= total_len:
+                matches.append(
+                    (name, hidden, bucket_layout, feature_id, payload_len, input_size)
+                )
+            continue
 
-    if args.hidden_size > 0:
-        hidden = args.hidden_size
-        payload_len = compute_payload_len(hidden, input_size)
-        if payload_len > total_len:
-            raise ValueError(
-                f"Hidden size {hidden} implies payload {payload_len} bytes > file length {total_len}"
-            )
-    else:
         inferred = infer_hidden_size(total_len, input_size)
         if inferred is None:
-            raise ValueError(
-                "Could not infer hidden size from file length; pass --hidden-size explicitly."
-            )
+            continue
         hidden, payload_len = inferred
+        matches.append(
+            (name, hidden, bucket_layout, feature_id, payload_len, input_size)
+        )
+
+    if not matches:
+        raise ValueError(
+            "Could not infer a supported feature/input configuration from file length; "
+            "pass --feature-set and/or --hidden-size explicitly."
+        )
+    if len(matches) > 1:
+        names = ", ".join(name for name, *_ in matches)
+        raise ValueError(
+            f"Multiple feature configurations matched this file length ({names}); "
+            "pass --feature-set explicitly."
+        )
+
+    feature_name, hidden, bucket_layout_64, feature_set_id, payload_len, input_size = matches[0]
 
     payload = raw[:payload_len]
     padding = raw[payload_len:]
@@ -139,9 +196,12 @@ def main() -> int:
         output_weights_i16=output_weights.astype(np.int16).tolist(),
         output_bias_i32=output_bias_i16,
         activation_type=activation_type,
+        feature_set=feature_set_id,
+        bucket_layout_64=bucket_layout_64,
     )
 
     print(f"Input: {in_path}")
+    print(f"Feature set: {feature_name}")
     print(f"Total bytes: {total_len}")
     print(f"Hidden size: {hidden}")
     print(f"Payload bytes: {payload_len}")

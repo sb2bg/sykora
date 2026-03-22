@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run-id", default="", help="Run identifier (default: utc timestamp)")
 
-    parser.add_argument("--hidden", type=int, default=64, help="Hidden size for 1_simple")
+    parser.add_argument("--hidden", type=int, default=64, help="Hidden size for sykora_bucketed")
     parser.add_argument("--start-superbatch", type=int, default=1, help="Start superbatch")
     parser.add_argument(
         "--end-superbatch",
@@ -122,7 +122,7 @@ def main() -> int:
         "run",
         "-r",
         "--example",
-        "1_simple",
+        "sykora_bucketed",
         "--features",
         "cpu",
         "--no-default-features",

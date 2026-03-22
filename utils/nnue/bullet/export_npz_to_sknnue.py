@@ -2,7 +2,7 @@
 """Convert a float-domain NPZ checkpoint into Sykora SYKNNUE2 format.
 
 Expected arrays in NPZ:
-- input_weights: shape [768, hidden]
+- input_weights: shape [input_size, hidden]
 - input_bias: shape [hidden]
 - output_weights: shape [2 * hidden] or [2, hidden]
 - output_bias: scalar
@@ -20,7 +20,17 @@ UTILS_NNUE_DIR = Path(__file__).resolve().parents[1]
 if str(UTILS_NNUE_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_NNUE_DIR))
 
-from common import INPUT_SIZE, QA, QB, write_syk_nnue  # noqa: E402
+from common import (  # noqa: E402
+    FEATURE_SET_KING_BUCKETS_MIRRORED,
+    FEATURE_SET_LEGACY,
+    LEGACY_INPUT_SIZE,
+    QA,
+    QB,
+    SYKORA_BUCKET_LAYOUT_32,
+    expand_mirrored_bucket_layout,
+    input_size_for_feature_set,
+    write_syk_nnue,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         choices=["relu", "screlu"],
         default="screlu",
         help="Activation type to embed in net file (default: screlu)",
+    )
+    parser.add_argument(
+        "--feature-set",
+        choices=["auto", "legacy", "sykora10"],
+        default="auto",
+        help="Feature layout to embed in the output net (default: auto from input shape)",
     )
     return parser.parse_args()
 
@@ -88,10 +104,36 @@ def main() -> int:
         raise ValueError(
             f"input_weights must be rank-2, got shape {input_weights.shape}"
         )
-    if input_weights.shape[0] != INPUT_SIZE:
-        raise ValueError(
-            f"input_weights first dim must be INPUT_SIZE={INPUT_SIZE}, got {input_weights.shape[0]}"
-        )
+    bucket_layout_64 = expand_mirrored_bucket_layout(SYKORA_BUCKET_LAYOUT_32)
+    bucketed_input_size = input_size_for_feature_set(
+        FEATURE_SET_KING_BUCKETS_MIRRORED, bucket_layout_64
+    )
+    if args.feature_set == "auto":
+        if input_weights.shape[0] == LEGACY_INPUT_SIZE:
+            feature_set = FEATURE_SET_LEGACY
+            chosen_bucket_layout = None
+        elif input_weights.shape[0] == bucketed_input_size:
+            feature_set = FEATURE_SET_KING_BUCKETS_MIRRORED
+            chosen_bucket_layout = bucket_layout_64
+        else:
+            raise ValueError(
+                "Could not infer feature set from input_weights shape; "
+                f"got {input_weights.shape[0]}, expected {LEGACY_INPUT_SIZE} or {bucketed_input_size}"
+            )
+    elif args.feature_set == "legacy":
+        if input_weights.shape[0] != LEGACY_INPUT_SIZE:
+            raise ValueError(
+                f"legacy nets require input_weights.shape[0] == {LEGACY_INPUT_SIZE}, got {input_weights.shape[0]}"
+            )
+        feature_set = FEATURE_SET_LEGACY
+        chosen_bucket_layout = None
+    else:
+        if input_weights.shape[0] != bucketed_input_size:
+            raise ValueError(
+                f"sykora10 nets require input_weights.shape[0] == {bucketed_input_size}, got {input_weights.shape[0]}"
+            )
+        feature_set = FEATURE_SET_KING_BUCKETS_MIRRORED
+        chosen_bucket_layout = bucket_layout_64
 
     hidden_size = int(input_weights.shape[1])
     if input_bias.shape[0] != hidden_size:
@@ -139,6 +181,8 @@ def main() -> int:
         output_weights_i16=output_weights_i16.tolist(),
         output_bias_i32=output_bias_i32,
         activation_type=activation_type,
+        feature_set=feature_set,
+        bucket_layout_64=chosen_bucket_layout,
     )
 
     print(f"Input: {in_path}")
