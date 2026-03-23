@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Experiment ledger and rating pipeline for Sykora engine iterations.
 
-This script creates a structured, durable history of:
-- engine snapshots (binary + metadata),
-- head-to-head matches (PGN + machine-readable summary),
-- network ratings across all archived matches.
+Canonical workflow:
+1) Snapshot binaries you want to compare.
+2) Run archived `selfplay` or archived `sprt` between snapshot IDs.
+3) Recompute ratings and graph exports from archived selfplay results.
 
-Typical workflow:
-  1) Snapshot binaries you want to compare.
-  2) Run matches between snapshot IDs.
-  3) Recompute ratings and graph exports from accumulated match data.
+Low-level runners under `utils/match/` remain implementation details.
 """
 
 from __future__ import annotations
@@ -25,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -157,6 +155,7 @@ def probe_uci_identity(engine_path: Path) -> dict:
 def ensure_layout(root: Path) -> None:
     (root / "engines").mkdir(parents=True, exist_ok=True)
     (root / "matches").mkdir(parents=True, exist_ok=True)
+    (root / "sprt").mkdir(parents=True, exist_ok=True)
     (root / "ratings").mkdir(parents=True, exist_ok=True)
     (root / "sts").mkdir(parents=True, exist_ok=True)
     (root / "index").mkdir(parents=True, exist_ok=True)
@@ -167,6 +166,14 @@ def load_engine_metadata(root: Path, engine_id: str) -> dict:
     if not meta_path.is_file():
         raise FileNotFoundError(f"Unknown engine id '{engine_id}' (missing {meta_path})")
     return json.loads(meta_path.read_text())
+
+
+def engine_binary_path(root: Path, engine_id: str) -> Path:
+    meta = load_engine_metadata(root, engine_id)
+    path = root / "engines" / engine_id / meta["binary"]["path"]
+    if not path.is_file():
+        raise FileNotFoundError(f"Snapshot binary missing for {engine_id}: {path}")
+    return path
 
 
 def default_engine_id(label: str, git: dict) -> str:
@@ -182,6 +189,83 @@ def uniquify_engine_id(root: Path, engine_id: str) -> str:
         candidate = f"{engine_id}_{counter}"
         counter += 1
     return candidate
+
+
+def make_run_id(engine1_id: str, engine2_id: str) -> str:
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
+    return f"{ts}__{slugify(engine1_id)}__vs__{slugify(engine2_id)}"
+
+
+def _pump_stream(
+    src,
+    dst_handle,
+    mirror,
+    chunks: List[str],
+) -> None:
+    try:
+        for line in iter(src.readline, ""):
+            chunks.append(line)
+            dst_handle.write(line)
+            dst_handle.flush()
+            mirror.write(line)
+            mirror.flush()
+    finally:
+        src.close()
+
+
+def run_logged_command(
+    cmd: List[str],
+    cwd: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    stdout_chunks: List[str] = []
+    stderr_chunks: List[str] = []
+
+    with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open("w", encoding="utf-8") as stderr_handle:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+        )
+
+        if proc.stdout is None or proc.stderr is None:
+            raise RuntimeError("Failed to open subprocess pipes")
+
+        stdout_thread = threading.Thread(
+            target=_pump_stream,
+            args=(proc.stdout, stdout_handle, sys.stdout, stdout_chunks),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_pump_stream,
+            args=(proc.stderr, stderr_handle, sys.stderr, stderr_chunks),
+            daemon=True,
+        )
+
+        stdout_thread.start()
+        stderr_thread.start()
+        return_code = proc.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+
+    return subprocess.CompletedProcess(
+        cmd,
+        return_code,
+        "".join(stdout_chunks),
+        "".join(stderr_chunks),
+    )
+
+
+def inject_summary_metadata(summary_path: Path, mode: str, run_id: str) -> dict:
+    summary = json.loads(summary_path.read_text())
+    summary["mode"] = mode
+    summary["run_id"] = run_id
+    write_json(summary_path, summary)
+    return summary
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -247,33 +331,16 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_selfplay_for_match(
-    root: Path,
+def build_selfplay_command(
+    args: argparse.Namespace,
+    engine1_path: Path,
+    engine2_path: Path,
     engine1_id: str,
     engine2_id: str,
-    args: argparse.Namespace,
-) -> Tuple[int, Path, Path, str]:
-    engine1_meta = load_engine_metadata(root, engine1_id)
-    engine2_meta = load_engine_metadata(root, engine2_id)
-
-    engine1_path = root / "engines" / engine1_id / engine1_meta["binary"]["path"]
-    engine2_path = root / "engines" / engine2_id / engine2_meta["binary"]["path"]
-
-    if not engine1_path.is_file() or not engine2_path.is_file():
-        raise FileNotFoundError("Snapshot engine binary missing")
-
-    ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
-    match_id = f"{ts}__{slugify(engine1_id)}__vs__{slugify(engine2_id)}"
-
-    match_dir = root / "matches" / match_id
-    pgn_dir = match_dir / "pgn"
-    summary_path = match_dir / "summary.json"
-    meta_path = match_dir / "metadata.json"
-
-    match_dir.mkdir(parents=True, exist_ok=False)
-
+    summary_path: Path,
+    pgn_dir: Path,
+) -> List[str]:
     python_bin = args.python or sys.executable
-
     cmd: List[str] = [
         python_bin,
         str(REPO_ROOT / "utils" / "match" / "selfplay.py"),
@@ -301,6 +368,8 @@ def run_selfplay_for_match(
 
     if args.depth is not None:
         cmd.extend(["--depth", str(args.depth)])
+    if args.game_time_ms is not None:
+        cmd.extend(["--game-time-ms", str(args.game_time_ms), "--inc-ms", str(args.inc_ms)])
     if args.shuffle_openings:
         cmd.append("--shuffle-openings")
     if args.threads is not None:
@@ -314,25 +383,117 @@ def run_selfplay_for_match(
     if args.quiet:
         cmd.append("--quiet")
 
+    return cmd
+
+
+def build_sprt_command(
+    args: argparse.Namespace,
+    engine1_path: Path,
+    engine2_path: Path,
+    engine1_id: str,
+    engine2_id: str,
+    summary_path: Path,
+) -> List[str]:
+    python_bin = args.python or sys.executable
+    cmd: List[str] = [
+        python_bin,
+        str(REPO_ROOT / "utils" / "match" / "sprt.py"),
+        str(engine1_path),
+        str(engine2_path),
+        "--name1",
+        engine1_id,
+        "--name2",
+        engine2_id,
+        "--elo0",
+        str(args.elo0),
+        "--elo1",
+        str(args.elo1),
+        "--alpha",
+        str(args.alpha),
+        "--beta",
+        str(args.beta),
+        "--games-per-batch",
+        str(args.games_per_batch),
+        "--max-games",
+        str(args.max_games),
+        "--movetime-ms",
+        str(args.movetime_ms),
+        "--openings",
+        args.openings,
+        "--seed",
+        str(args.seed),
+        "--max-plies",
+        str(args.max_plies),
+        "--practical-min-games",
+        str(args.practical_min_games),
+        "--practical-p-threshold",
+        str(args.practical_p_threshold),
+        "--summary-json",
+        str(summary_path),
+    ]
+
+    if args.depth is not None:
+        cmd.extend(["--depth", str(args.depth)])
+    if args.game_time_ms is not None:
+        cmd.extend(["--game-time-ms", str(args.game_time_ms), "--inc-ms", str(args.inc_ms)])
+    if args.shuffle_openings:
+        cmd.append("--shuffle-openings")
+    if args.threads is not None:
+        cmd.extend(["--threads", str(args.threads)])
+    if args.hash_mb is not None:
+        cmd.extend(["--hash-mb", str(args.hash_mb)])
+    for opt in args.engine1_opt:
+        cmd.extend(["--engine1-opt", opt])
+    for opt in args.engine2_opt:
+        cmd.extend(["--engine2-opt", opt])
+    if args.allow_inconclusive:
+        cmd.append("--allow-inconclusive")
+
+    return cmd
+
+
+def run_archived_selfplay(
+    root: Path,
+    engine1_id: str,
+    engine2_id: str,
+    args: argparse.Namespace,
+) -> Tuple[int, Path, Path, str]:
+    engine1_path = engine_binary_path(root, engine1_id)
+    engine2_path = engine_binary_path(root, engine2_id)
+
+    run_id = make_run_id(engine1_id, engine2_id)
+    run_dir = root / "matches" / run_id
+    pgn_dir = run_dir / "pgn"
+    summary_path = run_dir / "summary.json"
+    meta_path = run_dir / "metadata.json"
+    stdout_path = run_dir / "stdout.log"
+    stderr_path = run_dir / "stderr.log"
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    cmd = build_selfplay_command(args, engine1_path, engine2_path, engine1_id, engine2_id, summary_path, pgn_dir)
+
     started = utc_now_iso()
-    proc = subprocess.run(cmd, cwd=REPO_ROOT)
+    proc = run_logged_command(cmd, REPO_ROOT, stdout_path, stderr_path)
     finished = utc_now_iso()
 
     if proc.returncode not in (0, 1, 2):
         raise RuntimeError(f"selfplay.py failed with exit code {proc.returncode}")
-
     if not summary_path.is_file():
         raise RuntimeError(f"Expected summary JSON not produced: {summary_path}")
 
-    summary = json.loads(summary_path.read_text())
+    summary = inject_summary_metadata(summary_path, "selfplay", run_id)
     metadata = {
-        "match_id": match_id,
+        "mode": "selfplay",
+        "run_id": run_id,
         "started_at_utc": started,
         "finished_at_utc": finished,
         "engine1_id": engine1_id,
         "engine2_id": engine2_id,
-        "selfplay_exit_code": proc.returncode,
+        "exit_code": proc.returncode,
         "summary_relpath": str(summary_path.relative_to(root)),
+        "metadata_relpath": str(meta_path.relative_to(root)),
+        "stdout_relpath": str(stdout_path.relative_to(root)),
+        "stderr_relpath": str(stderr_path.relative_to(root)),
         "pgn_relpath": str(pgn_dir.relative_to(root)),
         "command": cmd,
         "result": summary.get("result", {}),
@@ -343,17 +504,81 @@ def run_selfplay_for_match(
     append_jsonl(
         root / "index" / "matches.jsonl",
         {
-            "match_id": match_id,
+            "mode": "selfplay",
+            "run_id": run_id,
             "started_at_utc": started,
             "engine1_id": engine1_id,
             "engine2_id": engine2_id,
-            "selfplay_exit_code": proc.returncode,
+            "exit_code": proc.returncode,
             "summary_relpath": metadata["summary_relpath"],
-            "metadata_relpath": str(meta_path.relative_to(root)),
+            "metadata_relpath": metadata["metadata_relpath"],
         },
     )
 
-    return proc.returncode, summary_path, meta_path, match_id
+    return proc.returncode, summary_path, meta_path, run_id
+
+
+def run_archived_sprt(
+    root: Path,
+    engine1_id: str,
+    engine2_id: str,
+    args: argparse.Namespace,
+) -> Tuple[int, Path, Path, str]:
+    engine1_path = engine_binary_path(root, engine1_id)
+    engine2_path = engine_binary_path(root, engine2_id)
+
+    run_id = make_run_id(engine1_id, engine2_id)
+    run_dir = root / "sprt" / run_id
+    summary_path = run_dir / "summary.json"
+    meta_path = run_dir / "metadata.json"
+    stdout_path = run_dir / "stdout.log"
+    stderr_path = run_dir / "stderr.log"
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    cmd = build_sprt_command(args, engine1_path, engine2_path, engine1_id, engine2_id, summary_path)
+
+    started = utc_now_iso()
+    proc = run_logged_command(cmd, REPO_ROOT, stdout_path, stderr_path)
+    finished = utc_now_iso()
+
+    if proc.returncode > 3:
+        raise RuntimeError(f"sprt.py failed with unexpected exit code {proc.returncode}")
+    if not summary_path.is_file():
+        raise RuntimeError(f"Expected summary JSON not produced: {summary_path}")
+
+    summary = inject_summary_metadata(summary_path, "sprt", run_id)
+    metadata = {
+        "mode": "sprt",
+        "run_id": run_id,
+        "started_at_utc": started,
+        "finished_at_utc": finished,
+        "engine1_id": engine1_id,
+        "engine2_id": engine2_id,
+        "exit_code": proc.returncode,
+        "summary_relpath": str(summary_path.relative_to(root)),
+        "metadata_relpath": str(meta_path.relative_to(root)),
+        "stdout_relpath": str(stdout_path.relative_to(root)),
+        "stderr_relpath": str(stderr_path.relative_to(root)),
+        "command": cmd,
+        "result": summary.get("result", {}),
+    }
+    write_json(meta_path, metadata)
+
+    append_jsonl(
+        root / "index" / "sprt_runs.jsonl",
+        {
+            "mode": "sprt",
+            "run_id": run_id,
+            "started_at_utc": started,
+            "engine1_id": engine1_id,
+            "engine2_id": engine2_id,
+            "exit_code": proc.returncode,
+            "summary_relpath": metadata["summary_relpath"],
+            "metadata_relpath": metadata["metadata_relpath"],
+        },
+    )
+
+    return proc.returncode, summary_path, meta_path, run_id
 
 
 def load_matches(root: Path) -> List[MatchRecord]:
@@ -363,6 +588,18 @@ def load_matches(root: Path) -> List[MatchRecord]:
         try:
             data = json.loads(summary_path.read_text())
         except Exception:
+            continue
+
+        metadata_path = summary_path.parent / "metadata.json"
+        metadata = None
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text())
+            except Exception:
+                metadata = None
+
+        mode = str(data.get("mode", "selfplay")).strip()
+        if mode != "selfplay":
             continue
 
         engine1_id = str(data.get("engine1", {}).get("name", "")).strip()
@@ -379,8 +616,12 @@ def load_matches(root: Path) -> List[MatchRecord]:
         except Exception:
             continue
 
-        match_id = summary_path.parent.name
-        started = data.get("generated_at_utc") or ""
+        match_id = str(data.get("run_id", summary_path.parent.name))
+        started = (
+            (metadata or {}).get("started_at_utc")
+            or data.get("generated_at_utc")
+            or ""
+        )
 
         matches.append(
             MatchRecord(
@@ -504,6 +745,7 @@ def write_ratings_outputs(root: Path, matches: List[MatchRecord]) -> dict:
     summary = {
         "generated_at_utc": utc_now_iso(),
         "method": "weighted_pairwise_elo_fit",
+        "source_mode": "selfplay",
         "match_count": len(matches),
         "engine_count": len(leaderboard),
         "leaderboard": leaderboard,
@@ -546,7 +788,7 @@ def load_ratings_summary(root: Path, recompute: bool = True) -> dict:
     if recompute:
         matches = load_matches(root)
         if not matches:
-            raise RuntimeError("No matches found. Run 'history.py match' first.")
+            raise RuntimeError("No selfplay runs found. Run 'history.py selfplay' first.")
         return write_ratings_outputs(root, matches)
 
     latest_path = root / "ratings" / "latest.json"
@@ -555,7 +797,7 @@ def load_ratings_summary(root: Path, recompute: bool = True) -> dict:
 
     matches = load_matches(root)
     if not matches:
-        raise RuntimeError("No matches found. Run 'history.py match' first.")
+        raise RuntimeError("No selfplay runs found. Run 'history.py selfplay' first.")
     return write_ratings_outputs(root, matches)
 
 
@@ -748,7 +990,7 @@ def maybe_plot_timeline(root: Path, top_n: int = 8) -> Optional[Path]:
         ax.plot(xs, ys, label=engine)
 
     ax.set_title("Sykora Engine Rating Timeline")
-    ax.set_xlabel("Match Step")
+    ax.set_xlabel("Selfplay Run")
     ax.set_ylabel("Relative Elo")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=8)
@@ -843,7 +1085,7 @@ def maybe_plot_network(
     cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("Relative Elo")
 
-    ax.set_title("Sykora Version Network (nodes=engines, edges=matches)")
+    ax.set_title("Sykora Version Network (nodes=engines, edges=selfplay pairs)")
     ax.axis("off")
     ax.set_aspect("equal", adjustable="box")
 
@@ -854,20 +1096,31 @@ def maybe_plot_network(
     return out_path
 
 
-def cmd_match(args: argparse.Namespace) -> int:
+def refresh_ratings(root: Path, plot: bool) -> Optional[Path]:
+    matches = load_matches(root)
+    if not matches:
+        return None
+    write_ratings_outputs(root, matches)
+    if plot:
+        return maybe_plot_timeline(root)
+    return None
+
+
+def cmd_selfplay(args: argparse.Namespace) -> int:
     root = Path(args.history_root)
     ensure_layout(root)
 
-    code, summary_path, meta_path, match_id = run_selfplay_for_match(
+    code, summary_path, meta_path, run_id = run_archived_selfplay(
         root=root,
         engine1_id=args.engine1_id,
         engine2_id=args.engine2_id,
         args=args,
     )
 
-    print(f"Match stored: {match_id}")
+    print(f"Selfplay stored: {run_id}")
     print(f"  summary: {summary_path}")
     print(f"  metadata: {meta_path}")
+    print(f"  selfplay exit code: {code}")
 
     if not args.no_rate:
         matches = load_matches(root)
@@ -878,16 +1131,15 @@ def cmd_match(args: argparse.Namespace) -> int:
                 print(f"  timeline plot: {plot_path}")
             else:
                 print("  timeline plot: skipped (matplotlib not installed)")
-
         print(
             f"  ratings updated: {root / 'ratings' / 'latest.json'}"
-            f" ({rating_summary['engine_count']} engines, {rating_summary['match_count']} matches)"
+            f" ({rating_summary['engine_count']} engines, {rating_summary['match_count']} selfplay runs)"
         )
 
-    return code
+    return 0
 
 
-def cmd_match_extremes(args: argparse.Namespace) -> int:
+def cmd_selfplay_extremes(args: argparse.Namespace) -> int:
     root = Path(args.history_root)
     ensure_layout(root)
 
@@ -919,32 +1171,25 @@ def cmd_match_extremes(args: argparse.Namespace) -> int:
         f"\n  weakest  #{args.weak_rank}: {engine2_id} (Elo {float(weak['rating']):+.1f}, games={int(weak['games'])})"
     )
 
-    code, summary_path, meta_path, match_id = run_selfplay_for_match(
+    args.engine1_id = engine1_id
+    args.engine2_id = engine2_id
+    return cmd_selfplay(args)
+
+
+def cmd_sprt(args: argparse.Namespace) -> int:
+    root = Path(args.history_root)
+    ensure_layout(root)
+
+    code, summary_path, meta_path, run_id = run_archived_sprt(
         root=root,
-        engine1_id=engine1_id,
-        engine2_id=engine2_id,
+        engine1_id=args.engine1_id,
+        engine2_id=args.engine2_id,
         args=args,
     )
 
-    print(f"Match stored: {match_id}")
+    print(f"SPRT stored: {run_id}")
     print(f"  summary: {summary_path}")
     print(f"  metadata: {meta_path}")
-
-    if not args.no_rate:
-        matches = load_matches(root)
-        rating_summary = write_ratings_outputs(root, matches)
-        if args.plot:
-            plot_path = maybe_plot_timeline(root)
-            if plot_path is not None:
-                print(f"  timeline plot: {plot_path}")
-            else:
-                print("  timeline plot: skipped (matplotlib not installed)")
-
-        print(
-            f"  ratings updated: {root / 'ratings' / 'latest.json'}"
-            f" ({rating_summary['engine_count']} engines, {rating_summary['match_count']} matches)"
-        )
-
     return code
 
 
@@ -954,7 +1199,7 @@ def cmd_ratings(args: argparse.Namespace) -> int:
 
     matches = load_matches(root)
     if not matches:
-        print("No matches found. Run 'history.py match' first.")
+        print("No selfplay runs found. Run 'history.py selfplay' first.")
         return 1
 
     summary = write_ratings_outputs(root, matches)
@@ -963,7 +1208,7 @@ def cmd_ratings(args: argparse.Namespace) -> int:
         plot_path = maybe_plot_timeline(root)
 
     print(f"Ratings updated: {root / 'ratings' / 'latest.json'}")
-    print(f"Engines: {summary['engine_count']}, Matches: {summary['match_count']}")
+    print(f"Engines: {summary['engine_count']}, Selfplay runs: {summary['match_count']}")
 
     print("Top engines:")
     for idx, row in enumerate(summary["leaderboard"][: min(10, len(summary["leaderboard"]))], start=1):
@@ -986,7 +1231,7 @@ def cmd_network(args: argparse.Namespace) -> int:
     leaderboard = filter_leaderboard(summary.get("leaderboard", []), args.min_games)
     if not leaderboard:
         raise RuntimeError(
-            f"No engines satisfy min-games={args.min_games}. Lower --min-games or run more matches."
+            f"No engines satisfy min-games={args.min_games}. Lower --min-games or run more selfplay."
         )
 
     out_path = maybe_plot_network(
@@ -1045,10 +1290,7 @@ def cmd_sts(args: argparse.Namespace) -> int:
     had_failures = False
 
     for engine_id in engine_ids:
-        meta = load_engine_metadata(root, engine_id)
-        engine_path = root / "engines" / engine_id / meta["binary"]["path"]
-        if not engine_path.is_file():
-            raise RuntimeError(f"Snapshot binary missing for {engine_id}: {engine_path}")
+        engine_path = engine_binary_path(root, engine_id)
 
         cmd = [
             py,
@@ -1184,10 +1426,10 @@ def cmd_list_matches(args: argparse.Namespace) -> int:
 
     matches = load_matches(root)
     if not matches:
-        print("No matches found.")
+        print("No selfplay runs found.")
         return 0
 
-    print(f"Matches in {root / 'matches'}:")
+    print(f"Selfplay runs in {root / 'matches'}:")
     for m in matches:
         print(
             f"  {m.match_id} | {m.engine1_id} vs {m.engine2_id}"
@@ -1196,9 +1438,34 @@ def cmd_list_matches(args: argparse.Namespace) -> int:
     return 0
 
 
-def add_match_options(parser: argparse.ArgumentParser) -> None:
+def cmd_list_sprt(args: argparse.Namespace) -> int:
+    root = Path(args.history_root)
+    ensure_layout(root)
+
+    summaries = sorted((root / "sprt").glob("*/summary.json"))
+    if not summaries:
+        print("No SPRT runs found.")
+        return 0
+
+    print(f"SPRT runs in {root / 'sprt'}:")
+    for summary_path in summaries:
+        try:
+            data = json.loads(summary_path.read_text())
+        except Exception:
+            continue
+        result = data.get("result", {})
+        print(
+            f"  {summary_path.parent.name} | {data.get('engine1', {}).get('name')} vs {data.get('engine2', {}).get('name')}"
+            f" | decision={result.get('decision')} | games={result.get('total_games')}"
+        )
+    return 0
+
+
+def add_selfplay_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--games", type=int, default=80, help="Total games")
     parser.add_argument("--movetime-ms", type=int, default=200, help="Per-move time in ms")
+    parser.add_argument("--game-time-ms", type=int, default=None, help="Per-side game clock in ms")
+    parser.add_argument("--inc-ms", type=int, default=0, help="Per-move increment in ms")
     parser.add_argument("--depth", type=int, default=None, help="Optional fixed depth")
     parser.add_argument("--openings", default="default", help="Opening source for selfplay.py")
     parser.add_argument("--shuffle-openings", action="store_true", help="Shuffle opening order")
@@ -1214,9 +1481,88 @@ def add_match_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quiet", action="store_true", help="Pass --quiet to selfplay runner")
 
 
+def validate_selfplay_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.games <= 0:
+        parser.error("--games must be > 0")
+    if args.movetime_ms <= 0:
+        parser.error("--movetime-ms must be > 0")
+    if args.game_time_ms is not None and args.game_time_ms <= 0:
+        parser.error("--game-time-ms must be > 0")
+    if args.inc_ms < 0:
+        parser.error("--inc-ms must be >= 0")
+    if args.depth is not None and args.depth <= 0:
+        parser.error("--depth must be > 0")
+    if args.max_plies <= 0:
+        parser.error("--max-plies must be > 0")
+    if args.threads is not None and args.threads <= 0:
+        parser.error("--threads must be > 0")
+    if args.hash_mb is not None and args.hash_mb <= 0:
+        parser.error("--hash-mb must be > 0")
+    if args.game_time_ms is not None and args.depth is not None:
+        parser.error("--game-time-ms and --depth cannot be used together")
+
+
+def add_sprt_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--elo0", type=float, default=-30.0, help="SPRT H0 Elo (candidate-baseline)")
+    parser.add_argument("--elo1", type=float, default=30.0, help="SPRT H1 Elo (candidate-baseline)")
+    parser.add_argument("--alpha", type=float, default=0.10, help="Type I error target")
+    parser.add_argument("--beta", type=float, default=0.10, help="Type II error target")
+    parser.add_argument("--games-per-batch", type=int, default=12, help="Games per self-play batch")
+    parser.add_argument("--max-games", type=int, default=360, help="Hard cap on total games")
+    parser.add_argument("--movetime-ms", type=int, default=80, help="Per-move time in ms")
+    parser.add_argument("--game-time-ms", type=int, default=None, help="Optional per-side game clock")
+    parser.add_argument("--inc-ms", type=int, default=0, help="Per-move increment with --game-time-ms")
+    parser.add_argument("--depth", type=int, default=None, help="Optional fixed depth")
+    parser.add_argument("--openings", default="default", help="Opening source for selfplay.py")
+    parser.add_argument("--shuffle-openings", action="store_true", help="Shuffle opening order")
+    parser.add_argument("--seed", type=int, default=1, help="Base RNG seed")
+    parser.add_argument("--max-plies", type=int, default=220, help="Draw adjudication ply cap")
+    parser.add_argument("--threads", type=int, default=None, help="Threads UCI option for both engines")
+    parser.add_argument("--hash-mb", type=int, default=None, help="Hash UCI option for both engines")
+    parser.add_argument("--engine1-opt", action="append", default=[], help="Extra UCI option for engine1 (Key=Value)")
+    parser.add_argument("--engine2-opt", action="append", default=[], help="Extra UCI option for engine2 (Key=Value)")
+    parser.add_argument("--practical-min-games", type=int, default=120, help="Minimum games before practical stronger check")
+    parser.add_argument("--practical-p-threshold", type=float, default=0.05, help="One-sided p-value threshold")
+    parser.add_argument("--allow-inconclusive", action="store_true", help="Return success on inconclusive max-games stop")
+    parser.add_argument("--python", default=None, help="Python interpreter for sprt.py (default: current interpreter)")
+
+
+def validate_sprt_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.elo1 <= args.elo0:
+        parser.error("--elo1 must be greater than --elo0")
+    if not (0.0 < args.alpha < 1.0):
+        parser.error("--alpha must be in (0,1)")
+    if not (0.0 < args.beta < 1.0):
+        parser.error("--beta must be in (0,1)")
+    if args.games_per_batch <= 0:
+        parser.error("--games-per-batch must be > 0")
+    if args.max_games <= 0:
+        parser.error("--max-games must be > 0")
+    if args.max_games < args.games_per_batch:
+        parser.error("--max-games must be >= --games-per-batch")
+    if args.movetime_ms <= 0:
+        parser.error("--movetime-ms must be > 0")
+    if args.game_time_ms is not None and args.game_time_ms <= 0:
+        parser.error("--game-time-ms must be > 0")
+    if args.inc_ms < 0:
+        parser.error("--inc-ms must be >= 0")
+    if args.depth is not None and args.depth <= 0:
+        parser.error("--depth must be > 0")
+    if args.max_plies <= 0:
+        parser.error("--max-plies must be > 0")
+    if args.threads is not None and args.threads <= 0:
+        parser.error("--threads must be > 0")
+    if args.hash_mb is not None and args.hash_mb <= 0:
+        parser.error("--hash-mb must be > 0")
+    if args.practical_min_games < 0:
+        parser.error("--practical-min-games must be >= 0")
+    if not (0.0 < args.practical_p_threshold < 1.0):
+        parser.error("--practical-p-threshold must be in (0,1)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Manage historical Sykora engine snapshots, matches, and ratings.",
+        description="Manage historical Sykora engine snapshots, selfplay runs, SPRT runs, and ratings.",
     )
     parser.add_argument(
         "--history-root",
@@ -1236,38 +1582,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_snapshot.add_argument("--engine-id", default=None, help="Optional explicit snapshot id")
     p_snapshot.set_defaults(func=cmd_snapshot)
 
-    p_match = sub.add_parser("match", help="Run and archive a match between two snapshot IDs")
-    p_match.add_argument("engine1_id", help="Snapshot ID for baseline engine")
-    p_match.add_argument("engine2_id", help="Snapshot ID for candidate engine")
-    add_match_options(p_match)
-    p_match.set_defaults(func=cmd_match)
+    p_selfplay = sub.add_parser(
+        "selfplay",
+        aliases=["match"],
+        help="Run and archive a selfplay run between two snapshot IDs",
+    )
+    p_selfplay.add_argument("engine1_id", help="Snapshot ID for baseline engine")
+    p_selfplay.add_argument("engine2_id", help="Snapshot ID for candidate engine")
+    add_selfplay_options(p_selfplay)
+    p_selfplay.set_defaults(func=cmd_selfplay)
 
-    p_match_ext = sub.add_parser(
-        "match-extremes",
-        help="Auto-pit strongest vs weakest engine by current ratings.",
+    p_selfplay_ext = sub.add_parser(
+        "selfplay-extremes",
+        aliases=["match-extremes"],
+        help="Auto-pit strongest vs weakest engine by current selfplay ratings.",
     )
-    p_match_ext.add_argument(
-        "--min-games",
-        type=int,
-        default=20,
-        help="Only consider engines with at least this many games (default: 20)",
-    )
-    p_match_ext.add_argument(
-        "--strong-rank",
-        type=int,
-        default=1,
-        help="Pick Nth strongest among filtered engines (default: 1)",
-    )
-    p_match_ext.add_argument(
-        "--weak-rank",
-        type=int,
-        default=1,
-        help="Pick Nth weakest among filtered engines (default: 1)",
-    )
-    add_match_options(p_match_ext)
-    p_match_ext.set_defaults(func=cmd_match_extremes)
+    p_selfplay_ext.add_argument("--min-games", type=int, default=20, help="Only consider engines with at least this many games")
+    p_selfplay_ext.add_argument("--strong-rank", type=int, default=1, help="Pick Nth strongest among filtered engines")
+    p_selfplay_ext.add_argument("--weak-rank", type=int, default=1, help="Pick Nth weakest among filtered engines")
+    add_selfplay_options(p_selfplay_ext)
+    p_selfplay_ext.set_defaults(func=cmd_selfplay_extremes)
 
-    p_ratings = sub.add_parser("ratings", help="Recompute ratings from archived matches")
+    p_sprt = sub.add_parser("sprt", help="Run and archive an SPRT between two snapshot IDs")
+    p_sprt.add_argument("engine1_id", help="Snapshot ID for baseline engine")
+    p_sprt.add_argument("engine2_id", help="Snapshot ID for candidate engine")
+    add_sprt_options(p_sprt)
+    p_sprt.set_defaults(func=cmd_sprt)
+
+    p_ratings = sub.add_parser("ratings", help="Recompute ratings from archived selfplay runs")
     p_ratings.add_argument("--plot", action="store_true", help="Attempt timeline plot generation")
     p_ratings.set_defaults(func=cmd_ratings)
 
@@ -1275,7 +1617,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sts.add_argument("engine_id", nargs="?", default=None, help="Snapshot ID to evaluate")
     p_sts.add_argument("--all", action="store_true", help="Run STS for all snapshot IDs")
     p_sts.add_argument("--epd-dir", default=str(REPO_ROOT / "epd"), help="Directory containing STS EPD files")
-    p_sts.add_argument("--pattern", default="STS*.epd", help="Glob pattern inside --epd-dir (default: STS*.epd)")
+    p_sts.add_argument("--pattern", default="STS*.epd", help="Glob pattern inside --epd-dir")
     p_sts.add_argument("--max-positions", type=int, default=0, help="Optional global cap on positions (0 = no cap)")
     p_sts.add_argument("--movetime-ms", type=int, default=100, help="Per-position movetime in ms (ignored with --depth)")
     p_sts.add_argument("--depth", type=int, default=None, help="Fixed search depth per position")
@@ -1287,10 +1629,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sts.add_argument("--continue-on-error", action="store_true", help="Continue other engines if one STS run fails")
     p_sts.set_defaults(func=cmd_sts)
 
-    p_network = sub.add_parser("network", help="Render a version network graph from archived ratings/matches")
-    p_network.add_argument("--top-n", type=int, default=12, help="Plot top N engines by rating (default: 12)")
-    p_network.add_argument("--min-games", type=int, default=10, help="Minimum games per engine to include (default: 10)")
-    p_network.add_argument("--min-edge-games", type=int, default=2, help="Minimum games per pair edge (default: 2)")
+    p_network = sub.add_parser("network", help="Render a version network graph from archived selfplay ratings")
+    p_network.add_argument("--top-n", type=int, default=12, help="Plot top N engines by rating")
+    p_network.add_argument("--min-games", type=int, default=10, help="Minimum games per engine to include")
+    p_network.add_argument("--min-edge-games", type=int, default=2, help="Minimum games per pair edge")
     p_network.add_argument("--output-name", default="network.png", help="Output filename under history/ratings/")
     p_network.add_argument("--no-recompute", action="store_true", help="Use existing ratings/latest.json if present")
     p_network.set_defaults(func=cmd_network)
@@ -1298,8 +1640,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_list_engines = sub.add_parser("list-engines", help="List snapshot IDs and metadata")
     p_list_engines.set_defaults(func=cmd_list_engines)
 
-    p_list_matches = sub.add_parser("list-matches", help="List archived matches")
+    p_list_matches = sub.add_parser("list-matches", help="List archived selfplay runs")
     p_list_matches.set_defaults(func=cmd_list_matches)
+
+    p_list_sprt = sub.add_parser("list-sprt", help="List archived SPRT runs")
+    p_list_sprt.set_defaults(func=cmd_list_sprt)
 
     return parser
 
@@ -1309,6 +1654,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if args.command in ("selfplay", "match", "selfplay-extremes", "match-extremes"):
+            validate_selfplay_args(args, parser)
+        if args.command == "sprt":
+            validate_sprt_args(args, parser)
         return int(args.func(args))
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

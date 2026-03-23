@@ -106,11 +106,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python utils/history/history.py init
+          python utils/history/history.py snapshot \
+            --engine ./baseline_sykora \
+            --label "${{ steps.tags.outputs.prev_tag }}" \
+            --notes "release sprt baseline" \
+            --engine-id baseline
+          python utils/history/history.py snapshot \
+            --engine ./candidate_sykora \
+            --label "${{ steps.tags.outputs.current_tag }}" \
+            --notes "release sprt candidate" \
+            --engine-id candidate
+
           args=(
-            ./baseline_sykora
-            ./candidate_sykora
-            --name1 "${{ steps.tags.outputs.prev_tag }}"
-            --name2 "${{ steps.tags.outputs.current_tag }}"
+            baseline
+            candidate
             --elo0 "${SPRT_ELO0}"
             --elo1 "${SPRT_ELO1}"
             --alpha "${SPRT_ALPHA}"
@@ -125,7 +135,6 @@ jobs:
             --shuffle-openings
             --practical-min-games "${SPRT_PRACTICAL_MIN_GAMES}"
             --practical-p-threshold "${SPRT_PRACTICAL_P_THRESHOLD}"
-            --summary-json sprt_summary.json
           )
 
           if [ "${SPRT_ALLOW_INCONCLUSIVE}" = "true" ]; then
@@ -133,8 +142,8 @@ jobs:
           fi
 
           set +e
-          python utils/match/sprt.py "${args[@]}" | tee sprt.log
-          code=${PIPESTATUS[0]}
+          python utils/history/history.py sprt "${args[@]}"
+          code=$?
           set -e
 
           echo "sprt_exit_code=${code}" >> "$GITHUB_OUTPUT"
@@ -161,5 +170,5 @@ jobs:
           name: release-sprt-${{ steps.tags.outputs.current_tag }}
           if-no-files-found: warn
           path: |
-            sprt.log
-            sprt_summary.json
+            history/sprt/**
+            history/engines/**

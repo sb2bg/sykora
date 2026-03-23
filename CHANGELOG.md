@@ -15,11 +15,16 @@ This changelog was reconstructed from the tagged release history and the commits
 - Added singular extension logic and TT-aware multicut handling to sharpen tactical search around strong transposition-table moves.
 - Simplified repetition detection with a cheap halfmove fast path and early exit on first match.
 - Retired Texel/HCE tuning from the default workflow and documentation.
+- Standardized experiment execution around archived `history.py` `selfplay` and `sprt` runs with mandatory summaries, metadata, and stdout/stderr logs.
+- Moved selfplay ratings and graph generation to consume archived `history.py` selfplay runs only.
+- Reworked the Bullet checkpoint gate to use selfplay-only promotion instead of STS-based ranking.
 - Fixed the release SPRT workflow and bumped the engine version string to `0.2.3`.
 
 ### Removed
 
 - Removed the old Texel-tuning binaries and scripts (`sykora-tune`, `sykora-texel`, and the Texel helpers under `utils/tuning`).
+- Removed self-rolled Lichess bot scripts in favor of the official solution.
+- Removed the obsolete `utils/tuning/tune_loop.py` and `utils/match/selfplay_vs_ref.sh` wrappers.
 
 ## [0.2.2] - 2026-03-23
 

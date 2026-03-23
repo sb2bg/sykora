@@ -2,9 +2,10 @@
 
 This folder is the long-term experiment database for Sykora.
 
-It stores three things:
+It stores four things:
 - immutable engine snapshots (`engines/`)
-- archived head-to-head matches (`matches/`)
+- archived fixed-game selfplay runs (`matches/`)
+- archived SPRT runs (`sprt/`)
 - computed rating/graph artifacts (`ratings/`)
 - archived STS evaluations (`sts/`)
 
@@ -12,19 +13,26 @@ It stores three things:
 
 - `engines/<engine_id>/engine`: frozen engine binary for that snapshot
 - `engines/<engine_id>/metadata.json`: snapshot metadata (git state, hash, notes, UCI id)
-- `matches/<match_id>/summary.json`: machine-readable match summary from `utils/match/selfplay.py`
-- `matches/<match_id>/metadata.json`: reproducibility metadata (command, ids, timestamps)
-- `matches/<match_id>/pgn/`: one PGN per game
-- `ratings/latest.json`: current leaderboard from all archived matches
+- `matches/<run_id>/summary.json`: machine-readable archived selfplay summary
+- `matches/<run_id>/metadata.json`: reproducibility metadata (command, ids, timestamps)
+- `matches/<run_id>/stdout.log`: captured selfplay stdout
+- `matches/<run_id>/stderr.log`: captured selfplay stderr
+- `matches/<run_id>/pgn/`: one PGN per game
+- `sprt/<run_id>/summary.json`: machine-readable archived SPRT summary
+- `sprt/<run_id>/metadata.json`: reproducibility metadata (command, ids, timestamps)
+- `sprt/<run_id>/stdout.log`: captured SPRT stdout
+- `sprt/<run_id>/stderr.log`: captured SPRT stderr
+- `ratings/latest.json`: current leaderboard from archived selfplay only
 - `ratings/latest.csv`: table version of leaderboard
-- `ratings/edges.csv`: pairwise edge data (for network graphs)
-- `ratings/timeline.csv`: cumulative rating timeline after each match
+- `ratings/edges.csv`: pairwise selfplay edge data (for network graphs)
+- `ratings/timeline.csv`: cumulative rating timeline after each selfplay run
 - `ratings/timeline.png`: optional chart (if matplotlib installed)
 - `sts/<engine_id>/<timestamp>.json`: immutable STS run payload for that snapshot
 - `sts/<engine_id>/latest.json`: latest STS run for that snapshot
 - `sts/latest.csv`: latest STS totals for all snapshots (ranked by score%)
 - `index/engines.jsonl`: append-only engine snapshot log
-- `index/matches.jsonl`: append-only match log
+- `index/matches.jsonl`: append-only selfplay log
+- `index/sprt_runs.jsonl`: append-only SPRT log
 - `index/sts_runs.jsonl`: append-only STS run log
 
 ## Workflow
@@ -48,16 +56,22 @@ List snapshot IDs:
 ~/.pyenv/shims/python utils/history/history.py list-engines
 ```
 
-Run a tracked match:
+Run archived selfplay:
 
 ```bash
-~/.pyenv/shims/python utils/history/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
+~/.pyenv/shims/python utils/history/history.py selfplay <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
 ```
 
-Auto-play strongest vs weakest (by current ratings):
+Run archived SPRT:
 
 ```bash
-~/.pyenv/shims/python utils/history/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
+~/.pyenv/shims/python utils/history/history.py sprt <engine_id_A> <engine_id_B> --elo0 -30 --elo1 30 --games-per-batch 12 --max-games 360 --movetime-ms 80
+```
+
+Auto-play strongest vs weakest by current selfplay ratings:
+
+```bash
+~/.pyenv/shims/python utils/history/history.py selfplay-extremes --min-games 20 --games 80 --movetime-ms 120
 ```
 
 Recompute all ratings and export graph data:
@@ -66,31 +80,26 @@ Recompute all ratings and export graph data:
 ~/.pyenv/shims/python utils/history/history.py ratings --plot
 ```
 
-Render a version network map (nodes=engines, edges=matchups):
+Render a version network map from selfplay data:
 
 ```bash
 ~/.pyenv/shims/python utils/history/history.py network --top-n 12 --min-games 10 --min-edge-games 2
 ```
 
-Run and persist STS for one snapshot:
+Optional diagnostic STS for one snapshot:
 
 ```bash
 ~/.pyenv/shims/python utils/history/history.py sts <engine_id> --movetime-ms 100
 ```
 
-Backfill STS for all snapshots:
+NNUE note:
 
-```bash
-~/.pyenv/shims/python utils/history/history.py sts --all --movetime-ms 100 --continue-on-error
-```
-
-Legacy note:
-
-- The old Texel/HCE tuning scripts have been removed. The recommended workflow is STS plus archived self-play.
+- STS is retained as a diagnostic utility, but it is not the canonical promotion signal for NNUE work.
+- Promotion-quality comparison should use archived selfplay or archived SPRT.
 
 ## Notes
 
-- Ratings are relative Elo values fit from all stored pairwise match outcomes.
+- Ratings are relative Elo values fit from archived selfplay outcomes only.
 - Better confidence comes from more games and diversified openings.
-- Keep match settings consistent (time control, openings, options) when comparing deltas.
+- Keep selfplay settings consistent when comparing deltas.
 - `history/.gitignore` excludes large artifacts (`engine` binaries, PGN folders) from accidental commits while keeping all metadata/versioning files trackable.

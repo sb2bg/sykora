@@ -86,8 +86,8 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 - Perft and movegen shell tests (`utils/test`).
 - NPS benchmarking (`utils/bench/nps.py`).
 - STS runner (`utils/sts/sts.py`).
-- Engine-vs-engine self-play tooling (`utils/match`).
-- Long-term experiment history and ratings workflow (`utils/history`).
+- Engine-vs-engine runners (`utils/match`, used internally by `utils/history`).
+- Long-term archived experiment history, SPRT, and ratings workflow (`utils/history`).
 - NNUE data prep/training/export pipelines (`utils/nnue`, `utils/data`).
 - Lichess play/challenge bot tooling (`utils/bot`).
 
@@ -204,98 +204,44 @@ To run Strategic Test Suite (STS) EPD files (requires `python-chess`):
 python utils/sts/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-out/bin/sykora --movetime-ms 300
 ```
 
-To run engine-vs-engine self-play (also requires `python-chess`):
+STS is still available as a diagnostic tool, but it is not the recommended promotion signal for NNUE changes.
 
-```bash
-# Baseline vs candidate, 80 games, 200ms/move, balanced openings
-python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --name1 old --name2 new --games 80 --movetime-ms 200
-```
-
-Useful variants:
-
-```bash
-# More stable signal (recommended for commits you may keep)
-python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 200 --movetime-ms 200
-
-# Fixed-depth comparison
-python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 120 --depth 8
-
-# Save all PGNs for manual inspection
-python utils/match/selfplay.py ./old_sykora ./zig-out/bin/sykora --games 80 --output-dir ./selfplay_pgn
-```
-
-The script prints an estimated Elo difference (`candidate - baseline`), a 95% confidence interval, and a p-value versus equal strength.
-
-To run a batched SPRT locally (faster decision-oriented A/B test):
-
-```bash
-python utils/match/sprt.py ./old_sykora ./zig-out/bin/sykora \
-  --name1 old --name2 new \
-  --elo0 -30 --elo1 30 \
-  --alpha 0.10 --beta 0.10 \
-  --games-per-batch 12 --max-games 360 \
-  --movetime-ms 80 --max-plies 220 \
-  --threads 1 --hash-mb 64 \
-  --shuffle-openings \
-  --summary-json sprt_summary.json
-```
-
-Exit codes from `sprt.py`:
-
-- `0`: candidate accepted as stronger (or practical stronger threshold reached)
-- `1`: candidate accepted as weaker
-- `2`: inconclusive at max games
-- `3`: runner/configuration failure
-
-The `Release SPRT` workflow (`.github/workflows/sprt.yml`) runs automatically on `v*` tag pushes and compares the new tag against the previous `v*` tag.
-
-Status codes (useful for CI):
-
-- `utils/sts/sts.py`
-  - `0`: success
-  - `1`: runtime/input error (missing EPD, engine startup failure, parse failure, etc.)
-  - `2`: invalid CLI options (for example malformed `--engine-opt`)
-- `utils/match/selfplay.py`
-  - `0`: candidate score > baseline score
-  - `1`: baseline score > candidate score
-  - `2`: exact tie
-  - `>2`: unexpected failure (engine/protocol/runtime error)
-
-To compare current working tree against your configured baseline in one command:
-
-```bash
-# history/current_baseline.txt can contain either:
-# 1) a snapshot id (history/engines/<id>/engine), or
-# 2) a direct path to a baseline binary
-utils/match/selfplay_vs_ref.sh --games 120 --movetime-ms 200
-
-# or override baseline at runtime
-utils/match/selfplay_vs_ref.sh --baseline history/engines/<snapshot_id>/engine --games 200 --depth 8
-```
-
-This wrapper builds only the current working tree in `ReleaseFast`, runs self-play vs the baseline, and prints the same Elo/confidence summary.
-
-For long-term version tracking, use the history ledger:
+The canonical engine-vs-engine workflow is the archived `history.py` flow:
 
 ```bash
 # Initialize ledger folders
 python utils/history/history.py init
 
-# Snapshot current engine build
-python utils/history/history.py snapshot --label "experiment-a" --notes "describe your change"
+# Snapshot two builds you want to compare
+python utils/history/history.py snapshot --engine ./old_sykora --label "baseline" --engine-id baseline
+python utils/history/history.py snapshot --engine ./zig-out/bin/sykora --label "candidate" --engine-id candidate
 
-# List snapshots, run archived match, recompute global ratings
+# Archived fixed-game selfplay
 python utils/history/history.py list-engines
-python utils/history/history.py match <engine_id_A> <engine_id_B> --games 120 --movetime-ms 200
-python utils/history/history.py ratings --plot
-python utils/history/history.py sts <engine_id> --movetime-ms 100
+python utils/history/history.py selfplay baseline candidate --games 120 --movetime-ms 200
 
-# Auto pit strongest vs weakest and render a network graph
-python utils/history/history.py match-extremes --min-games 20 --games 80 --movetime-ms 120
+# Archived SPRT
+python utils/history/history.py sprt baseline candidate \
+  --elo0 -30 --elo1 30 \
+  --games-per-batch 12 --max-games 360 \
+  --movetime-ms 80 --max-plies 220 \
+  --threads 1 --hash-mb 64 --shuffle-openings
+
+# Ratings and graph data are built from archived selfplay only
+python utils/history/history.py ratings --plot
 python utils/history/history.py network --top-n 12 --min-games 10 --min-edge-games 2
+
+# Optional: diagnostic STS run for a snapshot
+python utils/history/history.py sts candidate --movetime-ms 100
 ```
 
-See `history/README.md` for folder schema and the archived self-play / STS workflow.
+Every archived selfplay/SPRT run writes settings, summary JSON, stdout/stderr logs, and reproducibility metadata under `history/`.
+
+The `Release SPRT` workflow (`.github/workflows/sprt.yml`) uses the same archived `history.py sprt` path.
+
+Low-level runners under `utils/match/` remain available, but they are implementation details rather than the recommended user/agent entrypoints.
+
+See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
@@ -429,12 +375,13 @@ python utils/nnue/bullet/gate_checkpoints.py \
   --checkpoints-dir nnue/models/bullet/<run_id>/checkpoints \
   --engine ./zig-out/bin/sykora \
   --blend 100 --nnue-scale 100 \
-  --sts-epd epd --sts-movetime-ms 40 --sts-max-positions 400 \
   --selfplay-games 80 --selfplay-movetime-ms 120 --selfplay-top-k 3 \
   --threads 1 --hash-mb 64 \
   --min-elo 0 --max-p-value 0.25 \
   --promote-to nnue/syk_nnue_best.sknnue
 ```
+
+This gate now evaluates recent checkpoints by selfplay only. STS is intentionally not part of the checkpoint promotion path.
 
 Full process spec: `specs/nnue_training_spec.md`.
 
