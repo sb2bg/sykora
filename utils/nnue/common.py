@@ -76,6 +76,11 @@ def feature_index(
     bucket_layout_64: List[int] | None = None,
 ) -> int:
     sq = square if perspective_is_white else flip_vertical(square)
+    king_sq = (
+        perspective_king_square
+        if perspective_is_white
+        else flip_vertical(perspective_king_square)
+    )
     side = color if perspective_is_white else (not color)
     side_idx = 0 if side == chess.WHITE else 1
     piece_idx = piece_type - 1  # python-chess piece types are 1..6
@@ -86,8 +91,8 @@ def feature_index(
         raise ValueError(f"unsupported feature_set: {feature_set}")
     if perspective_king_square is None or bucket_layout_64 is None:
         raise ValueError("perspective_king_square and bucket_layout_64 are required")
-    sq = sq ^ 7 if perspective_king_square % 8 > 3 else sq
-    bucket_offset = LEGACY_INPUT_SIZE * bucket_layout_64[perspective_king_square]
+    sq = sq ^ 7 if king_sq % 8 > 3 else sq
+    bucket_offset = LEGACY_INPUT_SIZE * bucket_layout_64[king_sq]
     return bucket_offset + side_idx * 6 * 64 + piece_idx * 64 + sq
 
 

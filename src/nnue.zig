@@ -261,6 +261,7 @@ fn featureIndex(
     perspective_king_sq: u8,
 ) usize {
     var sq = if (perspective == .white) square else flipVertical(square);
+    const king_sq = if (perspective == .white) perspective_king_sq else flipVertical(perspective_king_sq);
     const side = if (perspective == .white) color else oppositeColor(color);
     const side_idx: usize = @intFromEnum(side);
     const piece_idx: usize = @intFromEnum(piece_type);
@@ -269,10 +270,10 @@ fn featureIndex(
         return side_idx * 6 * 64 + piece_idx * 64 + sq;
     }
 
-    if ((perspective_king_sq % 8) > 3) {
+    if ((king_sq % 8) > 3) {
         sq ^= 7;
     }
-    const bucket_offset = LEGACY_INPUT_SIZE * @as(usize, net.bucket_layout[perspective_king_sq]);
+    const bucket_offset = LEGACY_INPUT_SIZE * @as(usize, net.bucket_layout[king_sq]);
     return bucket_offset + side_idx * 6 * 64 + piece_idx * 64 + sq;
 }
 
@@ -297,10 +298,21 @@ inline fn perspectiveMirrored(king_sq: u8) bool {
     return (king_sq % 8) > 3;
 }
 
-inline fn perspectiveLayoutChanged(net: *const Network, old_king_sq: u8, new_king_sq: u8) bool {
+inline fn perspectiveKingSquare(perspective: piece.Color, king_sq: u8) u8 {
+    return if (perspective == .white) king_sq else flipVertical(king_sq);
+}
+
+inline fn perspectiveLayoutChanged(
+    net: *const Network,
+    perspective: piece.Color,
+    old_king_sq: u8,
+    new_king_sq: u8,
+) bool {
     if (net.feature_set != .king_buckets_mirrored) return false;
-    return net.bucket_layout[old_king_sq] != net.bucket_layout[new_king_sq] or
-        perspectiveMirrored(old_king_sq) != perspectiveMirrored(new_king_sq);
+    const old_perspective_king_sq = perspectiveKingSquare(perspective, old_king_sq);
+    const new_perspective_king_sq = perspectiveKingSquare(perspective, new_king_sq);
+    return net.bucket_layout[old_perspective_king_sq] != net.bucket_layout[new_perspective_king_sq] or
+        perspectiveMirrored(old_perspective_king_sq) != perspectiveMirrored(new_perspective_king_sq);
 }
 
 inline fn initAccumulatorBiases(dest: []i32, biases: []const i16) void {
@@ -456,12 +468,12 @@ pub fn updateAccumulators(
     if (net.feature_set == .king_buckets_mirrored and moved_piece == .king) {
         switch (moved_color) {
             .white => {
-                if (perspectiveLayoutChanged(net, from_sq, to_sq)) {
+                if (perspectiveLayoutChanged(net, .white, from_sq, to_sq)) {
                     initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
                 }
             },
             .black => {
-                if (perspectiveLayoutChanged(net, from_sq, to_sq)) {
+                if (perspectiveLayoutChanged(net, .black, from_sq, to_sq)) {
                     initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
                 }
             },
