@@ -289,23 +289,65 @@ pub const AccumulatorPair = struct {
     black: [MAX_HIDDEN_SIZE]i32,
 };
 
-/// Full recompute of accumulators from board state (used at search root).
-pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
+const SimdWeightVec = @Vector(8, i16);
+const SimdAccVec = @Vector(8, i32);
+const SIMD_LANES = @typeInfo(SimdAccVec).vector.len;
+
+inline fn perspectiveMirrored(king_sq: u8) bool {
+    return (king_sq % 8) > 3;
+}
+
+inline fn perspectiveLayoutChanged(net: *const Network, old_king_sq: u8, new_king_sq: u8) bool {
+    if (net.feature_set != .king_buckets_mirrored) return false;
+    return net.bucket_layout[old_king_sq] != net.bucket_layout[new_king_sq] or
+        perspectiveMirrored(old_king_sq) != perspectiveMirrored(new_king_sq);
+}
+
+inline fn initAccumulatorBiases(dest: []i32, biases: []const i16) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const bias_ptr: *align(1) const SimdWeightVec = @ptrCast(&biases[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = @intCast(bias_ptr.*);
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] = biases[h];
+    }
+}
+
+inline fn applyFeatureSlice(comptime add: bool, dest: []i32, weights: []const i16) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const weight_ptr: *align(1) const SimdWeightVec = @ptrCast(&weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        const weight_vec: SimdAccVec = @intCast(weight_ptr.*);
+        dest_ptr.* = if (add) dest_ptr.* + weight_vec else dest_ptr.* - weight_vec;
+    }
+
+    while (h < dest.len) : (h += 1) {
+        if (add) {
+            dest[h] += weights[h];
+        } else {
+            dest[h] -= weights[h];
+        }
+    }
+}
+
+fn initPerspectiveAccumulator(
+    net: *const Network,
+    b: *Board,
+    perspective: piece.Color,
+    dest: []i32,
+) void {
     const state = b.board;
     const hidden_size: usize = @intCast(net.hidden_size);
-    const white_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.white) & state.getKindBitboard(.king)));
-    const black_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.black) & state.getKindBitboard(.king)));
-
-    var acc = AccumulatorPair{
-        .white = [_]i32{0} ** MAX_HIDDEN_SIZE,
-        .black = [_]i32{0} ** MAX_HIDDEN_SIZE,
+    const perspective_king_sq: u8 = switch (perspective) {
+        .white => @intCast(@ctz(state.getColorBitboard(.white) & state.getKindBitboard(.king))),
+        .black => @intCast(@ctz(state.getColorBitboard(.black) & state.getKindBitboard(.king))),
     };
 
-    for (0..hidden_size) |h| {
-        const bias = net.biases[h];
-        acc.white[h] = bias;
-        acc.black[h] = bias;
-    }
+    initAccumulatorBiases(dest, net.biases[0..hidden_size]);
 
     inline for ([_]piece.Color{ .white, .black }) |color| {
         const color_bb = state.getColorBitboard(color);
@@ -316,18 +358,23 @@ pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
                 const sq: u8 = @intCast(@ctz(bb));
                 bb &= bb - 1;
 
-                const white_feature = featureIndex(net, .white, sq, pt, color, white_king_sq);
-                const black_feature = featureIndex(net, .black, sq, pt, color, black_king_sq);
-
-                const white_base = white_feature * hidden_size;
-                const black_base = black_feature * hidden_size;
-                for (0..hidden_size) |h| {
-                    acc.white[h] += net.input_weights[white_base + h];
-                    acc.black[h] += net.input_weights[black_base + h];
-                }
+                const feature = featureIndex(net, perspective, sq, pt, color, perspective_king_sq);
+                const base = feature * hidden_size;
+                applyFeatureSlice(true, dest, net.input_weights[base .. base + hidden_size]);
             }
         }
     }
+}
+
+/// Full recompute of accumulators from board state (used at search root).
+pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
+    var acc = AccumulatorPair{
+        .white = [_]i32{0} ** MAX_HIDDEN_SIZE,
+        .black = [_]i32{0} ** MAX_HIDDEN_SIZE,
+    };
+
+    initPerspectiveAccumulator(net, b, .white, acc.white[0..@intCast(net.hidden_size)]);
+    initPerspectiveAccumulator(net, b, .black, acc.black[0..@intCast(net.hidden_size)]);
 
     return acc;
 }
@@ -350,15 +397,11 @@ inline fn applyDelta(
     const black_base = black_feature * hidden_size;
 
     if (add) {
-        for (0..hidden_size) |h| {
-            acc.white[h] += net.input_weights[white_base + h];
-            acc.black[h] += net.input_weights[black_base + h];
-        }
+        applyFeatureSlice(true, acc.white[0..hidden_size], net.input_weights[white_base .. white_base + hidden_size]);
+        applyFeatureSlice(true, acc.black[0..hidden_size], net.input_weights[black_base .. black_base + hidden_size]);
     } else {
-        for (0..hidden_size) |h| {
-            acc.white[h] -= net.input_weights[white_base + h];
-            acc.black[h] -= net.input_weights[black_base + h];
-        }
+        applyFeatureSlice(false, acc.white[0..hidden_size], net.input_weights[white_base .. white_base + hidden_size]);
+        applyFeatureSlice(false, acc.black[0..hidden_size], net.input_weights[black_base .. black_base + hidden_size]);
     }
 }
 
@@ -380,11 +423,6 @@ pub fn updateAccumulators(
     rook_from: ?u8,
     rook_to: ?u8,
 ) void {
-    if (net.feature_set == .king_buckets_mirrored and moved_piece == .king) {
-        result.* = initAccumulators(net, b);
-        return;
-    }
-
     const hidden_size: usize = @intCast(net.hidden_size);
     const state = b.board;
     const white_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.white) & state.getKindBitboard(.king)));
@@ -412,6 +450,21 @@ pub fn updateAccumulators(
         if (rook_from) |rf| {
             applyDelta(net, result, rf, .rook, moved_color, white_king_sq, black_king_sq, false);
             applyDelta(net, result, rook_to.?, .rook, moved_color, white_king_sq, black_king_sq, true);
+        }
+    }
+
+    if (net.feature_set == .king_buckets_mirrored and moved_piece == .king) {
+        switch (moved_color) {
+            .white => {
+                if (perspectiveLayoutChanged(net, from_sq, to_sq)) {
+                    initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
+                }
+            },
+            .black => {
+                if (perspectiveLayoutChanged(net, from_sq, to_sq)) {
+                    initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
+                }
+            },
         }
     }
 }
