@@ -17,11 +17,6 @@ pub const BISHOP_VALUE: i32 = 331;
 pub const ROOK_VALUE: i32 = 505;
 pub const QUEEN_VALUE: i32 = 1043;
 
-const FILE_MASKS = [8]u64{
-    0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
-    0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
-};
-
 // ──────────────────────────────────────────────
 // EvalParams – every tunable evaluation constant
 // ──────────────────────────────────────────────
@@ -67,93 +62,93 @@ pub const EvalParams = struct {
 
     // Piece-Square Tables (index 0 = a1, 63 = h8, white perspective)
     pawn_table: [64]i32 = .{
-        0,  0,  0,  0,   0,   0,  0,  0,
-        16, 9,  -2, -29, -27, 17, 20, 0,
-        13, 2,  -1, -4,  7,   7,  -3, -4,
-        14, 13, 7,  10,  16,  9,  6,  -1,
-        24, 9,  4,  -4,  14,  17, 9,  10,
-        40, 33, 22, 3,   6,   15, 22, 17,
-        88, 78, 47, 38,  31,  48, 1,  45,
-        0,  0,  0,  0,   0,   0,  0,  0,
+           0,    0,    0,    0,    0,    0,    0,    0,
+          16,    9,   -2,  -29,  -27,   17,   20,    0,
+          13,    2,   -1,   -4,    7,    7,   -3,   -4,
+          14,   13,    7,   10,   16,    9,    6,   -1,
+          24,    9,    4,   -4,   14,   17,    9,   10,
+          40,   33,   22,    3,    6,   15,   22,   17,
+          88,   78,   47,   38,   31,   48,    1,   45,
+           0,    0,    0,    0,    0,    0,    0,    0,
     },
     knight_table: [64]i32 = .{
-        -50, -34, -16, -19, -22, -17, -18, -55,
-        -47, -38, -2,  0,   2,   -7,  6,   -21,
-        -31, -11, -5,  8,   19,  4,   1,   -28,
-        -13, 4,   18,  7,   19,  16,  -16, 8,
-        -13, 5,   17,  23,  14,  31,  24,  17,
-        -7,  7,   18,  24,  39,  31,  10,  -26,
-        -7,  -16, 13,  17,  15,  15,  0,   -41,
-        -88, -27, -10, -30, -20, -35, -40, -60,
+         -50,  -34,  -16,  -19,  -22,  -17,  -18,  -55,
+         -47,  -38,   -2,    0,    2,   -7,    6,  -21,
+         -31,  -11,   -5,    8,   19,    4,    1,  -28,
+         -13,    4,   18,    7,   19,   16,  -16,    8,
+         -13,    5,   17,   23,   14,   31,   24,   17,
+          -7,    7,   18,   24,   39,   31,   10,  -26,
+          -7,  -16,   13,   17,   15,   15,    0,  -41,
+         -88,  -27,  -10,  -30,  -20,  -35,  -40,  -60,
     },
     bishop_table: [64]i32 = .{
-        -25, -15, -10, -7,  -13, -11, -17, -15,
-        -2,  -4,  5,   -10, -5,  3,   13,  -21,
-        -4,  1,   2,   1,   -1,  8,   4,   -4,
-        -21, -5,  1,   15,  17,  -5,  4,   -7,
-        -12, 4,   2,   13,  5,   9,   8,   -3,
-        -9,  4,   21,  4,   17,  26,  25,  6,
-        -16, 8,   -5,  -13, 17,  -8,  -6,  -36,
-        -15, -5,  0,   -22, -20, -12, -5,  -20,
+         -25,  -15,  -10,   -7,  -13,  -11,  -17,  -15,
+          -2,   -4,    5,  -10,   -5,    3,   13,  -21,
+          -4,    1,    2,    1,   -1,    8,    4,   -4,
+         -21,   -5,    1,   15,   17,   -5,    4,   -7,
+         -12,    4,    2,   13,    5,    9,    8,   -3,
+          -9,    4,   21,    4,   17,   26,   25,    6,
+         -16,    8,   -5,  -13,   17,   -8,   -6,  -36,
+         -15,   -5,    0,  -22,  -20,  -12,   -5,  -20,
     },
     rook_table: [64]i32 = .{
-        -10, -9,  0,  -4,  -1,  0,  7,   -11,
-        -18, -18, -3, -4,  -11, -4, -15, -32,
-        -23, -19, -7, -11, -4,  -7, 2,   -5,
-        -3,  9,   5,  -2,  -10, 0,  2,   0,
-        3,   1,   12, 16,  13,  22, 6,   -1,
-        20,  27,  23, 24,  15,  29, 32,  9,
-        3,   -1,  5,  9,   8,   19, 10,  17,
-        24,  41,  29, 25,  9,   15, 24,  15,
+         -10,   -9,    0,   -4,   -1,    0,    7,  -11,
+         -18,  -18,   -3,   -4,  -11,   -4,  -15,  -32,
+         -23,  -19,   -7,  -11,   -4,   -7,    2,   -5,
+          -3,    9,    5,   -2,  -10,    0,    2,    0,
+           3,    1,   12,   16,   13,   22,    6,   -1,
+          20,   27,   23,   24,   15,   29,   32,    9,
+           3,   -1,    5,    9,    8,   19,   10,   17,
+          24,   41,   29,   25,    9,   15,   24,   15,
     },
     queen_table: [64]i32 = .{
-        -23, -25, -9, -1, -19, -34, -30, -20,
-        -38, -12, 1,  -5, 1,   -5,  -7,  -33,
-        -11, -13, 2,  -2, 7,   10,  9,   -26,
-        -20, -9,  3,  15, 17,  12,  14,  0,
-        -20, -4,  8,  20, 35,  13,  20,  11,
-        -14, 2,   12, 14, 36,  51,  42,  36,
-        -8,  1,   4,  22, 34,  25,  29,  23,
-        -33, -6,  9,  13, 15,  12,  -20, 8,
+         -23,  -25,   -9,   -1,  -19,  -34,  -30,  -20,
+         -38,  -12,    1,   -5,    1,   -5,   -7,  -33,
+         -11,  -13,    2,   -2,    7,   10,    9,  -26,
+         -20,   -9,    3,   15,   17,   12,   14,    0,
+         -20,   -4,    8,   20,   35,   13,   20,   11,
+         -14,    2,   12,   14,   36,   51,   42,   36,
+          -8,    1,    4,   22,   34,   25,   29,   23,
+         -33,   -6,    9,   13,   15,   12,  -20,    8,
     },
     king_middlegame_table: [64]i32 = .{
-        25,  43,  34,  -9,  -18, -16, 18,  21,
-        15,  25,  0,   8,   -7,  -6,  35,  49,
-        -10, -20, -15, -30, -10, -25, -30, -11,
-        -20, -30, -30, -40, -54, -30, -30, -20,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
+          25,   43,   34,   -9,  -18,  -16,   18,   21,
+          15,   25,    0,    8,   -7,   -6,   35,   49,
+         -10,  -20,  -15,  -30,  -10,  -25,  -30,  -11,
+         -20,  -30,  -30,  -40,  -54,  -30,  -30,  -20,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
+         -30,  -40,  -40,  -50,  -50,  -40,  -40,  -30,
     },
     king_endgame_table: [64]i32 = .{
-        -45, -43, -22, -35, -35, -17, -39, -52,
-        -58, -21, -11, -6,  -4,  -13, -24, -44,
-        -30, -5,  0,   14,  10,  3,   -12, -30,
-        -35, 0,   39,  49,  21,  13,  -9,  -23,
-        -25, 0,   60,  76,  40,  35,  22,  -32,
-        -30, 19,  33,  49,  40,  35,  -5,  -30,
-        -30, -20, -5,  0,   0,   -10, -20, -30,
-        -50, -40, -30, -20, -20, -30, -40, -50,
+         -45,  -43,  -22,  -35,  -35,  -17,  -39,  -52,
+         -58,  -21,  -11,   -6,   -4,  -13,  -24,  -44,
+         -30,   -5,    0,   14,   10,    3,  -12,  -30,
+         -35,    0,   39,   49,   21,   13,   -9,  -23,
+         -25,    0,   60,   76,   40,   35,   22,  -32,
+         -30,   19,   33,   49,   40,   35,   -5,  -30,
+         -30,  -20,   -5,    0,    0,  -10,  -20,  -30,
+         -50,  -40,  -30,  -20,  -20,  -30,  -40,  -50,
     },
 
     // Passed pawn bonus by rank (rank 0–7, white perspective)
     passed_pawn_bonus: [8]i32 = .{
-        0, 3, 3, 10, 37, 76, 103, 0,
+           0,    3,    3,   10,   37,   76,  103,    0,
     },
 
     // Mobility tables
     knight_mobility: [9]i32 = .{
-        -17, -1, 1, 9, 14, 21, 24, 27,
-        23,
+         -17,   -1,    1,    9,   14,   21,   24,   27,
+          23,
     },
     bishop_mobility: [14]i32 = .{
-        -22, -17, -9, 2,  8,  16, 20, 23,
-        25,  26,  26, 28, 36, 43,
+         -22,  -17,   -9,    2,    8,   16,   20,   23,
+          25,   26,   26,   28,   36,   43,
     },
     rook_mobility: [15]i32 = .{
-        -12, -4, -3, 1,  1,  8,  13, 15,
-        18,  21, 22, 25, 24, 29, 20,
+         -12,   -4,   -3,    1,    1,    8,   13,   15,
+          18,   21,   22,   25,   24,   29,   20,
     },
 };
 
@@ -267,30 +262,6 @@ fn getPieceSquareValue(piece_type: piece.Type, color: piece.Color, square: u8, i
     };
 }
 
-fn accumulatePieceSquareTables(b: BitBoard, color: piece.Color, mg_score: *i32, eg_score: *i32) void {
-    const color_bb = b.getColorBitboard(color);
-    const sign: i32 = if (color == .white) 1 else -1;
-
-    inline for ([_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen }) |piece_type| {
-        var bb = color_bb & b.getKindBitboard(piece_type);
-        while (bb != 0) {
-            const square: u8 = @intCast(@ctz(bb));
-            bb &= bb - 1;
-
-            const pst_value = getPieceSquareValue(piece_type, color, square, false);
-            mg_score.* += sign * pst_value;
-            eg_score.* += sign * pst_value;
-        }
-    }
-
-    const kings = color_bb & b.getKindBitboard(.king);
-    if (kings != 0) {
-        const king_square: u8 = @intCast(@ctz(kings));
-        mg_score.* += sign * getPieceSquareValue(.king, color, king_square, false);
-        eg_score.* += sign * getPieceSquareValue(.king, color, king_square, true);
-    }
-}
-
 /// Get material value for a piece (uses g_params so tuner sees consistent values)
 pub fn getPieceValue(piece_type: piece.Type) i32 {
     return switch (piece_type) {
@@ -346,9 +317,14 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
     const opponent_pawns = b.getColorBitboard(if (color == .white) .black else .white) & b.getKindBitboard(.pawn);
     var score: i32 = 0;
 
+    const file_masks = [8]u64{
+        0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
+        0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
+    };
+
     // Penalize doubled pawns
     for (0..8) |file| {
-        const pawns_on_file = @popCount(pawns & FILE_MASKS[file]);
+        const pawns_on_file = @popCount(pawns & file_masks[file]);
         if (pawns_on_file > 1) {
             score -= @as(i32, @intCast(pawns_on_file - 1)) * g_params.doubled_pawn_penalty;
         }
@@ -363,8 +339,8 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         const rank = sq / 8;
 
         var adjacent_files: u64 = 0;
-        if (file > 0) adjacent_files |= FILE_MASKS[file - 1];
-        if (file < 7) adjacent_files |= FILE_MASKS[file + 1];
+        if (file > 0) adjacent_files |= file_masks[file - 1];
+        if (file < 7) adjacent_files |= file_masks[file + 1];
 
         // Isolated pawn
         if ((pawns & adjacent_files) == 0) {
@@ -378,9 +354,9 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
         }
 
         // Mask squares ahead of this pawn
-        var blocking_mask: u64 = FILE_MASKS[file];
-        if (file > 0) blocking_mask |= FILE_MASKS[file - 1];
-        if (file < 7) blocking_mask |= FILE_MASKS[file + 1];
+        var blocking_mask: u64 = file_masks[file];
+        if (file > 0) blocking_mask |= file_masks[file - 1];
+        if (file < 7) blocking_mask |= file_masks[file + 1];
 
         const ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
         const ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
@@ -425,9 +401,9 @@ fn evaluatePawnStructure(b: BitBoard, color: piece.Color) i32 {
                     const adj_file = adj_sq % 8;
                     const adj_rank = adj_sq / 8;
 
-                    var adj_blocking: u64 = FILE_MASKS[adj_file];
-                    if (adj_file > 0) adj_blocking |= FILE_MASKS[adj_file - 1];
-                    if (adj_file < 7) adj_blocking |= FILE_MASKS[adj_file + 1];
+                    var adj_blocking: u64 = file_masks[adj_file];
+                    if (adj_file > 0) adj_blocking |= file_masks[adj_file - 1];
+                    if (adj_file < 7) adj_blocking |= file_masks[adj_file + 1];
 
                     const adj_ahead_shift_white: u6 = if (adj_rank >= 7) 63 else @intCast((adj_rank + 1) * 8);
                     const adj_ahead_shift_black: u6 = if (adj_rank == 0) 63 else @intCast((8 - adj_rank) * 8);
@@ -472,6 +448,11 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
     const pawns = b.getColorBitboard(color) & b.getKindBitboard(.pawn);
     const all_pawns = b.getKindBitboard(.pawn);
 
+    const file_masks = [8]u64{
+        0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
+        0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
+    };
+
     const shield_ranks = if (color == .white) [_]u8{ king_rank + 1, king_rank + 2 } else [_]u8{ king_rank -| 1, king_rank -| 2 };
 
     for (shield_ranks) |rank| {
@@ -489,7 +470,7 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
     for (0..3) |i| {
         const file = king_file +% i -% 1;
         if (file > 7) continue;
-        const file_mask = FILE_MASKS[file];
+        const file_mask = file_masks[file];
         if ((all_pawns & file_mask) == 0) {
             score -= g_params.king_open_file_penalty;
         } else if ((pawns & file_mask) == 0) {
@@ -661,6 +642,11 @@ fn evaluateRooks(b: BitBoard, color: piece.Color) i32 {
     const enemy_pawns = b.getColorBitboard(if (color == .white) .black else .white) & b.getKindBitboard(.pawn);
     const occupied = b.getColorBitboard(.white) | b.getColorBitboard(.black);
 
+    const file_masks = [8]u64{
+        0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
+        0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
+    };
+
     var rook_bb = rooks;
     while (rook_bb != 0) {
         const sq: u6 = @intCast(@ctz(rook_bb));
@@ -668,7 +654,7 @@ fn evaluateRooks(b: BitBoard, color: piece.Color) i32 {
 
         const file = sq % 8;
         const rank = sq / 8;
-        const file_mask = FILE_MASKS[file];
+        const file_mask = file_masks[file];
 
         if ((friendly_pawns & file_mask) == 0) {
             if ((enemy_pawns & file_mask) == 0) {
@@ -700,6 +686,11 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
     const friendly_pawns = b.getColorBitboard(color) & b.getKindBitboard(.pawn);
     const enemy_pawns = b.getColorBitboard(if (color == .white) .black else .white) & b.getKindBitboard(.pawn);
 
+    const file_masks = [8]u64{
+        0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
+        0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
+    };
+
     var piece_bb = knights;
     while (piece_bb != 0) {
         const sq: u6 = @intCast(@ctz(piece_bb));
@@ -715,8 +706,8 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         if ((friendly_pawns & pawn_attacks) == 0) continue;
 
         var attack_mask: u64 = 0;
-        if (file > 0) attack_mask |= FILE_MASKS[file - 1];
-        if (file < 7) attack_mask |= FILE_MASKS[file + 1];
+        if (file > 0) attack_mask |= file_masks[file - 1];
+        if (file < 7) attack_mask |= file_masks[file + 1];
 
         const knight_ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
         const knight_ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
@@ -745,8 +736,8 @@ fn evaluateOutposts(b: BitBoard, color: piece.Color) i32 {
         if ((friendly_pawns & pawn_attacks) == 0) continue;
 
         var attack_mask: u64 = 0;
-        if (file > 0) attack_mask |= FILE_MASKS[file - 1];
-        if (file < 7) attack_mask |= FILE_MASKS[file + 1];
+        if (file > 0) attack_mask |= file_masks[file - 1];
+        if (file < 7) attack_mask |= file_masks[file + 1];
 
         const bishop_ahead_shift_white: u6 = if (rank >= 7) 63 else @intCast((rank + 1) * 8);
         const bishop_ahead_shift_black: u6 = if (rank == 0) 63 else @intCast((8 - rank) * 8);
@@ -818,8 +809,31 @@ pub fn evaluate(b: *Board) i32 {
     var mg_pst_score: i32 = 0;
     var eg_pst_score: i32 = 0;
 
-    accumulatePieceSquareTables(board_state, .white, &mg_pst_score, &eg_pst_score);
-    accumulatePieceSquareTables(board_state, .black, &mg_pst_score, &eg_pst_score);
+    for (0..64) |sq| {
+        const square: u8 = @intCast(sq);
+
+        if (board_state.getPieceAt(square, .white)) |piece_type| {
+            if (piece_type == .king) {
+                mg_pst_score += getPieceSquareValue(piece_type, .white, square, false);
+                eg_pst_score += getPieceSquareValue(piece_type, .white, square, true);
+            } else {
+                const pst_value = getPieceSquareValue(piece_type, .white, square, false);
+                mg_pst_score += pst_value;
+                eg_pst_score += pst_value;
+            }
+        }
+
+        if (board_state.getPieceAt(square, .black)) |piece_type| {
+            if (piece_type == .king) {
+                mg_pst_score -= getPieceSquareValue(piece_type, .black, square, false);
+                eg_pst_score -= getPieceSquareValue(piece_type, .black, square, true);
+            } else {
+                const pst_value = getPieceSquareValue(piece_type, .black, square, false);
+                mg_pst_score -= pst_value;
+                eg_pst_score -= pst_value;
+            }
+        }
+    }
 
     score += @divTrunc((mg_pst_score * (256 - phase)) + (eg_pst_score * phase), 256);
 
