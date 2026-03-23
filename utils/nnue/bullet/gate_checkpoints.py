@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate Bullet checkpoints with STS + optional self-play, then promote best net."""
+"""Gate Bullet checkpoints with self-play only, then promote the best net."""
 
 from __future__ import annotations
 
@@ -13,12 +13,9 @@ import sys
 from pathlib import Path
 
 
-TOTAL_RE = re.compile(r"^TOTAL\s+\d+\s+(\d+)\s+(\d+)\s+([0-9.]+)%")
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate and promote Bullet checkpoints."
+        description="Evaluate and promote Bullet checkpoints with self-play."
     )
     parser.add_argument(
         "--checkpoints-dir",
@@ -39,17 +36,11 @@ def parse_args() -> argparse.Namespace:
         "--nnue-scale", type=int, default=100, help="NnueScale during eval"
     )
 
-    parser.add_argument("--sts-epd", default="epd", help="STS directory or file")
-    parser.add_argument("--sts-movetime-ms", type=int, default=40, help="STS movetime")
-    parser.add_argument(
-        "--sts-max-positions", type=int, default=400, help="STS position cap"
-    )
-
     parser.add_argument(
         "--selfplay-games",
         type=int,
-        default=0,
-        help="Self-play games for top nets (0=skip)",
+        default=80,
+        help="Self-play games per candidate checkpoint",
     )
     parser.add_argument(
         "--selfplay-movetime-ms", type=int, default=80, help="Self-play movetime"
@@ -58,14 +49,14 @@ def parse_args() -> argparse.Namespace:
         "--selfplay-top-k",
         type=int,
         default=3,
-        help="How many top STS nets to self-play",
+        help="How many recent checkpoints to self-play",
     )
 
     parser.add_argument(
-        "--threads", type=int, default=1, help="Threads for STS/self-play"
+        "--threads", type=int, default=1, help="Threads for self-play"
     )
     parser.add_argument(
-        "--hash-mb", type=int, default=64, help="Hash for STS/self-play"
+        "--hash-mb", type=int, default=64, help="Hash for self-play"
     )
 
     parser.add_argument(
@@ -102,17 +93,6 @@ def run_capture(
     )
 
 
-def parse_total_line(output: str) -> tuple[int, int, float]:
-    for line in output.splitlines():
-        m = TOTAL_RE.match(line.strip())
-        if m:
-            points = int(m.group(1))
-            max_points = int(m.group(2))
-            pct = float(m.group(3))
-            return points, max_points, pct
-    raise ValueError("Could not parse TOTAL line from STS output")
-
-
 def checkpoint_sort_key(path: Path) -> tuple[int, str]:
     name = path.name
     match = re.search(r"-(\d+)$", name)
@@ -130,10 +110,7 @@ def main() -> int:
     if args.nnue_scale < 10 or args.nnue_scale > 400:
         print("--nnue-scale must be in [10, 400]", file=sys.stderr)
         return 2
-    if args.sts_movetime_ms <= 0 or args.sts_max_positions <= 0:
-        print("Invalid STS bounds", file=sys.stderr)
-        return 2
-    if args.selfplay_games < 0 or args.selfplay_top_k <= 0:
+    if args.selfplay_games <= 0 or args.selfplay_top_k <= 0:
         print("Invalid self-play args", file=sys.stderr)
         return 2
     if args.threads <= 0 or args.hash_mb <= 0:
@@ -162,10 +139,8 @@ def main() -> int:
         out_dir = ckpt_root / ".." / "gates" / run_id
     out_dir = out_dir.resolve()
     nets_dir = out_dir / "nets"
-    sts_dir = out_dir / "sts"
     sp_dir = out_dir / "selfplay"
     nets_dir.mkdir(parents=True, exist_ok=True)
-    sts_dir.mkdir(parents=True, exist_ok=True)
     sp_dir.mkdir(parents=True, exist_ok=True)
 
     ckpts = sorted(
@@ -198,109 +173,81 @@ def main() -> int:
             ]
         )
 
-        sts_cmd = [
-            sys.executable,
-            "utils/sts/sts.py",
-            "--epd",
-            str(args.sts_epd),
-            "--engine",
-            str(engine),
-            "--movetime-ms",
-            str(args.sts_movetime_ms),
-            "--max-positions",
-            str(args.sts_max_positions),
-            "--show",
-            "none",
-            "--threads",
-            str(args.threads),
-            "--hash-mb",
-            str(args.hash_mb),
-            "--engine-opt",
-            "UseNNUE=true",
-            "--engine-opt",
-            f"EvalFile={net_out}",
-            "--engine-opt",
-            f"NnueBlend={args.blend}",
-            "--engine-opt",
-            f"NnueScale={args.nnue_scale}",
-        ]
-        sts_proc = run_capture(sts_cmd)
-        sts_log = sts_dir / f"{ckpt.name}.txt"
-        sts_log.write_text(sts_proc.stdout)
-
-        points, max_points, pct = parse_total_line(sts_proc.stdout)
-
         rec = {
             "checkpoint": str(ckpt.resolve()),
             "checkpoint_name": ckpt.name,
             "net": str(net_out.resolve()),
-            "sts": {
-                "points": points,
-                "max_points": max_points,
-                "score_pct": pct,
-                "log": str(sts_log.resolve()),
-            },
         }
         records.append(rec)
 
-    records.sort(
-        key=lambda r: (r["sts"]["score_pct"], r["checkpoint_name"]), reverse=True
-    )
+    records.sort(key=lambda r: checkpoint_sort_key(Path(r["checkpoint"])), reverse=True)
 
     top_k = records[: min(args.selfplay_top_k, len(records))]
 
-    if args.selfplay_games > 0:
-        for rec in top_k:
-            summary_json = sp_dir / f"{rec['checkpoint_name']}.json"
-            selfplay_cmd = [
-                sys.executable,
-                "utils/match/selfplay.py",
-                str(engine),
-                str(engine),
-                "--name1",
-                "base",
-                "--name2",
-                rec["checkpoint_name"],
-                "--games",
-                str(args.selfplay_games),
-                "--movetime-ms",
-                str(args.selfplay_movetime_ms),
-                "--threads",
-                str(args.threads),
-                "--hash-mb",
-                str(args.hash_mb),
-                "--engine2-opt",
-                "UseNNUE=true",
-                "--engine2-opt",
-                f"EvalFile={rec['net']}",
-                "--engine2-opt",
-                f"NnueBlend={args.blend}",
-                "--engine2-opt",
-                f"NnueScale={args.nnue_scale}",
-                "--summary-json",
-                str(summary_json),
-                "--quiet",
-            ]
-            # selfplay.py exits non-zero when candidate loses/ties, but still writes summary.
-            print("$", " ".join(selfplay_cmd))
-            subprocess.run(selfplay_cmd, check=False)
+    for rec in top_k:
+        summary_json = sp_dir / f"{rec['checkpoint_name']}.json"
+        stdout_log = sp_dir / f"{rec['checkpoint_name']}.stdout.log"
+        stderr_log = sp_dir / f"{rec['checkpoint_name']}.stderr.log"
+        selfplay_cmd = [
+            sys.executable,
+            "utils/match/selfplay.py",
+            str(engine),
+            str(engine),
+            "--name1",
+            "base",
+            "--name2",
+            rec["checkpoint_name"],
+            "--games",
+            str(args.selfplay_games),
+            "--movetime-ms",
+            str(args.selfplay_movetime_ms),
+            "--threads",
+            str(args.threads),
+            "--hash-mb",
+            str(args.hash_mb),
+            "--engine2-opt",
+            "UseNNUE=true",
+            "--engine2-opt",
+            f"EvalFile={rec['net']}",
+            "--engine2-opt",
+            f"NnueBlend={args.blend}",
+            "--engine2-opt",
+            f"NnueScale={args.nnue_scale}",
+            "--summary-json",
+            str(summary_json),
+            "--quiet",
+        ]
+        print("$", " ".join(selfplay_cmd))
+        with stdout_log.open("w", encoding="utf-8") as out_f, stderr_log.open("w", encoding="utf-8") as err_f:
+            proc = subprocess.run(selfplay_cmd, check=False, text=True, stdout=out_f, stderr=err_f)
 
-            if summary_json.is_file():
-                payload = json.loads(summary_json.read_text())
-                rec["selfplay"] = payload.get("elo", {})
-                rec["selfplay_summary"] = str(summary_json.resolve())
+        rec["selfplay_exit_code"] = proc.returncode
+        rec["selfplay_stdout_log"] = str(stdout_log.resolve())
+        rec["selfplay_stderr_log"] = str(stderr_log.resolve())
+
+        if summary_json.is_file():
+            payload = json.loads(summary_json.read_text())
+            rec["selfplay"] = payload.get("elo", {})
+            rec["selfplay_result"] = payload.get("result", {})
+            rec["selfplay_summary"] = str(summary_json.resolve())
 
     promoted: dict | None = None
-    for rec in records:
+    passing: list[dict] = []
+    for rec in top_k:
         elo = rec.get("selfplay", {})
         elo_cp = float(elo.get("elo_engine2_minus_engine1", -1e9))
         p_val = float(elo.get("p_value_two_sided", 1.0))
-        if args.selfplay_games == 0:
-            promoted = rec
-            break
         if elo_cp >= args.min_elo and p_val <= args.max_p_value:
-            promoted = rec
-            break
+            passing.append(rec)
+
+    if passing:
+        promoted = max(
+            passing,
+            key=lambda rec: (
+                float(rec.get("selfplay", {}).get("elo_engine2_minus_engine1", -1e9)),
+                rec["checkpoint_name"],
+            ),
+        )
 
     report = {
         "generated_at_utc": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -309,16 +256,16 @@ def main() -> int:
         "eval": {
             "blend": args.blend,
             "nnue_scale": args.nnue_scale,
-            "sts_epd": args.sts_epd,
-            "sts_movetime_ms": args.sts_movetime_ms,
-            "sts_max_positions": args.sts_max_positions,
             "selfplay_games": args.selfplay_games,
             "selfplay_movetime_ms": args.selfplay_movetime_ms,
+            "selfplay_top_k": args.selfplay_top_k,
             "threads": args.threads,
             "hash_mb": args.hash_mb,
             "min_elo": args.min_elo,
             "max_p_value": args.max_p_value,
         },
+        "candidate_count": len(records),
+        "tested_count": len(top_k),
         "results": records,
         "promoted": promoted,
     }
