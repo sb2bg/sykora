@@ -92,6 +92,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-plies", type=int, default=220, help="Draw adjudication ply cap")
     parser.add_argument("--threads", type=int, default=None, help="Threads UCI option for both engines")
     parser.add_argument("--hash-mb", type=int, default=None, help="Hash UCI option for both engines")
+    parser.add_argument("--engine1-opt", action="append", default=[], help="Extra UCI option for engine1 (Key=Value)")
+    parser.add_argument("--engine2-opt", action="append", default=[], help="Extra UCI option for engine2 (Key=Value)")
 
     parser.add_argument(
         "--practical-min-games",
@@ -134,6 +136,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--game-time-ms must be > 0")
     if args.inc_ms < 0:
         parser.error("--inc-ms must be >= 0")
+    if args.game_time_ms is not None and args.depth is not None:
+        parser.error("--game-time-ms and --depth cannot be used together")
     if args.max_plies <= 0:
         parser.error("--max-plies must be > 0")
     if args.practical_min_games < 0:
@@ -184,6 +188,10 @@ def run_batch(args: argparse.Namespace, games: int, seed: int) -> tuple[int, dic
         cmd.extend(["--threads", str(args.threads)])
     if args.hash_mb is not None:
         cmd.extend(["--hash-mb", str(args.hash_mb)])
+    for opt in args.engine1_opt:
+        cmd.extend(["--engine1-opt", opt])
+    for opt in args.engine2_opt:
+        cmd.extend(["--engine2-opt", opt])
 
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode not in (0, 1, 2):
@@ -309,6 +317,8 @@ def main() -> int:
             "max_plies": args.max_plies,
             "threads": args.threads,
             "hash_mb": args.hash_mb,
+            "engine1_opt": list(args.engine1_opt),
+            "engine2_opt": list(args.engine2_opt),
             "practical_min_games": args.practical_min_games,
             "practical_p_threshold": args.practical_p_threshold,
         },
