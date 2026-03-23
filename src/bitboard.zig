@@ -852,11 +852,11 @@ pub const BitBoard = struct {
         };
     }
 
-    pub fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
+    pub inline fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
         return self.color_sets[@intFromEnum(color)];
     }
 
-    pub fn getKindBitboard(self: Self, kind: pieceInfo.Type) u64 {
+    pub inline fn getKindBitboard(self: Self, kind: pieceInfo.Type) u64 {
         return self.kind_sets[@intFromEnum(kind)];
     }
 
@@ -877,16 +877,17 @@ pub const BitBoard = struct {
         self.kind_sets[@intFromEnum(kind)] |= mask;
     }
 
-    pub fn getPieceAt(self: Self, index: u8, color: pieceInfo.Color) ?pieceInfo.Type {
-        const color_mask = @as(u64, 1) << @intCast(index);
-        if ((self.color_sets[@intFromEnum(color)] & color_mask) == 0)
+    pub inline fn getPieceAt(self: Self, index: u8, color: pieceInfo.Color) ?pieceInfo.Type {
+        const square_mask = @as(u64, 1) << @intCast(index);
+        if ((self.color_sets[@intFromEnum(color)] & square_mask) == 0)
             return null;
 
-        for (self.kind_sets, 0..) |kind_mask, i| {
-            if ((kind_mask & color_mask) != 0)
-                return @enumFromInt(i);
-        }
-
+        if ((self.kind_sets[@intFromEnum(pieceInfo.Type.pawn)] & square_mask) != 0) return .pawn;
+        if ((self.kind_sets[@intFromEnum(pieceInfo.Type.knight)] & square_mask) != 0) return .knight;
+        if ((self.kind_sets[@intFromEnum(pieceInfo.Type.bishop)] & square_mask) != 0) return .bishop;
+        if ((self.kind_sets[@intFromEnum(pieceInfo.Type.rook)] & square_mask) != 0) return .rook;
+        if ((self.kind_sets[@intFromEnum(pieceInfo.Type.queen)] & square_mask) != 0) return .queen;
+        if ((self.kind_sets[@intFromEnum(pieceInfo.Type.king)] & square_mask) != 0) return .king;
         return null;
     }
 
@@ -899,26 +900,15 @@ pub const BitBoard = struct {
     ///   - color: The color of the pawns to look for
     ///
     /// Returns: true if there are adjacent pawns that could make an en passant capture
-    pub fn hasAdjacentPawn(self: Self, ep_sq: u8, color: pieceInfo.Color) bool {
+    pub inline fn hasAdjacentPawn(self: Self, ep_sq: u8, color: pieceInfo.Color) bool {
         const file = ep_sq % 8;
+        const pawns = self.color_sets[@intFromEnum(color)] & self.kind_sets[@intFromEnum(pieceInfo.Type.pawn)];
+        var adjacent_mask: u64 = 0;
 
-        var result = false;
+        if (file > 0) adjacent_mask |= @as(u64, 1) << @intCast(ep_sq - 1);
+        if (file < 7) adjacent_mask |= @as(u64, 1) << @intCast(ep_sq + 1);
 
-        if (file > 0) {
-            const left = ep_sq - 1;
-            if (self.getPieceAt(left, color)) |pt| {
-                if (pt == .pawn) result = true;
-            }
-        }
-
-        if (file < 7) {
-            const right = ep_sq + 1;
-            if (self.getPieceAt(right, color)) |pt| {
-                if (pt == .pawn) result = true;
-            }
-        }
-
-        return result;
+        return (pawns & adjacent_mask) != 0;
     }
 
     pub fn whiteToMove(self: Self) bool {
