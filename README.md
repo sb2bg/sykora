@@ -88,7 +88,6 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 - STS runner (`utils/sts/sts.py`).
 - Engine-vs-engine self-play tooling (`utils/match`).
 - Long-term experiment history and ratings workflow (`utils/history`).
-- Automated tuning loop (`utils/tuning/tune_loop.py`).
 - NNUE data prep/training/export pipelines (`utils/nnue`, `utils/data`).
 - Lichess play/challenge bot tooling (`utils/bot`).
 
@@ -109,7 +108,7 @@ The activation function (ReLU or SCReLU) is auto-detected from the network file 
 ## Prerequisites
 
 - [Zig](https://ziglang.org/) compiler (latest stable version recommended)
-- Python 3.10+ (for benchmark, STS, match, history, tuning, NNUE, and bot utilities)
+- Python 3.10+ (for benchmark, STS, match, history, NNUE, and bot utilities)
 - A UCI-compatible chess GUI (like Arena, Cutechess, or similar)
 
 For Python tooling, install dependencies as needed:
@@ -242,6 +241,7 @@ python utils/match/sprt.py ./old_sykora ./zig-out/bin/sykora \
 ```
 
 Exit codes from `sprt.py`:
+
 - `0`: candidate accepted as stronger (or practical stronger threshold reached)
 - `1`: candidate accepted as weaker
 - `2`: inconclusive at max games
@@ -295,27 +295,7 @@ python utils/history/history.py match-extremes --min-games 20 --games 80 --movet
 python utils/history/history.py network --top-n 12 --min-games 10 --min-edge-games 2
 ```
 
-See `history/README.md` for folder schema and full workflow.
-
-One-command tuning loop (STS gate + archived self-play + auto-promotion):
-
-```bash
-# First run: create baseline from a known engine binary
-python utils/tuning/tune_loop.py --bootstrap-baseline-engine old_versions/old_sykora --candidate-label "first-pass"
-
-# Normal run: compare current code to history/current_baseline.txt
-python utils/tuning/tune_loop.py --candidate-label "eval-tweak" --candidate-notes "describe change"
-```
-
-Quick vs serious settings:
-
-```bash
-# Quick loop (default): 6 STS themes, 20 self-play games at 80ms/move
-python utils/tuning/tune_loop.py --candidate-label "quick-iter"
-
-# Serious confirmation before keeping a major change
-python utils/tuning/tune_loop.py --candidate-label "confirm" --sp-games 120 --sp-movetime-ms 150 --max-p-value 0.2
-```
+See `history/README.md` for folder schema and the archived self-play / STS workflow.
 
 ## NNUE
 
@@ -327,7 +307,7 @@ Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed `S
 - NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`).
 - The activation function (ReLU or SCReLU) is stored in the network file header and auto-detected on load.
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
-- To blend NNUE with classical eval, lower `NnueBlend` (e.g., `50` for 50/50, `0` for classical only).
+- `NnueBlend` remains available for fallback/debugging, but the primary workflow is pure NNUE.
 
 ### Network Formats (`SYKNNUE2` / `SYKNNUE3`)
 

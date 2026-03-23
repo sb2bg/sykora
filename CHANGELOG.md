@@ -8,10 +8,18 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ### Changed
 
+- Promoted the embedded NNUE to the stronger `v3_512` checkpoint `run_20260323T063759Z-600`.
 - Switched NNUE tooling to emit `SYKNNUE3` only. `SYKNNUE2` remains readable for backward compatibility with older external nets.
+- Added transposition-table probing/storage inside quiescence search.
 - Reworked search move ordering with continuation-history heuristics for quieter move scoring and better follow-up awareness.
 - Added singular extension logic and TT-aware multicut handling to sharpen tactical search around strong transposition-table moves.
+- Simplified repetition detection with a cheap halfmove fast path and early exit on first match.
+- Retired Texel/HCE tuning from the default workflow and documentation.
 - Fixed the release SPRT workflow and bumped the engine version string to `0.2.3`.
+
+### Removed
+
+- Removed the old Texel-tuning binaries and scripts (`sykora-tune`, `sykora-texel`, and the Texel helpers under `utils/tuning`).
 
 ## [0.2.2] - 2026-03-23
 

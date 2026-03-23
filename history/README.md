@@ -84,15 +84,9 @@ Backfill STS for all snapshots:
 ~/.pyenv/shims/python utils/history/history.py sts --all --movetime-ms 100 --continue-on-error
 ```
 
-One-command loop (build + STS gate + self-play gate + promotion):
+Legacy note:
 
-```bash
-# Bootstrap baseline once
-~/.pyenv/shims/python utils/tuning/tune_loop.py --bootstrap-baseline-engine old_versions/old_sykora --candidate-label "bootstrap"
-
-# Regular iteration
-~/.pyenv/shims/python utils/tuning/tune_loop.py --candidate-label "tweak-name" --candidate-notes "what changed"
-```
+- The old Texel/HCE tuning scripts have been removed. The recommended workflow is STS plus archived self-play.
 
 ## Notes
 
