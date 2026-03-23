@@ -14,9 +14,7 @@ LEGACY_INPUT_SIZE = 768
 QA = 255
 QB = 64
 SCALE = 400
-MAGIC_V2 = b"SYKNNUE2"
 MAGIC_V3 = b"SYKNNUE3"
-FORMAT_VERSION_V2 = 2
 FORMAT_VERSION_V3 = 3
 
 FEATURE_SET_LEGACY = 0
@@ -173,26 +171,23 @@ def write_syk_nnue(
     if len(output_weights_i16) != 2 * hidden_size:
         raise ValueError("output_weights length mismatch")
 
+    if feature_set == FEATURE_SET_LEGACY:
+        bucket_layout_64 = [0] * 64
+    elif bucket_layout_64 is None or len(bucket_layout_64) != 64:
+        raise ValueError("bucket_layout_64 must contain exactly 64 entries")
+
+    bucket_count = num_buckets(bucket_layout_64)
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as handle:
-        if feature_set == FEATURE_SET_LEGACY:
-            handle.write(MAGIC_V2)
-            handle.write(struct.pack("<H", FORMAT_VERSION_V2))
-            handle.write(struct.pack("<H", hidden_size))
-            handle.write(struct.pack("<B", activation_type))
-            handle.write(struct.pack("<i", int(output_bias_i32)))
-        else:
-            if bucket_layout_64 is None or len(bucket_layout_64) != 64:
-                raise ValueError("bucket_layout_64 must contain exactly 64 entries")
-            bucket_count = num_buckets(bucket_layout_64)
-            handle.write(MAGIC_V3)
-            handle.write(struct.pack("<H", FORMAT_VERSION_V3))
-            handle.write(struct.pack("<B", feature_set))
-            handle.write(struct.pack("<H", hidden_size))
-            handle.write(struct.pack("<B", activation_type))
-            handle.write(struct.pack("<H", bucket_count))
-            handle.write(bytes(int(v) for v in bucket_layout_64))
-            handle.write(struct.pack("<i", int(output_bias_i32)))
+        handle.write(MAGIC_V3)
+        handle.write(struct.pack("<H", FORMAT_VERSION_V3))
+        handle.write(struct.pack("<B", feature_set))
+        handle.write(struct.pack("<H", hidden_size))
+        handle.write(struct.pack("<B", activation_type))
+        handle.write(struct.pack("<H", bucket_count))
+        handle.write(bytes(int(v) for v in bucket_layout_64))
+        handle.write(struct.pack("<i", int(output_bias_i32)))
         handle.write(_pack_i16(input_biases_i16))
         handle.write(_pack_i16(input_weights_i16))
         handle.write(_pack_i16(output_weights_i16))

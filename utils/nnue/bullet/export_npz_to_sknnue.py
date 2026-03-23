@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a float-domain NPZ checkpoint into Sykora SYKNNUE2 format.
+"""Convert a float-domain NPZ checkpoint into Sykora SYKNNUE3 format.
 
 Expected arrays in NPZ:
 - input_weights: shape [input_size, hidden]
@@ -35,7 +35,7 @@ from common import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export NPZ checkpoint to SYKNNUE2 net."
+        description="Export NPZ checkpoint to SYKNNUE3 net."
     )
     parser.add_argument("--input", required=True, help="Input .npz checkpoint")
     parser.add_argument("--output-net", required=True, help="Output .sknnue path")
@@ -186,6 +186,11 @@ def main() -> int:
     )
 
     print(f"Input: {in_path}")
+    print("Output format: SYKNNUE3")
+    print(
+        "Feature set: "
+        + ("legacy_psqt" if feature_set == FEATURE_SET_LEGACY else "king_buckets_mirrored")
+    )
     print(f"Hidden size: {hidden_size}")
     print(f"Wrote: {out_path}")
     return 0

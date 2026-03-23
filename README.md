@@ -53,7 +53,7 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 ### Evaluation
 
 - **NNUE evaluation** (default, embedded in binary):
-  - Backward-compatible `SYKNNUE2`/`SYKNNUE3` loader
+  - `SYKNNUE3` net generation with backward-compatible `SYKNNUE2` loading
   - Legacy `768 -> Nx2 -> 1` and mirrored king-bucketed sparse-input nets
   - SCReLU activation with incremental accumulators during search
   - Trained on high-depth self-play data via the Bullet trainer
@@ -331,6 +331,8 @@ Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed `S
 
 ### Network Formats (`SYKNNUE2` / `SYKNNUE3`)
 
+New tooling writes `SYKNNUE3` only. `SYKNNUE2` remains loadable for backward compatibility with older external nets.
+
 Legacy `SYKNNUE2`:
 
 ```
@@ -360,7 +362,7 @@ i16[input_size * hidden_size]            input -> accumulator weights
 i16[2 * hidden_size]                     output weights (stm half, nstm half)
 ```
 
-For `king_buckets_mirrored`, `input_size = 768 * bucket_count`. The current embedded net uses `bucket_count = 10`, so its effective input size is `7680`. All values are little-endian.
+For `king_buckets_mirrored`, `input_size = 768 * bucket_count`. The current embedded net uses `bucket_count = 10`, so its effective input size is `7680`. For `legacy_psqt`, `SYKNNUE3` uses `bucket_count = 1` with a zero bucket layout, so old 768-input nets can be represented without using `SYKNNUE2`. All values are little-endian.
 
 ### Training Pipeline
 

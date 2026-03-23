@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Bullet quantised.bin -> Sykora SYKNNUE2/SYKNNUE3.
+"""Convert Bullet quantised.bin -> Sykora SYKNNUE3.
 
 Supports:
   - legacy `768 -> Nx2 -> 1`
@@ -18,7 +18,7 @@ from typing import Optional
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert Bullet quantised.bin to SYKNNUE2."
+        description="Convert Bullet quantised.bin to SYKNNUE3."
     )
     parser.add_argument("--input", required=True, help="Path to Bullet quantised.bin")
     parser.add_argument("--output-net", required=True, help="Output .sknnue path")
@@ -201,6 +201,7 @@ def main() -> int:
     )
 
     print(f"Input: {in_path}")
+    print("Output format: SYKNNUE3")
     print(f"Feature set: {feature_name}")
     print(f"Total bytes: {total_len}")
     print(f"Hidden size: {hidden}")

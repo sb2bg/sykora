@@ -8,6 +8,7 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ### Changed
 
+- Switched NNUE tooling to emit `SYKNNUE3` only. `SYKNNUE2` remains readable for backward compatibility with older external nets.
 - Reworked search move ordering with continuation-history heuristics for quieter move scoring and better follow-up awareness.
 - Added singular extension logic and TT-aware multicut handling to sharpen tactical search around strong transposition-table moves.
 - Fixed the release SPRT workflow and bumped the engine version string to `0.2.3`.
