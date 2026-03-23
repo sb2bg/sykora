@@ -66,7 +66,7 @@ jobs:
             current_tag="$(git describe --tags --exact-match)"
           fi
 
-          prev_tag="$(git tag --sort=-version:refname 'v*' | grep -Fxv "${current_tag}" | head -n 1 || true)"
+          prev_tag="$(git tag --sort=-version:refname --list 'v*' | grep -Fxv "${current_tag}" | head -n 1 || true)"
           if [ -z "${prev_tag}" ]; then
             echo "Unable to resolve previous v* tag for baseline."
             exit 1
