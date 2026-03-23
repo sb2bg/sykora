@@ -89,7 +89,6 @@ Sykora is a UCI chess engine written from scratch in Zig. It features magic bitb
 - Engine-vs-engine runners (`utils/match`, used internally by `utils/history`).
 - Long-term archived experiment history, SPRT, and ratings workflow (`utils/history`).
 - NNUE data prep/training/export pipelines (`utils/nnue`, `utils/data`).
-- Lichess play/challenge bot tooling (`utils/bot`).
 
 ## UCI Options
 
@@ -116,9 +115,6 @@ For Python tooling, install dependencies as needed:
 ```bash
 # Core analysis/benchmark utilities
 python -m pip install chess
-
-# Lichess bot utilities
-python -m pip install berserk python-dotenv
 ```
 
 For NNUE training on a fresh machine, bootstrap the Bullet dependency once:
@@ -134,7 +130,7 @@ The tracked training runner lives under `utils/nnue/bullet_runner/`; datasets, c
 To build the project, run:
 
 ```bash
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 This will create an executable named `sykora` in the `zig-out/bin` directory. The embedded NNUE net (`src/net.sknnue`) is compiled into the binary -- no external files needed to play at full strength.
@@ -144,7 +140,7 @@ This will create an executable named `sykora` in the `zig-out/bin` directory. Th
 To run the engine:
 
 ```bash
-zig build run
+zig build -Doptimize=ReleaseFast run
 ```
 
 Or directly run the executable:
@@ -159,30 +155,12 @@ The engine starts with NNUE enabled and the embedded net loaded. No configuratio
 
 Sykora is available on Lichess at [SykoraBot](https://lichess.org/@/sykorabot).
 
-To run your own bot instance against Lichess:
-
-```bash
-export LICHESS_API_TOKEN="<your_lichess_bot_token>"
-export ENGINE_PATH="./zig-out/bin/sykora"
-python utils/bot/lichess_bot.py
-```
-
-To issue a challenge from your token/account:
-
-```bash
-# challenge a specific user
-python utils/bot/challenge_bot.py some_username --minutes 3 --increment 2
-
-# or pick a random online bot
-python utils/bot/challenge_bot.py --random-online-bot --minutes 3 --increment 2
-```
-
 ## Testing
 
 To run the test suite:
 
 ```bash
-zig build test
+zig build -Doptimize=ReleaseFast test
 ```
 
 To run perft validation:
@@ -365,7 +343,7 @@ To update the embedded net in the binary:
 
 ```bash
 cp output.sknnue src/net.sknnue
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 ### Gating Checkpoints
