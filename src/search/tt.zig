@@ -29,6 +29,7 @@ pub const TTEntry = struct {
 };
 
 const BUCKET_SIZE: usize = 4;
+const LOCK_STRIPES: usize = 4096;
 
 const TTBucket = struct {
     entries: [BUCKET_SIZE]TTEntry,
@@ -47,6 +48,7 @@ pub const TranspositionTable = struct {
     num_buckets: usize,
     current_age: u8,
     allocator: std.mem.Allocator,
+    locks: [LOCK_STRIPES]std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, size_mb: usize) !Self {
         const bucket_size = @sizeOf(TTBucket);
@@ -62,6 +64,7 @@ pub const TranspositionTable = struct {
             .num_buckets = num_buckets,
             .current_age = 0,
             .allocator = allocator,
+            .locks = [_]std.Thread.Mutex{std.Thread.Mutex{}} ** LOCK_STRIPES,
         };
     }
 
@@ -97,10 +100,18 @@ pub const TranspositionTable = struct {
         return @as(usize, @intCast(hash % @as(u64, @intCast(self.num_buckets))));
     }
 
-    pub fn probe(self: *Self, hash: u64) ?*TTEntry {
+    inline fn lockForBucket(self: *Self, idx: usize) *std.Thread.Mutex {
+        return &self.locks[idx & (LOCK_STRIPES - 1)];
+    }
+
+    pub fn probe(self: *Self, hash: u64) ?TTEntry {
         const idx = self.bucketIndex(hash);
+        const mutex = self.lockForBucket(idx);
+        mutex.lock();
+        defer mutex.unlock();
+
         const bucket = &self.buckets[idx];
-        for (&bucket.entries) |*entry| {
+        for (&bucket.entries) |entry| {
             if (entry.hash == hash) {
                 return entry;
             }
@@ -110,6 +121,10 @@ pub const TranspositionTable = struct {
 
     pub fn store(self: *Self, hash: u64, depth: u8, score: i32, bound: TTEntryBound, best_move: Move) void {
         const idx = self.bucketIndex(hash);
+        const mutex = self.lockForBucket(idx);
+        mutex.lock();
+        defer mutex.unlock();
+
         const bucket = &self.buckets[idx];
 
         // Check if this hash already exists in the bucket — always update same-hash entry

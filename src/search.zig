@@ -434,6 +434,7 @@ pub const SearchEngine = struct {
         var best_score: i32 = -INF;
         self.root_best_move = best_move;
         const max_depth: u32 = if (options.depth) |d| @intCast(d) else 64;
+        var completed_depth: u32 = 0;
 
         // Iterative deepening
         var depth: u32 = options.start_depth;
@@ -478,6 +479,7 @@ pub const SearchEngine = struct {
 
             best_move = self.root_best_move;
             best_score = score;
+            completed_depth = depth;
 
             const iter_time = elapsedMs(iter_start);
             const total_time = elapsedMs(start_time);
@@ -514,12 +516,22 @@ pub const SearchEngine = struct {
 
         const elapsed = elapsedMs(start_time);
 
+        if (completed_depth == 0) {
+            return SearchResult{
+                .best_move = legal_moves.moves[0],
+                .score = 0,
+                .nodes = self.nodes_searched,
+                .time_ms = elapsed,
+                .depth = 0,
+            };
+        }
+
         return SearchResult{
             .best_move = best_move,
             .score = best_score,
             .nodes = self.nodes_searched,
             .time_ms = elapsed,
-            .depth = depth - 1,
+            .depth = completed_depth,
         };
     }
 
