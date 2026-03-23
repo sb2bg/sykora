@@ -15,6 +15,9 @@ const heuristics = @import("search/heuristics.zig");
 const KillerMoves = heuristics.KillerMoves;
 const CounterMoveTable = heuristics.CounterMoveTable;
 const HistoryTable = heuristics.HistoryTable;
+const ContinuationHistoryTable = heuristics.ContinuationHistoryTable;
+const continuationKey = heuristics.continuationKey;
+const INVALID_CONTINUATION_KEY = heuristics.INVALID_CONTINUATION_KEY;
 
 pub const MovePicker = move_picker_mod.MovePicker;
 pub const TTEntryBound = tt_mod.TTEntryBound;
@@ -32,6 +35,11 @@ inline fn seePieceValue(piece_type: piece.Type) i32 {
 inline fn staticExchangeEvalPosition(b: board.BitBoard, move: Move) i32 {
     return move_picker_mod.staticExchangeEvalPosition(b, move);
 }
+
+inline fn movesEqual(a: Move, b: Move) bool {
+    return a.data == b.data;
+}
+
 pub const SearchOptions = struct {
     infinite: bool = false,
     move_time: ?u64 = null,
@@ -157,6 +165,11 @@ const LMP_MAX_DEPTH: u32 = 3;
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
 const NULL_MOVE_REDUCTION: u32 = 3;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8; // Verify at deeper depths
+const SINGULAR_MIN_DEPTH: u32 = 8;
+const SINGULAR_REDUCTION: u32 = 2;
+const SINGULAR_MARGIN_BASE_CP: i32 = 30;
+const SINGULAR_MARGIN_PER_PLY_CP: i32 = 25;
+const SINGULAR_MULTICUT_MIN_BEATERS: u32 = 2;
 
 // Futility pruning parameters
 const FUTILITY_MARGIN: i32 = 200;
@@ -173,6 +186,14 @@ pub const SearchEngine = struct {
 
     const TtProbeResult = struct {
         tt_move: ?Move,
+        cutoff: ?i32,
+        tt_score: ?i32,
+        tt_depth: u32,
+        tt_bound: ?TTEntryBound,
+    };
+
+    const SingularResult = struct {
+        extension: u32,
         cutoff: ?i32,
     };
 
@@ -193,9 +214,11 @@ pub const SearchEngine = struct {
     killer_moves: KillerMoves,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
+    continuation_history: ContinuationHistoryTable,
     nodes_searched: usize,
     seldepth: u32,
     previous_move: ?Move,
+    continuation_keys: [MAX_PLY]u16,
     // Position history for repetition detection during search
     position_history: [512]u64,
     history_count: usize,
@@ -233,9 +256,11 @@ pub const SearchEngine = struct {
             .killer_moves = KillerMoves.init(),
             .history = HistoryTable.init(),
             .counter_moves = CounterMoveTable.init(),
+            .continuation_history = ContinuationHistoryTable.init(),
             .nodes_searched = 0,
             .seldepth = 0,
             .previous_move = null,
+            .continuation_keys = [_]u16{INVALID_CONTINUATION_KEY} ** MAX_PLY,
             .position_history = undefined,
             .history_count = 0,
             .game_history = undefined,
@@ -392,7 +417,9 @@ pub const SearchEngine = struct {
         self.killer_moves = KillerMoves.init();
         self.history.age(); // Age history instead of clearing
         self.counter_moves.clear();
+        self.continuation_history.age();
         self.previous_move = null;
+        self.continuation_keys = [_]u16{INVALID_CONTINUATION_KEY} ** MAX_PLY;
         self.static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE;
         // Initialize position history
         self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
@@ -587,6 +614,46 @@ pub const SearchEngine = struct {
         return time_for_move;
     }
 
+    inline fn continuationContext(self: *const Self, ply: u32) struct { prev: ?u16, prev2: ?u16 } {
+        const prev = if (ply >= 1 and self.continuation_keys[ply - 1] != INVALID_CONTINUATION_KEY)
+            self.continuation_keys[ply - 1]
+        else
+            null;
+        const prev2 = if (ply >= 2 and self.continuation_keys[ply - 2] != INVALID_CONTINUATION_KEY)
+            self.continuation_keys[ply - 2]
+        else
+            null;
+        return .{ .prev = prev, .prev2 = prev2 };
+    }
+
+    inline fn moveContinuationKey(
+        self: *const Self,
+        move: Move,
+        color: piece.Color,
+        moving_piece: piece.Type,
+    ) u16 {
+        _ = self;
+        return continuationKey(color, move.promotion() orelse moving_piece, move.to());
+    }
+
+    inline fn quietHeuristicScore(
+        self: *const Self,
+        move: Move,
+        color: piece.Color,
+        ply: u32,
+    ) i32 {
+        var score = self.history.getForColor(move, color);
+        if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
+            const ctx = self.continuationContext(ply);
+            score += self.continuation_history.get(
+                ctx.prev,
+                ctx.prev2,
+                continuationKey(color, piece_type, move.to()),
+            );
+        }
+        return score;
+    }
+
     fn probeTransposition(
         self: *Self,
         search_depth: u32,
@@ -604,18 +671,51 @@ pub const SearchEngine = struct {
             if (!is_pv_node and entry.depth >= search_depth) {
                 const tt_score = scoreFromTT(entry.score, ply);
                 switch (entry.bound) {
-                    .exact => return .{ .tt_move = tt_move, .cutoff = tt_score },
+                    .exact => return .{
+                        .tt_move = tt_move,
+                        .cutoff = tt_score,
+                        .tt_score = tt_score,
+                        .tt_depth = entry.depth,
+                        .tt_bound = entry.bound,
+                    },
                     .lower_bound => {
-                        if (tt_score >= beta_adj) return .{ .tt_move = tt_move, .cutoff = tt_score };
+                        if (tt_score >= beta_adj) return .{
+                            .tt_move = tt_move,
+                            .cutoff = tt_score,
+                            .tt_score = tt_score,
+                            .tt_depth = entry.depth,
+                            .tt_bound = entry.bound,
+                        };
                     },
                     .upper_bound => {
-                        if (tt_score <= alpha) return .{ .tt_move = tt_move, .cutoff = tt_score };
+                        if (tt_score <= alpha) return .{
+                            .tt_move = tt_move,
+                            .cutoff = tt_score,
+                            .tt_score = tt_score,
+                            .tt_depth = entry.depth,
+                            .tt_bound = entry.bound,
+                        };
                     },
                 }
             }
+
+            const tt_score = scoreFromTT(entry.score, ply);
+            return .{
+                .tt_move = tt_move,
+                .cutoff = null,
+                .tt_score = tt_score,
+                .tt_depth = entry.depth,
+                .tt_bound = entry.bound,
+            };
         }
 
-        return .{ .tt_move = tt_move, .cutoff = null };
+        return .{
+            .tt_move = tt_move,
+            .cutoff = null,
+            .tt_score = null,
+            .tt_depth = 0,
+            .tt_bound = null,
+        };
     }
 
     inline fn applyInternalIterativeReduction(tt_move: ?Move, search_depth: u32) u32 {
@@ -623,6 +723,96 @@ pub const SearchEngine = struct {
             return search_depth - 1;
         }
         return search_depth;
+    }
+
+    fn trySingularExtension(
+        self: *Self,
+        tt_probe: TtProbeResult,
+        search_depth: u32,
+        ply: u32,
+        is_pv_node: bool,
+        in_check: bool,
+        beta_adj: i32,
+    ) !SingularResult {
+        if (is_pv_node or in_check or ply == 0) {
+            return .{ .extension = 0, .cutoff = null };
+        }
+
+        const tt_move = tt_probe.tt_move orelse return .{ .extension = 0, .cutoff = null };
+        const tt_score = tt_probe.tt_score orelse return .{ .extension = 0, .cutoff = null };
+        const tt_bound = tt_probe.tt_bound orelse return .{ .extension = 0, .cutoff = null };
+        if (tt_bound != .exact and tt_bound != .lower_bound) {
+            return .{ .extension = 0, .cutoff = null };
+        }
+        if (tt_probe.tt_depth < search_depth or search_depth < SINGULAR_MIN_DEPTH or eval.isMateScore(tt_score)) {
+            return .{ .extension = 0, .cutoff = null };
+        }
+
+        const singular_margin = SINGULAR_MARGIN_BASE_CP + SINGULAR_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+        const singular_beta = @max(tt_score - singular_margin, -INF);
+        if (search_depth <= SINGULAR_REDUCTION + 1) {
+            return .{ .extension = 0, .cutoff = null };
+        }
+        const reduced_depth = search_depth - 1 - SINGULAR_REDUCTION;
+
+        const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
+        const counter_move: ?Move = if (self.previous_move) |prev| self.counter_moves.get(prev) else null;
+        const continuation_ctx = self.continuationContext(ply);
+        var move_picker = MovePicker.init(
+            self.board,
+            tt_move,
+            killers,
+            counter_move,
+            &self.history,
+            &self.continuation_history,
+            continuation_ctx.prev,
+            continuation_ctx.prev2,
+            ply,
+        );
+
+        var beaters: u32 = 0;
+        while (move_picker.next()) |move| {
+            if (movesEqual(move, tt_move)) continue;
+
+            const move_color = self.board.board.move;
+            const moving_piece = self.board.board.getPieceAt(move.from(), move_color);
+            const old_previous = self.previous_move;
+            const old_hist_count = self.history_count;
+            const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
+
+            const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.pushAccumulator(move, undo);
+            self.previous_move = move;
+            if (ply < MAX_PLY and moving_piece != null) {
+                self.continuation_keys[ply] = self.moveContinuationKey(move, move_color, moving_piece.?);
+            }
+            if (self.history_count < 512) {
+                self.position_history[self.history_count] = self.board.zobrist_hasher.zobrist_hash;
+                self.history_count += 1;
+            }
+
+            const score = -try self.alphaBeta(-singular_beta, -singular_beta + 1, reduced_depth, ply + 1, true);
+
+            self.popAccumulator();
+            self.board.unmakeMoveUnchecked(move, undo);
+            self.previous_move = old_previous;
+            self.history_count = old_hist_count;
+            if (ply < MAX_PLY) {
+                self.continuation_keys[ply] = old_continuation_key;
+            }
+
+            if (score >= singular_beta) {
+                beaters += 1;
+                if (beaters >= SINGULAR_MULTICUT_MIN_BEATERS and tt_bound == .lower_bound and tt_score >= beta_adj) {
+                    return .{ .extension = 0, .cutoff = beta_adj };
+                }
+            }
+        }
+
+        return .{
+            .extension = if (beaters == 0) 1 else 0,
+            .cutoff = null,
+        };
     }
 
     fn computeStaticEvalContext(
@@ -741,6 +931,11 @@ pub const SearchEngine = struct {
             self.board.board.fullmove_number += 1;
         }
 
+        const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
+        if (ply < MAX_PLY) {
+            self.continuation_keys[ply] = INVALID_CONTINUATION_KEY;
+        }
+
         var reduction: u32 = NULL_MOVE_REDUCTION;
         if (depth > 6) reduction += 1;
         if (static_eval - beta_adj > 200) reduction += 1;
@@ -750,6 +945,9 @@ pub const SearchEngine = struct {
 
         self.board.board = old_board;
         self.board.zobrist_hasher.zobrist_hash = old_hash;
+        if (ply < MAX_PLY) {
+            self.continuation_keys[ply] = old_continuation_key;
+        }
 
         if (null_score < beta_adj) return null;
         if (eval.isMateScore(null_score)) return beta_adj;
@@ -776,6 +974,22 @@ pub const SearchEngine = struct {
     ) void {
         self.killer_moves.add(move, ply);
         self.history.update(move, search_depth, color);
+
+        if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
+            const ctx = self.continuationContext(ply);
+            const best_key = continuationKey(color, piece_type, move.to());
+            self.continuation_history.update(ctx.prev, ctx.prev2, best_key, search_depth);
+
+            for (quiets_tried) |quiet| {
+                if ((quiet.from() != move.from() or quiet.to() != move.to()) and
+                    self.board.board.getPieceAt(quiet.from(), color) != null)
+                {
+                    const quiet_piece = self.board.board.getPieceAt(quiet.from(), color).?;
+                    const quiet_key = continuationKey(color, quiet_piece, quiet.to());
+                    self.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, search_depth);
+                }
+            }
+        }
 
         if (old_previous) |prev| {
             self.counter_moves.update(prev, move);
@@ -807,6 +1021,30 @@ pub const SearchEngine = struct {
         self.tt.store(
             self.board.zobrist_hasher.zobrist_hash,
             @intCast(search_depth),
+            score_to_store,
+            bound,
+            best_move orelse Move.init(0, 0, null),
+        );
+    }
+
+    fn storeQuiescenceResult(
+        self: *Self,
+        best_score: i32,
+        original_alpha: i32,
+        beta: i32,
+        ply: u32,
+        best_move: ?Move,
+    ) void {
+        const bound: TTEntryBound = if (best_score <= original_alpha)
+            .upper_bound
+        else if (best_score >= beta)
+            .lower_bound
+        else
+            .exact;
+        const score_to_store = scoreToTT(best_score, ply);
+        self.tt.store(
+            self.board.zobrist_hasher.zobrist_hash,
+            0,
             score_to_store,
             bound,
             best_move orelse Move.init(0, 0, null),
@@ -865,6 +1103,19 @@ pub const SearchEngine = struct {
 
         search_depth = applyInternalIterativeReduction(tt_move, search_depth);
 
+        const singular = try self.trySingularExtension(
+            tt_probe,
+            search_depth,
+            ply,
+            is_pv_node,
+            in_check,
+            beta_adj,
+        );
+        if (singular.cutoff) |score| {
+            return score;
+        }
+        const singular_extension = singular.extension;
+
         const eval_ctx = self.computeStaticEvalContext(in_check, ply, depth, is_pv_node, alpha, beta_adj);
         const static_eval = eval_ctx.static_eval;
         const improving = eval_ctx.improving;
@@ -885,7 +1136,18 @@ pub const SearchEngine = struct {
         // Use staged move picker for efficient move ordering
         const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
         const counter_move: ?Move = if (self.previous_move) |prev| self.counter_moves.get(prev) else null;
-        var move_picker = MovePicker.init(self.board, tt_move, killers, counter_move, &self.history, ply);
+        const continuation_ctx = self.continuationContext(ply);
+        var move_picker = MovePicker.init(
+            self.board,
+            tt_move,
+            killers,
+            counter_move,
+            &self.history,
+            &self.continuation_history,
+            continuation_ctx.prev,
+            continuation_ctx.prev2,
+            ply,
+        );
 
         var best_move: ?Move = null;
         var best_score: i32 = -INF;
@@ -937,7 +1199,7 @@ pub const SearchEngine = struct {
                     moves_searched > 0 and
                     quiets_seen > quiet_lmp_limit and
                     !self.killer_moves.isKiller(move, ply) and
-                    self.history.getForColor(move, color) <= 0)
+                    self.quietHeuristicScore(move, color, ply) <= 0)
                 {
                     continue;
                 }
@@ -974,6 +1236,10 @@ pub const SearchEngine = struct {
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
             self.previous_move = move;
+            const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
+            if (ply < MAX_PLY and moving_piece != null) {
+                self.continuation_keys[ply] = self.moveContinuationKey(move, move_color, moving_piece.?);
+            }
             self.nodes_searched += 1;
             const gives_check = self.board.isInCheck(self.board.board.move);
 
@@ -987,6 +1253,8 @@ pub const SearchEngine = struct {
                 search_depth >= 2 and
                 root_pawn_endgame)
                 PAWN_ENDGAME_ROOT_EXTENSION
+            else if (singular_extension > 0 and tt_move != null and movesEqual(move, tt_move.?))
+                singular_extension
             else
                 0;
             const next_depth = search_depth - 1 + extension;
@@ -1008,7 +1276,7 @@ pub const SearchEngine = struct {
                 var reduction: i32 = lmr_table[d_idx][m_idx];
 
                 // History modulation: good history reduces less, bad history reduces more
-                const hist_score = self.history.getForColor(move, color);
+                const hist_score = self.quietHeuristicScore(move, color, ply);
                 reduction -= @divTrunc(hist_score, 8192);
 
                 // Killer and counter moves get reduced less
@@ -1061,6 +1329,9 @@ pub const SearchEngine = struct {
             self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
             self.previous_move = old_previous;
+            if (ply < MAX_PLY) {
+                self.continuation_keys[ply] = old_continuation_key;
+            }
             self.history_count = old_hist_count; // Restore history count
 
             // Discourage speculative non-checking minor-piece sacs for pawns unless
@@ -1136,6 +1407,7 @@ pub const SearchEngine = struct {
 
         // 50-move clock bounds how far back a repetition can exist.
         const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
+        if (halfmove < 4) return 0;
         const max_back = @min(halfmove, total - 1);
 
         var matches: u32 = 0;
@@ -1157,6 +1429,7 @@ pub const SearchEngine = struct {
         if (total < 3) return false;
 
         const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
+        if (halfmove < 4) return false;
         const max_back = @min(halfmove, total - 1);
 
         var plies_back: usize = 2;
@@ -1175,7 +1448,22 @@ pub const SearchEngine = struct {
     /// the same position before (whether in game history or search tree), continuing
     /// will just lead to threefold repetition in practice.
     fn isRepetition(self: *Self) bool {
-        return self.repetitionMatchCount() >= 1;
+        const current_hash = self.board.zobrist_hasher.zobrist_hash;
+        const total = self.combinedHistoryCount();
+        if (total < 3) return false;
+
+        const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
+        if (halfmove < 4) return false;
+        const max_back = @min(halfmove, total - 1);
+
+        var plies_back: usize = 2;
+        while (plies_back <= max_back) : (plies_back += 2) {
+            const idx = total - 1 - plies_back;
+            if (self.hashAtCombinedIndex(idx) == current_hash) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Return a contempt-adjusted score for repetition draws.
@@ -1250,6 +1538,28 @@ pub const SearchEngine = struct {
         const in_check = self.board.isInCheck(self.board.board.move);
 
         var alpha = alpha_in;
+        const original_alpha = alpha_in;
+        const is_pv_node = (beta - alpha_in) > 1;
+        var tt_move: ?Move = null;
+
+        if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
+            if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
+                tt_move = entry.best_move;
+            }
+
+            if (!is_pv_node) {
+                const tt_score = scoreFromTT(entry.score, ply);
+                switch (entry.bound) {
+                    .exact => return tt_score,
+                    .lower_bound => {
+                        if (tt_score >= beta) return tt_score;
+                    },
+                    .upper_bound => {
+                        if (tt_score <= alpha) return tt_score;
+                    },
+                }
+            }
+        }
 
         // Stand pat - but only when not in check
         var stand_pat: i32 = -INF;
@@ -1257,6 +1567,7 @@ pub const SearchEngine = struct {
             stand_pat = self.evaluatePosition();
 
             if (stand_pat >= beta) {
+                self.storeQuiescenceResult(stand_pat, original_alpha, beta, ply, tt_move);
                 return beta;
             }
             if (alpha < stand_pat) {
@@ -1283,9 +1594,22 @@ pub const SearchEngine = struct {
 
         // Order captures by MVV-LVA
         self.orderCaptures(&moves);
+        if (tt_move) |tt| {
+            for (moves.sliceMut(), 0..) |move, i| {
+                if (move.from() == tt.from() and move.to() == tt.to() and move.promotion() == tt.promotion()) {
+                    if (i != 0) {
+                        const tmp = moves.moves[0];
+                        moves.moves[0] = moves.moves[i];
+                        moves.moves[i] = tmp;
+                    }
+                    break;
+                }
+            }
+        }
 
         const move_color = self.board.board.move;
         const opponent_color = oppositeColor(move_color);
+        var best_move: ?Move = null;
 
         for (moves.slice()) |move| {
             // Delta pruning - skip captures that can't possibly raise alpha (skip when in check)
@@ -1329,13 +1653,16 @@ pub const SearchEngine = struct {
             self.board.unmakeMoveUnchecked(move, undo);
 
             if (score >= beta) {
+                self.storeQuiescenceResult(score, original_alpha, beta, ply, move);
                 return beta;
             }
             if (score > alpha) {
                 alpha = score;
+                best_move = move;
             }
         }
 
+        self.storeQuiescenceResult(alpha, original_alpha, beta, ply, best_move);
         return alpha;
     }
 

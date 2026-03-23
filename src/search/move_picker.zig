@@ -5,8 +5,10 @@ const MoveList = board.MoveList;
 const piece = @import("../piece.zig");
 const eval = @import("../evaluation.zig");
 const heuristics = @import("heuristics.zig");
+const ContinuationHistoryTable = heuristics.ContinuationHistoryTable;
 const HistoryTable = heuristics.HistoryTable;
 const MAX_KILLER_MOVES = heuristics.MAX_KILLER_MOVES;
+const continuationKey = heuristics.continuationKey;
 
 pub const SEE_CAPTURE_SCALE: i32 = 128;
 
@@ -169,6 +171,9 @@ pub const MovePicker = struct {
     killer_moves: *const [MAX_KILLER_MOVES]Move,
     counter_move: ?Move,
     history: *const HistoryTable,
+    continuation: *const ContinuationHistoryTable,
+    prev_continuation_key: ?u16,
+    prev2_continuation_key: ?u16,
     ply: u32,
 
     captures: MoveList,
@@ -189,6 +194,9 @@ pub const MovePicker = struct {
         killer_moves: *const [MAX_KILLER_MOVES]Move,
         counter_move: ?Move,
         history: *const HistoryTable,
+        continuation: *const ContinuationHistoryTable,
+        prev_continuation_key: ?u16,
+        prev2_continuation_key: ?u16,
         ply: u32,
     ) Self {
         return Self{
@@ -198,6 +206,9 @@ pub const MovePicker = struct {
             .killer_moves = killer_moves,
             .counter_move = counter_move,
             .history = history,
+            .continuation = continuation,
+            .prev_continuation_key = prev_continuation_key,
+            .prev2_continuation_key = prev2_continuation_key,
             .ply = ply,
             .captures = MoveList.init(),
             .quiets = MoveList.init(),
@@ -348,6 +359,13 @@ pub const MovePicker = struct {
             }
 
             if (self.board_ptr.board.getPieceAt(move.from(), self.board_ptr.board.move)) |piece_type| {
+                const current_key = continuationKey(self.board_ptr.board.move, piece_type, move.to());
+                score += self.continuation.get(
+                    self.prev_continuation_key,
+                    self.prev2_continuation_key,
+                    current_key,
+                );
+
                 var mobility_bonus: i32 = 0;
                 const to_sq: u8 = move.to();
                 const from_mask = @as(u64, 1) << @intCast(move.from());

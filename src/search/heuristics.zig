@@ -1,9 +1,12 @@
 const board = @import("../bitboard.zig");
 const Move = board.Move;
 const piece = @import("../piece.zig");
+const std = @import("std");
 
 pub const MAX_PLY = 64;
 pub const MAX_KILLER_MOVES = 2;
+pub const CONTINUATION_KEY_COUNT = 2 * 6 * 64;
+pub const INVALID_CONTINUATION_KEY = std.math.maxInt(u16);
 
 pub const KillerMoves = struct {
     moves: [MAX_PLY][MAX_KILLER_MOVES]Move,
@@ -113,5 +116,89 @@ pub const HistoryTable = struct {
                 }
             }
         }
+    }
+};
+
+pub inline fn continuationKey(color: piece.Color, piece_type: piece.Type, to_sq: u8) u16 {
+    const color_idx: u16 = @intCast(@intFromEnum(color));
+    const piece_idx: u16 = @intCast(@intFromEnum(piece_type));
+    return color_idx * (6 * 64) + piece_idx * 64 + @as(u16, to_sq);
+}
+
+pub const ContinuationHistoryTable = struct {
+    prev_scores: [CONTINUATION_KEY_COUNT][CONTINUATION_KEY_COUNT]i16,
+    prev2_scores: [CONTINUATION_KEY_COUNT][CONTINUATION_KEY_COUNT]i16,
+
+    pub fn init() ContinuationHistoryTable {
+        return ContinuationHistoryTable{
+            .prev_scores = [_][CONTINUATION_KEY_COUNT]i16{[_]i16{0} ** CONTINUATION_KEY_COUNT} ** CONTINUATION_KEY_COUNT,
+            .prev2_scores = [_][CONTINUATION_KEY_COUNT]i16{[_]i16{0} ** CONTINUATION_KEY_COUNT} ** CONTINUATION_KEY_COUNT,
+        };
+    }
+
+    pub fn update(
+        self: *ContinuationHistoryTable,
+        prev_key: ?u16,
+        prev2_key: ?u16,
+        current_key: u16,
+        depth: u32,
+    ) void {
+        const bonus = @as(i32, @intCast(@min(depth * depth, 400)));
+        if (prev_key) |key| {
+            updateCell(&self.prev_scores[key][current_key], bonus);
+        }
+        if (prev2_key) |key| {
+            updateCell(&self.prev2_scores[key][current_key], bonus);
+        }
+    }
+
+    pub fn penalize(
+        self: *ContinuationHistoryTable,
+        prev_key: ?u16,
+        prev2_key: ?u16,
+        current_key: u16,
+        depth: u32,
+    ) void {
+        const penalty = @as(i32, @intCast(@min(depth * depth, 400)));
+        if (prev_key) |key| {
+            penalizeCell(&self.prev_scores[key][current_key], penalty);
+        }
+        if (prev2_key) |key| {
+            penalizeCell(&self.prev2_scores[key][current_key], penalty);
+        }
+    }
+
+    pub fn get(self: *const ContinuationHistoryTable, prev_key: ?u16, prev2_key: ?u16, current_key: u16) i32 {
+        var score: i32 = 0;
+        if (prev_key) |key| {
+            score += self.prev_scores[key][current_key];
+        }
+        if (prev2_key) |key| {
+            score += self.prev2_scores[key][current_key];
+        }
+        return score;
+    }
+
+    pub fn age(self: *ContinuationHistoryTable) void {
+        for (0..CONTINUATION_KEY_COUNT) |prev| {
+            for (0..CONTINUATION_KEY_COUNT) |curr| {
+                self.prev_scores[prev][curr] = @intCast(@divTrunc(self.prev_scores[prev][curr], 2));
+                self.prev2_scores[prev][curr] = @intCast(@divTrunc(self.prev2_scores[prev][curr], 2));
+            }
+        }
+    }
+
+    fn updateCell(cell: *i16, bonus: i32) void {
+        const current = @as(i32, cell.*);
+        const abs_current: i32 = @intCast(@abs(current));
+        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
+        cell.* = @intCast(@max(-16384, @min(16384, current + adjusted_bonus)));
+    }
+
+    fn penalizeCell(cell: *i16, penalty: i32) void {
+        const current = @as(i32, cell.*);
+        const abs_current: i32 = @intCast(@abs(current));
+        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
+        cell.* = @intCast(@max(-16384, @min(16384, current - adjusted_penalty)));
     }
 };
