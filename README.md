@@ -319,7 +319,7 @@ python utils/tuning/tune_loop.py --candidate-label "confirm" --sp-games 120 --sp
 
 ## NNUE
 
-Sykora uses a `768 -> Nx2 -> 1` NNUE architecture with dual-perspective accumulator updates and SCReLU activation, trained via the [Bullet](https://github.com/jw1912/bullet) trainer.
+Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed `SYKNNUE3` nets with dual-perspective accumulator updates and SCReLU activation, trained via the [Bullet](https://github.com/jw1912/bullet) trainer. The current embedded net in `src/net.sknnue` is a `SYKNNUE3` mirrored king-bucketed net with 10 buckets and hidden size 512, equivalent to `7680 -> 512x2 -> 1`.
 
 ### How It Works
 
@@ -329,7 +329,9 @@ Sykora uses a `768 -> Nx2 -> 1` NNUE architecture with dual-perspective accumula
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - To blend NNUE with classical eval, lower `NnueBlend` (e.g., `50` for 50/50, `0` for classical only).
 
-### Network Format (SYKNNUE2)
+### Network Formats (`SYKNNUE2` / `SYKNNUE3`)
+
+Legacy `SYKNNUE2`:
 
 ```
 8 bytes   magic: "SYKNNUE2"
@@ -342,7 +344,23 @@ i16[768 * hidden_size]          input -> accumulator weights
 i16[2 * hidden_size]            output weights (stm half, nstm half)
 ```
 
-All values are little-endian.
+Bucketed `SYKNNUE3`:
+
+```
+8 bytes   magic: "SYKNNUE3"
+u16       version: 3
+u8        feature_set (0=legacy_psqt, 1=king_buckets_mirrored)
+u16       hidden_size
+u8        activation_type (0=ReLU, 1=SCReLU)
+u16       bucket_count
+u8[64]    bucket layout by king square
+i32       output_bias
+i16[hidden_size]                         accumulator biases
+i16[input_size * hidden_size]            input -> accumulator weights
+i16[2 * hidden_size]                     output weights (stm half, nstm half)
+```
+
+For `king_buckets_mirrored`, `input_size = 768 * bucket_count`. The current embedded net uses `bucket_count = 10`, so its effective input size is `7680`. All values are little-endian.
 
 ### Training Pipeline
 
