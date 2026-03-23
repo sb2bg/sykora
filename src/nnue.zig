@@ -293,34 +293,6 @@ pub const AccumulatorPair = struct {
 const SimdWeightVec = @Vector(8, i16);
 const SimdAccVec = @Vector(8, i32);
 const SIMD_LANES = @typeInfo(SimdAccVec).vector.len;
-const OutputAccVec = @Vector(4, i32);
-const OutputWeightVec = @Vector(4, i16);
-const OutputWideVec = @Vector(4, i64);
-const OUTPUT_SIMD_LANES = @typeInfo(OutputAccVec).vector.len;
-
-inline fn clampOutputVector(v: OutputAccVec) OutputAccVec {
-    const zero: OutputAccVec = @splat(0);
-    const qa: OutputAccVec = @splat(QA);
-    return @min(@max(v, zero), qa);
-}
-
-inline fn outputChunkDot(
-    comptime use_screlu: bool,
-    values: []const i32,
-    weights: []const i16,
-    start: usize,
-) i64 {
-    const value_ptr: *align(1) const OutputAccVec = @ptrCast(&values[start]);
-    const weight_ptr: *align(1) const OutputWeightVec = @ptrCast(&weights[start]);
-    const clamped = clampOutputVector(value_ptr.*);
-    const weight_i32: OutputAccVec = @intCast(weight_ptr.*);
-    const activated: OutputWideVec = if (use_screlu) blk: {
-        const widened: OutputWideVec = @intCast(clamped);
-        break :blk widened * widened;
-    } else @intCast(clamped);
-    const weight_i64: OutputWideVec = @intCast(weight_i32);
-    return @reduce(.Add, activated * weight_i64);
-}
 
 inline fn perspectiveMirrored(king_sq: u8) bool {
     return (king_sq % 8) > 3;
@@ -518,36 +490,22 @@ pub fn evaluateFromAccumulators(
 ) i32 {
     const hidden_size: usize = @intCast(net.hidden_size);
     const use_screlu = net.activation_type == 1;
-    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
-    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
-    const us_weights = net.output_weights[0..hidden_size];
-    const them_weights = net.output_weights[hidden_size .. hidden_size + hidden_size];
 
     var sum: i64 = 0;
-    var h: usize = 0;
 
-    if (use_screlu) {
-        while (h + OUTPUT_SIMD_LANES <= hidden_size) : (h += OUTPUT_SIMD_LANES) {
-            sum += outputChunkDot(true, us_acc, us_weights, h);
-            sum += outputChunkDot(true, them_acc, them_weights, h);
-        }
-    } else {
-        while (h + OUTPUT_SIMD_LANES <= hidden_size) : (h += OUTPUT_SIMD_LANES) {
-            sum += outputChunkDot(false, us_acc, us_weights, h);
-            sum += outputChunkDot(false, them_acc, them_weights, h);
-        }
-    }
+    for (0..hidden_size) |h| {
+        const us_raw = if (stm_is_white) acc.white[h] else acc.black[h];
+        const them_raw = if (stm_is_white) acc.black[h] else acc.white[h];
 
-    while (h < hidden_size) : (h += 1) {
-        const us = clampToQa(us_acc[h]);
-        const them = clampToQa(them_acc[h]);
+        const us = clampToQa(us_raw);
+        const them = clampToQa(them_raw);
 
         if (use_screlu) {
-            sum += @as(i64, us) * @as(i64, us) * @as(i64, us_weights[h]);
-            sum += @as(i64, them) * @as(i64, them) * @as(i64, them_weights[h]);
+            sum += @as(i64, us) * @as(i64, us) * @as(i64, net.output_weights[h]);
+            sum += @as(i64, them) * @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
         } else {
-            sum += @as(i64, us) * @as(i64, us_weights[h]);
-            sum += @as(i64, them) * @as(i64, them_weights[h]);
+            sum += @as(i64, us) * @as(i64, net.output_weights[h]);
+            sum += @as(i64, them) * @as(i64, net.output_weights[hidden_size + h]);
         }
     }
 
