@@ -361,7 +361,7 @@ python utils/nnue/bullet/gate_checkpoints.py \
 
 This gate now evaluates recent checkpoints by selfplay only. STS is intentionally not part of the checkpoint promotion path.
 
-Full process spec: `specs/nnue_training_spec.md`.
+SYKNNUE4 design spec: `specs/syknnue4_spec.md`.
 
 ## Documentation
 
