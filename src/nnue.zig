@@ -346,6 +346,68 @@ inline fn applyFeatureSlice(comptime add: bool, dest: []i32, weights: []const i1
     }
 }
 
+inline fn applyFeatureSlicesAddSub(dest: []i32, add_weights: []const i16, sub_weights: []const i16) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
+        const sub_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = dest_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_ptr.*));
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] += add_weights[h];
+        dest[h] -= sub_weights[h];
+    }
+}
+
+inline fn applyFeatureSlicesAddSubSub(
+    dest: []i32,
+    add_weights: []const i16,
+    sub_a_weights: []const i16,
+    sub_b_weights: []const i16,
+) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
+        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
+        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = dest_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] += add_weights[h];
+        dest[h] -= sub_a_weights[h];
+        dest[h] -= sub_b_weights[h];
+    }
+}
+
+inline fn applyFeatureSlicesAddAddSubSub(
+    dest: []i32,
+    add_a_weights: []const i16,
+    add_b_weights: []const i16,
+    sub_a_weights: []const i16,
+    sub_b_weights: []const i16,
+) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const add_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_a_weights[h]);
+        const add_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_b_weights[h]);
+        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
+        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = dest_ptr.* + @as(SimdAccVec, @intCast(add_a_ptr.*)) + @as(SimdAccVec, @intCast(add_b_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] += add_a_weights[h];
+        dest[h] += add_b_weights[h];
+        dest[h] -= sub_a_weights[h];
+        dest[h] -= sub_b_weights[h];
+    }
+}
+
 fn initPerspectiveAccumulator(
     net: *const Network,
     b: *Board,
@@ -417,6 +479,100 @@ inline fn applyDelta(
     }
 }
 
+inline fn perspectiveAccumulatorSlice(
+    acc: *AccumulatorPair,
+    perspective: piece.Color,
+    hidden_size: usize,
+) []i32 {
+    return switch (perspective) {
+        .white => acc.white[0..hidden_size],
+        .black => acc.black[0..hidden_size],
+    };
+}
+
+inline fn perspectiveFeatureWeights(
+    net: *const Network,
+    perspective: piece.Color,
+    king_sq: u8,
+    sq: u8,
+    pt: piece.Type,
+    color: piece.Color,
+    hidden_size: usize,
+) []const i16 {
+    const feature = featureIndex(net, perspective, sq, pt, color, king_sq);
+    const base = feature * hidden_size;
+    return net.input_weights[base .. base + hidden_size];
+}
+
+inline fn applyPerspectiveAddSub(
+    net: *const Network,
+    acc: *AccumulatorPair,
+    perspective: piece.Color,
+    king_sq: u8,
+    add_sq: u8,
+    add_pt: piece.Type,
+    add_color: piece.Color,
+    sub_sq: u8,
+    sub_pt: piece.Type,
+    sub_color: piece.Color,
+    hidden_size: usize,
+) void {
+    const dest = perspectiveAccumulatorSlice(acc, perspective, hidden_size);
+    const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
+    const sub_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_sq, sub_pt, sub_color, hidden_size);
+    applyFeatureSlicesAddSub(dest, add_weights, sub_weights);
+}
+
+inline fn applyPerspectiveAddSubSub(
+    net: *const Network,
+    acc: *AccumulatorPair,
+    perspective: piece.Color,
+    king_sq: u8,
+    add_sq: u8,
+    add_pt: piece.Type,
+    add_color: piece.Color,
+    sub_a_sq: u8,
+    sub_a_pt: piece.Type,
+    sub_a_color: piece.Color,
+    sub_b_sq: u8,
+    sub_b_pt: piece.Type,
+    sub_b_color: piece.Color,
+    hidden_size: usize,
+) void {
+    const dest = perspectiveAccumulatorSlice(acc, perspective, hidden_size);
+    const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
+    const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
+    const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
+    applyFeatureSlicesAddSubSub(dest, add_weights, sub_a_weights, sub_b_weights);
+}
+
+inline fn applyPerspectiveAddAddSubSub(
+    net: *const Network,
+    acc: *AccumulatorPair,
+    perspective: piece.Color,
+    king_sq: u8,
+    add_a_sq: u8,
+    add_a_pt: piece.Type,
+    add_a_color: piece.Color,
+    add_b_sq: u8,
+    add_b_pt: piece.Type,
+    add_b_color: piece.Color,
+    sub_a_sq: u8,
+    sub_a_pt: piece.Type,
+    sub_a_color: piece.Color,
+    sub_b_sq: u8,
+    sub_b_pt: piece.Type,
+    sub_b_color: piece.Color,
+    hidden_size: usize,
+) void {
+    const dest = perspectiveAccumulatorSlice(acc, perspective, hidden_size);
+    const add_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_a_sq, add_a_pt, add_a_color, hidden_size);
+    const add_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_b_sq, add_b_pt, add_b_color, hidden_size);
+    const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
+    const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
+    applyFeatureSlicesAddAddSubSub(dest, add_a_weights, add_b_weights, sub_a_weights, sub_b_weights);
+}
+
 /// Incremental accumulator update after a move.
 /// Copies `prev` into `result`, then applies feature deltas.
 pub fn updateAccumulators(
@@ -439,45 +595,160 @@ pub fn updateAccumulators(
     const state = b.board;
     const white_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.white) & state.getKindBitboard(.king)));
     const black_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.black) & state.getKindBitboard(.king)));
-
-    // Copy previous accumulator
-    @memcpy(result.white[0..hidden_size], prev.white[0..hidden_size]);
-    @memcpy(result.black[0..hidden_size], prev.black[0..hidden_size]);
-
-    // Remove piece from origin
-    applyDelta(net, result, from_sq, moved_piece, moved_color, white_king_sq, black_king_sq, false);
-
-    // Add piece at destination (or promoted piece)
+    const refresh_white = net.feature_set == .king_buckets_mirrored and
+        moved_piece == .king and
+        moved_color == .white and
+        perspectiveLayoutChanged(net, .white, from_sq, to_sq);
+    const refresh_black = net.feature_set == .king_buckets_mirrored and
+        moved_piece == .king and
+        moved_color == .black and
+        perspectiveLayoutChanged(net, .black, from_sq, to_sq);
     const final_piece = promotion orelse moved_piece;
-    applyDelta(net, result, to_sq, final_piece, moved_color, white_king_sq, black_king_sq, true);
+    const opp_color = oppositeColor(moved_color);
 
-    // Remove captured piece if any
-    if (captured_piece) |cp| {
-        const opp = oppositeColor(moved_color);
-        applyDelta(net, result, capture_sq.?, cp, opp, white_king_sq, black_king_sq, false);
+    if (!refresh_white) {
+        @memcpy(result.white[0..hidden_size], prev.white[0..hidden_size]);
+    }
+    if (!refresh_black) {
+        @memcpy(result.black[0..hidden_size], prev.black[0..hidden_size]);
     }
 
-    // Castling: move the rook too
-    if (is_castling) {
-        if (rook_from) |rf| {
-            applyDelta(net, result, rf, .rook, moved_color, white_king_sq, black_king_sq, false);
-            applyDelta(net, result, rook_to.?, .rook, moved_color, white_king_sq, black_king_sq, true);
+    const applyPerspective = struct {
+        inline fn run(
+            net_: *const Network,
+            result_: *AccumulatorPair,
+            perspective: piece.Color,
+            king_sq: u8,
+            hidden_size_: usize,
+            from_sq_: u8,
+            to_sq_: u8,
+            moved_piece_: piece.Type,
+            moved_color_: piece.Color,
+            final_piece_: piece.Type,
+            captured_piece_: ?piece.Type,
+            capture_sq_: ?u8,
+            opp_color_: piece.Color,
+            is_castling_: bool,
+            rook_from_: ?u8,
+            rook_to_: ?u8,
+        ) void {
+            if (is_castling_) {
+                if (rook_from_) |rf| {
+                    applyPerspectiveAddAddSubSub(
+                        net_,
+                        result_,
+                        perspective,
+                        king_sq,
+                        to_sq_,
+                        final_piece_,
+                        moved_color_,
+                        rook_to_.?,
+                        .rook,
+                        moved_color_,
+                        from_sq_,
+                        moved_piece_,
+                        moved_color_,
+                        rf,
+                        .rook,
+                        moved_color_,
+                        hidden_size_,
+                    );
+                } else {
+                    applyPerspectiveAddSub(
+                        net_,
+                        result_,
+                        perspective,
+                        king_sq,
+                        to_sq_,
+                        final_piece_,
+                        moved_color_,
+                        from_sq_,
+                        moved_piece_,
+                        moved_color_,
+                        hidden_size_,
+                    );
+                }
+            } else if (captured_piece_) |cp| {
+                applyPerspectiveAddSubSub(
+                    net_,
+                    result_,
+                    perspective,
+                    king_sq,
+                    to_sq_,
+                    final_piece_,
+                    moved_color_,
+                    from_sq_,
+                    moved_piece_,
+                    moved_color_,
+                    capture_sq_.?,
+                    cp,
+                    opp_color_,
+                    hidden_size_,
+                );
+            } else {
+                applyPerspectiveAddSub(
+                    net_,
+                    result_,
+                    perspective,
+                    king_sq,
+                    to_sq_,
+                    final_piece_,
+                    moved_color_,
+                    from_sq_,
+                    moved_piece_,
+                    moved_color_,
+                    hidden_size_,
+                );
+            }
         }
+    }.run;
+
+    if (!refresh_white) {
+        applyPerspective(
+            net,
+            result,
+            .white,
+            white_king_sq,
+            hidden_size,
+            from_sq,
+            to_sq,
+            moved_piece,
+            moved_color,
+            final_piece,
+            captured_piece,
+            capture_sq,
+            opp_color,
+            is_castling,
+            rook_from,
+            rook_to,
+        );
+    }
+    if (!refresh_black) {
+        applyPerspective(
+            net,
+            result,
+            .black,
+            black_king_sq,
+            hidden_size,
+            from_sq,
+            to_sq,
+            moved_piece,
+            moved_color,
+            final_piece,
+            captured_piece,
+            capture_sq,
+            opp_color,
+            is_castling,
+            rook_from,
+            rook_to,
+        );
     }
 
-    if (net.feature_set == .king_buckets_mirrored and moved_piece == .king) {
-        switch (moved_color) {
-            .white => {
-                if (perspectiveLayoutChanged(net, .white, from_sq, to_sq)) {
-                    initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
-                }
-            },
-            .black => {
-                if (perspectiveLayoutChanged(net, .black, from_sq, to_sq)) {
-                    initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
-                }
-            },
-        }
+    if (refresh_white) {
+        initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
+    }
+    if (refresh_black) {
+        initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
     }
 }
 
