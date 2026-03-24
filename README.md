@@ -270,7 +270,7 @@ For `king_buckets_mirrored`, `input_size = 768 * bucket_count`. The current embe
 
 ### Training Pipeline
 
-Training uses the [Bullet](https://github.com/jw1912/bullet) NNUE trainer with CUDA. Two data formats are supported:
+Training uses the [Bullet](https://github.com/jw1912/bullet) NNUE trainer with CUDA. Two data formats are supported. `SYKNNUE3` remains the default training format; `SYKNNUE4` training/export support is now available behind `--network-format syk4`.
 
 **Using binpack data:**
 
@@ -280,6 +280,7 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --data-format binpack \
   --bullet-repo nnue/bullet_repo \
   --output-root nnue/models/bullet \
+  --network-format syk3 \
   --hidden 256 --end-superbatch 320 --threads 8
 ```
 
@@ -290,6 +291,7 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --dataset nnue/data/bullet/train/train_main.data \
   --bullet-repo nnue/bullet_repo \
   --output-root nnue/models/bullet \
+  --network-format syk3 \
   --hidden 256 --end-superbatch 320 --threads 8
 ```
 
@@ -311,6 +313,19 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --resume nnue/models/bullet/<run_id>/checkpoints/<checkpoint>/raw.bin \
   --start-superbatch 161 --end-superbatch 320 \
   ...
+```
+
+**Training a SYKNNUE4 baseline:**
+
+```bash
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset data/training.binpack \
+  --data-format binpack \
+  --network-format syk4 \
+  --bucket-layout sykora16 \
+  --hidden 1536 \
+  --dense-l1 16 --dense-l2 32 \
+  --end-superbatch 320 --threads 8
 ```
 
 ### Self-Play Data Generation
@@ -337,6 +352,20 @@ python utils/nnue/bullet/export_npz_to_sknnue.py \
   checkpoint.npz output.sknnue --activation screlu
 ```
 
+Export a `SYKNNUE4` checkpoint:
+
+```bash
+python utils/nnue/bullet/checkpoint_raw_to_npz.py \
+  --input nnue/models/bullet/<run_id>/checkpoints/<checkpoint> \
+  --output checkpoint_syk4.npz
+
+python utils/nnue/bullet/export_npz_to_syk4.py \
+  --input checkpoint_syk4.npz \
+  --output-net output.sknnue
+```
+
+`SYKNNUE4` engine-side loading/eval is still separate work. The new tooling here covers training metadata, checkpoint export, and file generation only.
+
 ### Embedding a New Net
 
 To update the embedded net in the binary:
@@ -362,10 +391,6 @@ python utils/nnue/bullet/gate_checkpoints.py \
 This gate now evaluates recent checkpoints by selfplay only. STS is intentionally not part of the checkpoint promotion path.
 
 SYKNNUE4 design spec: `specs/syknnue4_spec.md`.
-
-## Documentation
-
-- `engine-interface.md` - Detailed documentation of the engine interface
 
 ## Contributing
 
