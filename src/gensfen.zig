@@ -22,7 +22,7 @@ pub const Options = struct {
     report_interval: u32 = 100,
 };
 
-/// BulletFormat binary record — 32 bytes, matches DirectSequentialDataLoader.
+/// BulletFormat binary record: 32 bytes, matches DirectSequentialDataLoader.
 ///
 /// Offset  Field     Type      Bytes
 /// ------  --------  --------  -----
@@ -224,16 +224,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
             // Search
             stop_flag.store(false, .seq_cst);
             var search_board = b;
-            var engine = SearchEngine.init(
-                &search_board,
-                allocator,
-                &stop_flag,
-                &tt,
-                false, // no NNUE — HCE only
-                null,
-                0,
-                100,
-            );
+            var engine = SearchEngine.init(&search_board, allocator, &stop_flag, &tt, true, null, 100, 100);
             engine.uci_output = null;
             if (hash_count > 0) {
                 engine.setGameHistory(game_hashes[0..hash_count]);
