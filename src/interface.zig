@@ -47,6 +47,7 @@ pub const Uci = struct {
     hash_size_mb: usize,
     helper_threads: [smp.MAX_HELPERS]?std.Thread,
     helper_results: [smp.MAX_HELPERS]smp.HelperResult,
+    uci_chess960: bool,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -78,6 +79,7 @@ pub const Uci = struct {
             .hash_size_mb = default_hash_mb,
             .helper_threads = [_]?std.Thread{null} ** smp.MAX_HELPERS,
             .helper_results = [_]smp.HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** smp.MAX_HELPERS,
+            .uci_chess960 = false,
         };
 
         uci_ptr.resetPositionHistory();
@@ -312,7 +314,7 @@ pub const Uci = struct {
                         const start_time = std.time.Instant.now() catch return UciError.IOError;
                         var stdout_buf: [1024]u8 = undefined;
                         var stdout_writer = self.stdout.writer(&stdout_buf);
-                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), &stdout_writer.interface);
+                        const total_nodes = try self.board.perftDivide(@intCast(perft_opts.depth), &stdout_writer.interface, self.uci_chess960);
                         stdout_writer.interface.flush() catch return UciError.IOError;
                         const total_time = smp.elapsedMs(start_time);
                         const total_nps = if (total_time > 0) (total_nodes * 1000) / @as(u64, @intCast(total_time)) else total_nodes * 1000;

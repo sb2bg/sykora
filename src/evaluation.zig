@@ -484,7 +484,7 @@ fn evaluateKingSafety(b: BitBoard, color: piece.Color, is_endgame_phase: bool) i
     else
         (king_sq == 62 or king_sq == 58);
 
-    const home_sq: u8 = if (color == .white) 4 else 60;
+    const home_sq = b.getKingHomeSquare(color);
     const king_has_moved = king_sq != home_sq;
 
     if (is_castled) {

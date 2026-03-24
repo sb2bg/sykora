@@ -64,6 +64,13 @@ pub fn registerOptions(uci: *Uci) !void {
         .on_changed = handleHashChange,
         .context = uci,
     });
+    try uci.options.items.append(uci.allocator, Option{
+        .name = "UCI_Chess960",
+        .type = .check,
+        .default_value = "false",
+        .on_changed = handleUciChess960Change,
+        .context = uci,
+    });
 }
 
 pub fn handleLogFileChange(self: *Uci, value: []const u8) UciError!void {
@@ -162,4 +169,16 @@ pub fn handleHashChange(self: *Uci, value: []const u8) UciError!void {
     }
     self.hash_size_mb = parsed;
     self.tt.resize(parsed) catch return UciError.OutOfMemory;
+}
+
+pub fn handleUciChess960Change(self: *Uci, value: []const u8) UciError!void {
+    if (std.mem.eql(u8, value, "true")) {
+        self.uci_chess960 = true;
+        return;
+    }
+    if (std.mem.eql(u8, value, "false")) {
+        self.uci_chess960 = false;
+        return;
+    }
+    return UciError.InvalidArgument;
 }

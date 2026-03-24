@@ -20,19 +20,9 @@ pub fn applyMoveUnchecked(self: anytype, move: anytype) void {
     }
 
     if (piece_type == .king) {
-        const from_file = from_sq % 8;
-        const to_file = to_sq % 8;
-
-        if (from_file == 4 and to_file == 6) {
-            const rook_from = from_sq + 3;
-            const rook_to = from_sq + 1;
-            self.board.clearSquare(rook_from);
-            self.board.setPieceAt(rook_to, color, .rook);
-        } else if (from_file == 4 and to_file == 2) {
-            const rook_from = from_sq - 4;
-            const rook_to = from_sq - 1;
-            self.board.clearSquare(rook_from);
-            self.board.setPieceAt(rook_to, color, .rook);
+        if (self.getCastlingInfo(color, from_sq, to_sq, false)) |castle| {
+            self.board.clearSquare(castle.rook_from);
+            self.board.setPieceAt(castle.rook_to, color, .rook);
         }
     }
 
@@ -50,31 +40,24 @@ pub fn applyMoveUnchecked(self: anytype, move: anytype) void {
     }
 
     if (piece_type == .king) {
-        if (color == .white) {
-            self.board.castle_rights.white_kingside = false;
-            self.board.castle_rights.white_queenside = false;
-        } else {
-            self.board.castle_rights.black_kingside = false;
-            self.board.castle_rights.black_queenside = false;
-        }
+        self.board.setKingsideCastleRight(color, false, null);
+        self.board.setQueensideCastleRight(color, false, null);
     } else if (piece_type == .rook) {
-        if (color == .white) {
-            if (from_sq == 0) self.board.castle_rights.white_queenside = false;
-            if (from_sq == 7) self.board.castle_rights.white_kingside = false;
-        } else {
-            if (from_sq == 56) self.board.castle_rights.black_queenside = false;
-            if (from_sq == 63) self.board.castle_rights.black_kingside = false;
+        if (self.board.getQueensideCastleRookSquare(color)) |rook_sq| {
+            if (from_sq == rook_sq) self.board.setQueensideCastleRight(color, false, null);
+        }
+        if (self.board.getKingsideCastleRookSquare(color)) |rook_sq| {
+            if (from_sq == rook_sq) self.board.setKingsideCastleRight(color, false, null);
         }
     }
 
     if (captured_piece) |captured| {
         if (captured == .rook) {
-            if (opponent_color == .white) {
-                if (to_sq == 0) self.board.castle_rights.white_queenside = false;
-                if (to_sq == 7) self.board.castle_rights.white_kingside = false;
-            } else {
-                if (to_sq == 56) self.board.castle_rights.black_queenside = false;
-                if (to_sq == 63) self.board.castle_rights.black_kingside = false;
+            if (self.board.getQueensideCastleRookSquare(opponent_color)) |rook_sq| {
+                if (to_sq == rook_sq) self.board.setQueensideCastleRight(opponent_color, false, null);
+            }
+            if (self.board.getKingsideCastleRookSquare(opponent_color)) |rook_sq| {
+                if (to_sq == rook_sq) self.board.setKingsideCastleRight(opponent_color, false, null);
             }
         }
     }
@@ -107,18 +90,9 @@ pub fn applyMoveUncheckedForLegality(self: anytype, move: anytype) void {
     }
 
     if (piece_type == .king) {
-        const from_file = from_sq % 8;
-        const to_file = to_sq % 8;
-        if (from_file == 4 and to_file == 6) {
-            const rook_from = from_sq + 3;
-            const rook_to = from_sq + 1;
-            self.board.clearSquare(rook_from);
-            self.board.setPieceAt(rook_to, color, .rook);
-        } else if (from_file == 4 and to_file == 2) {
-            const rook_from = from_sq - 4;
-            const rook_to = from_sq - 1;
-            self.board.clearSquare(rook_from);
-            self.board.setPieceAt(rook_to, color, .rook);
+        if (self.getCastlingInfo(color, from_sq, to_sq, false)) |castle| {
+            self.board.clearSquare(castle.rook_from);
+            self.board.setPieceAt(castle.rook_to, color, .rook);
         }
     }
 

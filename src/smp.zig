@@ -84,6 +84,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
         net_ptr,
         self.nnue_blend,
         self.nnue_scale,
+        self.uci_chess960,
     );
 
     search_engine.uci_output = self.stdout;
@@ -124,7 +125,9 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
     }
 
     try self.writeInfoString("search thread stopped, total nodes {d}", .{total_nodes});
-    try self.writeStdout("bestmove {f}", .{self.best_move});
+    var move_buf: [5]u8 = undefined;
+    const move_str = self.board.formatMoveUci(self.best_move, self.uci_chess960, &move_buf);
+    try self.writeStdout("bestmove {s}", .{move_str});
 }
 
 fn helperSearch(
@@ -145,6 +148,7 @@ fn helperSearch(
         net_ptr,
         self.nnue_blend,
         self.nnue_scale,
+        self.uci_chess960,
     );
 
     search_engine.uci_output = null;

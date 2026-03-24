@@ -13,6 +13,34 @@ const movegen = @import("board/movegen.zig");
 
 pub const MAX_MOVES = 256;
 
+inline fn backRank(color: pieceInfo.Color) u8 {
+    return if (color == .white) 0 else 7;
+}
+
+inline fn kingsideCastleKingTarget(color: pieceInfo.Color) u8 {
+    return backRank(color) * 8 + 6;
+}
+
+inline fn queensideCastleKingTarget(color: pieceInfo.Color) u8 {
+    return backRank(color) * 8 + 2;
+}
+
+inline fn kingsideCastleRookTarget(color: pieceInfo.Color) u8 {
+    return backRank(color) * 8 + 5;
+}
+
+inline fn queensideCastleRookTarget(color: pieceInfo.Color) u8 {
+    return backRank(color) * 8 + 3;
+}
+
+inline fn standardKingsideRookSquare(color: pieceInfo.Color) u8 {
+    return backRank(color) * 8 + 7;
+}
+
+inline fn standardQueensideRookSquare(color: pieceInfo.Color) u8 {
+    return backRank(color) * 8;
+}
+
 pub const MoveList = struct {
     moves: [MAX_MOVES]Move = undefined,
     count: usize = 0,
@@ -142,6 +170,13 @@ pub const Board = struct {
     board: BitBoard,
     zobrist_hasher: ZobristHasher = ZobristHasher.init(),
 
+    pub const CastlingInfo = struct {
+        king_from: u8,
+        king_to: u8,
+        rook_from: u8,
+        rook_to: u8,
+    };
+
     pub const Undo = struct {
         prev_hash: u64,
         prev_castle_rights: CastleRights,
@@ -172,6 +207,97 @@ pub const Board = struct {
         var self = Self{ .board = board };
         self.zobrist_hasher.hash(self.board);
         return self;
+    }
+
+    fn getKingsideCastlingInfo(self: Self, color: pieceInfo.Color, from_sq: u8, to_sq: u8, allow_rook_square: bool) ?CastlingInfo {
+        if (!self.board.hasKingsideCastleRight(color)) return null;
+        const king_sq = self.board.getKingSquare(color) orelse return null;
+        if (from_sq != king_sq) return null;
+        if (self.board.getPieceAt(from_sq, color) != .king) return null;
+
+        const rook_from = self.board.getKingsideCastleRookSquare(color) orelse return null;
+        const king_to = kingsideCastleKingTarget(color);
+        if (to_sq != king_to and (!allow_rook_square or to_sq != rook_from)) return null;
+
+        return .{
+            .king_from = king_sq,
+            .king_to = king_to,
+            .rook_from = rook_from,
+            .rook_to = kingsideCastleRookTarget(color),
+        };
+    }
+
+    fn getQueensideCastlingInfo(self: Self, color: pieceInfo.Color, from_sq: u8, to_sq: u8, allow_rook_square: bool) ?CastlingInfo {
+        if (!self.board.hasQueensideCastleRight(color)) return null;
+        const king_sq = self.board.getKingSquare(color) orelse return null;
+        if (from_sq != king_sq) return null;
+        if (self.board.getPieceAt(from_sq, color) != .king) return null;
+
+        const rook_from = self.board.getQueensideCastleRookSquare(color) orelse return null;
+        const king_to = queensideCastleKingTarget(color);
+        if (to_sq != king_to and (!allow_rook_square or to_sq != rook_from)) return null;
+
+        return .{
+            .king_from = king_sq,
+            .king_to = king_to,
+            .rook_from = rook_from,
+            .rook_to = queensideCastleRookTarget(color),
+        };
+    }
+
+    pub fn getCastlingInfo(self: Self, color: pieceInfo.Color, from_sq: u8, to_sq: u8, allow_rook_square: bool) ?CastlingInfo {
+        return self.getKingsideCastlingInfo(color, from_sq, to_sq, allow_rook_square) orelse
+            self.getQueensideCastlingInfo(color, from_sq, to_sq, allow_rook_square);
+    }
+
+    pub fn isCastlingMove(self: Self, move: Move) bool {
+        return self.getCastlingInfo(self.board.move, move.from(), move.to(), false) != null;
+    }
+
+    fn moveMatchesUciInput(self: Self, legal_move: Move, raw_move: Move) bool {
+        if (legal_move.from() == raw_move.from() and
+            legal_move.to() == raw_move.to() and
+            Move.eqlPromotion(legal_move.promotion(), raw_move.promotion()))
+        {
+            return true;
+        }
+
+        if (self.getCastlingInfo(self.board.move, legal_move.from(), legal_move.to(), false)) |info| {
+            return legal_move.from() == raw_move.from() and
+                info.rook_from == raw_move.to() and
+                Move.eqlPromotion(legal_move.promotion(), raw_move.promotion());
+        }
+
+        return false;
+    }
+
+    pub fn formatMoveUci(self: Self, move: Move, chess960: bool, buffer: *[5]u8) []const u8 {
+        var encoded = move;
+        if (chess960) {
+            if (self.getCastlingInfo(self.board.move, move.from(), move.to(), false)) |info| {
+                encoded = Move.init(move.from(), info.rook_from, move.promotion());
+            }
+        }
+
+        if (encoded.from() == 0 and encoded.to() == 0 and encoded.promotion() == null) {
+            buffer[0] = '0';
+            buffer[1] = '0';
+            buffer[2] = '0';
+            buffer[3] = '0';
+            return buffer[0..4];
+        }
+
+        buffer[0] = 'a' + (encoded.from() % 8);
+        buffer[1] = '1' + (encoded.from() / 8);
+        buffer[2] = 'a' + (encoded.to() % 8);
+        buffer[3] = '1' + (encoded.to() / 8);
+
+        if (encoded.promotion()) |p| {
+            buffer[4] = std.ascii.toLower(p.getName());
+            return buffer[0..5];
+        }
+
+        return buffer[0..4];
     }
 
     pub inline fn epFileForHash(b: BitBoard) ?u8 {
@@ -263,14 +389,9 @@ pub const Board = struct {
         var castle_rook_from: ?u8 = null;
         var castle_rook_to: ?u8 = null;
         if (moved_piece == .king) {
-            const from_file = from_sq % 8;
-            const to_file = to_sq % 8;
-            if (from_file == 4 and to_file == 6) {
-                castle_rook_from = from_sq + 3;
-                castle_rook_to = from_sq + 1;
-            } else if (from_file == 4 and to_file == 2) {
-                castle_rook_from = from_sq - 4;
-                castle_rook_to = from_sq - 1;
+            if (self.getCastlingInfo(color, from_sq, to_sq, false)) |castle| {
+                castle_rook_from = castle.rook_from;
+                castle_rook_to = castle.rook_to;
             }
         }
 
@@ -385,11 +506,8 @@ pub const Board = struct {
         try self.generateLegalMoves(&legal_moves);
 
         for (legal_moves.slice()) |legal_move| {
-            if (legal_move.from() == move.from() and
-                legal_move.to() == move.to() and
-                Move.eqlPromotion(legal_move.promotion(), move.promotion()))
-            {
-                return self.makeMove(move);
+            if (self.moveMatchesUciInput(legal_move, move)) {
+                return self.makeMove(legal_move);
             }
         }
 
@@ -521,12 +639,8 @@ pub const Board = struct {
                 }
 
                 // Check if it's a castle
-                if (piece_type == .king) {
-                    const from_file = move.from() % 8;
-                    const to_file = move.to() % 8;
-                    if (from_file == 4 and (to_file == 6 or to_file == 2)) {
-                        stats.castles += 1;
-                    }
+                if (self.isCastlingMove(move)) {
+                    stats.castles += 1;
                 }
 
                 // Check if it's a promotion
@@ -600,13 +714,16 @@ pub const Board = struct {
     }
 
     /// Perft divide - Shows the number of nodes for each root move
-    pub fn perftDivide(self: *Self, depth: u32, writer: anytype) UciError!u64 {
+    pub fn perftDivide(self: *Self, depth: u32, writer: anytype, chess960: bool) UciError!u64 {
         var moves = MoveList.init();
         try self.generateLegalMoves(&moves);
 
         var total_nodes: u64 = 0;
 
         for (moves.slice()) |move| {
+            var move_buf: [5]u8 = undefined;
+            const move_str = self.formatMoveUci(move, chess960, &move_buf);
+
             // Save state
             const old_board = self.board;
 
@@ -618,7 +735,7 @@ pub const Board = struct {
             total_nodes += nodes;
 
             // Print result
-            writer.print("{f}: {d}\n", .{ move, nodes }) catch return UciError.IOError;
+            writer.print("{s}: {d}\n", .{ move_str, nodes }) catch return UciError.IOError;
 
             // Restore state
             self.board = old_board;
@@ -763,19 +880,23 @@ pub const Board = struct {
         try buffer.append(allocator, ' ');
         var any_castle = false;
         if (self.board.castle_rights.white_kingside) {
-            try buffer.append(allocator, 'K');
+            const rook_sq = self.board.castle_rights.white_kingside_rook_square;
+            try buffer.append(allocator, if (rook_sq == standardKingsideRookSquare(.white)) 'K' else 'A' + (rook_sq % 8));
             any_castle = true;
         }
         if (self.board.castle_rights.white_queenside) {
-            try buffer.append(allocator, 'Q');
+            const rook_sq = self.board.castle_rights.white_queenside_rook_square;
+            try buffer.append(allocator, if (rook_sq == standardQueensideRookSquare(.white)) 'Q' else 'A' + (rook_sq % 8));
             any_castle = true;
         }
         if (self.board.castle_rights.black_kingside) {
-            try buffer.append(allocator, 'k');
+            const rook_sq = self.board.castle_rights.black_kingside_rook_square;
+            try buffer.append(allocator, if (rook_sq == standardKingsideRookSquare(.black)) 'k' else 'a' + (rook_sq % 8));
             any_castle = true;
         }
         if (self.board.castle_rights.black_queenside) {
-            try buffer.append(allocator, 'q');
+            const rook_sq = self.board.castle_rights.black_queenside_rook_square;
+            try buffer.append(allocator, if (rook_sq == standardQueensideRookSquare(.black)) 'q' else 'a' + (rook_sq % 8));
             any_castle = true;
         }
         if (!any_castle) try buffer.append(allocator, '-');
@@ -829,6 +950,10 @@ pub const CastleRights = struct {
     white_queenside: bool = false,
     black_kingside: bool = false,
     black_queenside: bool = false,
+    white_kingside_rook_square: u8 = standardKingsideRookSquare(.white),
+    white_queenside_rook_square: u8 = standardQueensideRookSquare(.white),
+    black_kingside_rook_square: u8 = standardKingsideRookSquare(.black),
+    black_queenside_rook_square: u8 = standardQueensideRookSquare(.black),
 };
 
 pub const BitBoard = struct {
@@ -840,6 +965,8 @@ pub const BitBoard = struct {
     move: pieceInfo.Color = pieceInfo.Color.white,
 
     castle_rights: CastleRights = CastleRights{},
+    white_king_home_square: u8 = 4,
+    black_king_home_square: u8 = 60,
 
     en_passant_square: ?u8 = null,
     halfmove_clock: u8 = 0,
@@ -854,6 +981,87 @@ pub const BitBoard = struct {
 
     pub fn getColorBitboard(self: Self, color: pieceInfo.Color) u64 {
         return self.color_sets[@intFromEnum(color)];
+    }
+
+    pub fn getKingSquare(self: Self, color: pieceInfo.Color) ?u8 {
+        const kings = self.getColorBitboard(color) & self.getKindBitboard(.king);
+        if (kings == 0) return null;
+        return @intCast(@ctz(kings));
+    }
+
+    pub fn getKingHomeSquare(self: Self, color: pieceInfo.Color) u8 {
+        return if (color == .white) self.white_king_home_square else self.black_king_home_square;
+    }
+
+    pub fn setKingHomeSquare(self: *Self, color: pieceInfo.Color, square: u8) void {
+        if (color == .white) {
+            self.white_king_home_square = square;
+        } else {
+            self.black_king_home_square = square;
+        }
+    }
+
+    pub fn hasKingsideCastleRight(self: Self, color: pieceInfo.Color) bool {
+        return if (color == .white) self.castle_rights.white_kingside else self.castle_rights.black_kingside;
+    }
+
+    pub fn hasQueensideCastleRight(self: Self, color: pieceInfo.Color) bool {
+        return if (color == .white) self.castle_rights.white_queenside else self.castle_rights.black_queenside;
+    }
+
+    pub fn getKingsideCastleRookSquare(self: Self, color: pieceInfo.Color) ?u8 {
+        if (!self.hasKingsideCastleRight(color)) return null;
+        return if (color == .white) self.castle_rights.white_kingside_rook_square else self.castle_rights.black_kingside_rook_square;
+    }
+
+    pub fn getQueensideCastleRookSquare(self: Self, color: pieceInfo.Color) ?u8 {
+        if (!self.hasQueensideCastleRight(color)) return null;
+        return if (color == .white) self.castle_rights.white_queenside_rook_square else self.castle_rights.black_queenside_rook_square;
+    }
+
+    pub fn setKingsideCastleRight(self: *Self, color: pieceInfo.Color, enabled: bool, rook_square: ?u8) void {
+        const square = rook_square orelse standardKingsideRookSquare(color);
+        if (color == .white) {
+            self.castle_rights.white_kingside = enabled;
+            self.castle_rights.white_kingside_rook_square = square;
+        } else {
+            self.castle_rights.black_kingside = enabled;
+            self.castle_rights.black_kingside_rook_square = square;
+        }
+    }
+
+    pub fn setQueensideCastleRight(self: *Self, color: pieceInfo.Color, enabled: bool, rook_square: ?u8) void {
+        const square = rook_square orelse standardQueensideRookSquare(color);
+        if (color == .white) {
+            self.castle_rights.white_queenside = enabled;
+            self.castle_rights.white_queenside_rook_square = square;
+        } else {
+            self.castle_rights.black_queenside = enabled;
+            self.castle_rights.black_queenside_rook_square = square;
+        }
+    }
+
+    pub fn findKingsideCastlingRook(self: Self, color: pieceInfo.Color) ?u8 {
+        const king_sq = self.getKingSquare(color) orelse return null;
+        const rank = backRank(color);
+        var file = (king_sq % 8) + 1;
+        while (file < 8) : (file += 1) {
+            const sq = rank * 8 + file;
+            if (self.getPieceAt(sq, color) == .rook) return sq;
+        }
+        return null;
+    }
+
+    pub fn findQueensideCastlingRook(self: Self, color: pieceInfo.Color) ?u8 {
+        const king_sq = self.getKingSquare(color) orelse return null;
+        const rank = backRank(color);
+        var file = king_sq % 8;
+        while (file > 0) {
+            file -= 1;
+            const sq = rank * 8 + file;
+            if (self.getPieceAt(sq, color) == .rook) return sq;
+        }
+        return null;
     }
 
     pub fn getKindBitboard(self: Self, kind: pieceInfo.Type) u64 {
@@ -974,4 +1182,53 @@ test "repetition shuffle sequence increments clocks from fen" {
 
     try std.testing.expectEqual(@as(u8, 8), b.board.halfmove_clock);
     try std.testing.expectEqual(@as(u16, 38), b.board.fullmove_number);
+}
+
+test "chess960 fen round-trips with rook-file castling rights" {
+    var b = try Board.fromFen("4k3/8/8/8/8/8/8/RK1R4 w AD - 0 1");
+    const fen_str = try b.getFenString(std.testing.allocator);
+    defer std.testing.allocator.free(fen_str);
+
+    try std.testing.expectEqualStrings("4k3/8/8/8/8/8/8/RK1R4 w AD - 0 1", fen_str);
+}
+
+test "chess960 castling accepts rook-square uci input" {
+    var b = try Board.fromFen("4k3/8/8/8/8/8/8/RK1R4 w AD - 0 1");
+
+    try b.makeStrMove("b1d1");
+
+    try std.testing.expectEqual(@as(?pieceInfo.Type, .king), b.board.getPieceAt(6, .white));
+    try std.testing.expectEqual(@as(?pieceInfo.Type, .rook), b.board.getPieceAt(5, .white));
+    try std.testing.expectEqual(@as(?pieceInfo.Type, null), b.board.getPieceAt(1, .white));
+    try std.testing.expectEqual(@as(?pieceInfo.Type, null), b.board.getPieceAt(3, .white));
+}
+
+test "chess960 castling supports same-square king destination" {
+    var b = try Board.fromFen("4k3/8/8/8/8/8/8/R1K1R3 w AE - 0 1");
+
+    try b.makeStrMove("c1a1");
+
+    try std.testing.expectEqual(@as(?pieceInfo.Type, .king), b.board.getPieceAt(2, .white));
+    try std.testing.expectEqual(@as(?pieceInfo.Type, .rook), b.board.getPieceAt(3, .white));
+    try std.testing.expectEqual(@as(?pieceInfo.Type, null), b.board.getPieceAt(0, .white));
+    try std.testing.expectEqual(@as(?pieceInfo.Type, null), b.board.getPieceAt(4, .white));
+}
+
+test "chess960 uci formatting uses rook square when enabled" {
+    var b = try Board.fromFen("4k3/8/8/8/8/8/8/RK1R4 w AD - 0 1");
+    var legal_moves = MoveList.init();
+    try b.generateLegalMoves(&legal_moves);
+
+    var castle_move: ?Move = null;
+    for (legal_moves.slice()) |move| {
+        if (b.isCastlingMove(move) and move.to() == 6) {
+            castle_move = move;
+            break;
+        }
+    }
+
+    const move = castle_move orelse return error.TestUnexpectedResult;
+    var move_buf: [5]u8 = undefined;
+    try std.testing.expectEqualStrings("b1g1", b.formatMoveUci(move, false, &move_buf));
+    try std.testing.expectEqualStrings("b1d1", b.formatMoveUci(move, true, &move_buf));
 }

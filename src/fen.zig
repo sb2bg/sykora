@@ -6,6 +6,22 @@ const BitBoard = @import("bitboard.zig").BitBoard;
 pub const FenParser = struct {
     const Self = @This();
 
+    fn enableCastleRightFromRookSquare(board: *BitBoard, color: piece.Color, rook_sq: u8) UciError!void {
+        if (board.getPieceAt(rook_sq, color) != .rook) return error.InvalidFen;
+
+        const king_sq = board.getKingSquare(color) orelse return error.InvalidFen;
+        const rook_file = rook_sq % 8;
+        const king_file = king_sq % 8;
+
+        if (rook_file > king_file) {
+            board.setKingsideCastleRight(color, true, rook_sq);
+        } else if (rook_file < king_file) {
+            board.setQueensideCastleRight(color, true, rook_sq);
+        } else {
+            return error.InvalidFen;
+        }
+    }
+
     pub fn parse(fen: []const u8) UciError!BitBoard {
         var board = BitBoard.init();
         var parser = std.mem.tokenizeAny(u8, fen, " ");
@@ -44,6 +60,11 @@ pub const FenParser = struct {
             file += 1;
         }
 
+        const white_king_sq = board.getKingSquare(.white) orelse return error.InvalidFen;
+        const black_king_sq = board.getKingSquare(.black) orelse return error.InvalidFen;
+        board.setKingHomeSquare(.white, white_king_sq);
+        board.setKingHomeSquare(.black, black_king_sq);
+
         // Parse active color
         const active_color_option = parser.next();
 
@@ -58,11 +79,13 @@ pub const FenParser = struct {
             if (castling[0] != '-') {
                 for (castling) |c| {
                     switch (c) {
-                        'K' => board.castle_rights.white_kingside = true,
-                        'Q' => board.castle_rights.white_queenside = true,
-                        'k' => board.castle_rights.black_kingside = true,
-                        'q' => board.castle_rights.black_queenside = true,
-                        else => {},
+                        'K' => try enableCastleRightFromRookSquare(&board, .white, board.findKingsideCastlingRook(.white) orelse return error.InvalidFen),
+                        'Q' => try enableCastleRightFromRookSquare(&board, .white, board.findQueensideCastlingRook(.white) orelse return error.InvalidFen),
+                        'k' => try enableCastleRightFromRookSquare(&board, .black, board.findKingsideCastlingRook(.black) orelse return error.InvalidFen),
+                        'q' => try enableCastleRightFromRookSquare(&board, .black, board.findQueensideCastlingRook(.black) orelse return error.InvalidFen),
+                        'A'...'H' => try enableCastleRightFromRookSquare(&board, .white, c - 'A'),
+                        'a'...'h' => try enableCastleRightFromRookSquare(&board, .black, 56 + (c - 'a')),
+                        else => return error.InvalidFen,
                     }
                 }
             }

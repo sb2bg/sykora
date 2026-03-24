@@ -28,6 +28,50 @@ inline fn appendMove(moves: anytype, from: anytype, to: anytype, promo: ?pieceIn
     moves.append(MoveT.init(@intCast(from), @intCast(to), promo));
 }
 
+fn canCastle(self: anytype, opponent: pieceInfo.Color, occupied: u64, castle: anytype) bool {
+    if (self.board.getPieceAt(castle.king_from, self.board.move) != .king) return false;
+    if (self.board.getPieceAt(castle.rook_from, self.board.move) != .rook) return false;
+
+    var sq = castle.king_from;
+    while (true) {
+        if (sq != castle.king_from and sq != castle.rook_from) {
+            if ((occupied & (@as(u64, 1) << @intCast(sq))) != 0) return false;
+        }
+        if (legality.isSquareAttackedBy(self, @intCast(sq), opponent)) return false;
+        if (sq == castle.king_to) break;
+        sq = if (sq < castle.king_to) sq + 1 else sq - 1;
+    }
+
+    sq = castle.rook_from;
+    while (sq != castle.rook_to) {
+        sq = if (sq < castle.rook_to) sq + 1 else sq - 1;
+        if (sq != castle.king_from) {
+            if ((occupied & (@as(u64, 1) << @intCast(sq))) != 0) return false;
+        }
+    }
+
+    return true;
+}
+
+fn appendCastlingMoves(self: anytype, moves: anytype, color: pieceInfo.Color, occupied: u64) void {
+    const king_from = self.board.getKingSquare(color) orelse return;
+    const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
+
+    const kingside_target: u8 = if (color == .white) 6 else 62;
+    if (self.getCastlingInfo(color, king_from, kingside_target, false)) |castle| {
+        if (canCastle(self, opponent, occupied, castle)) {
+            appendMove(moves, castle.king_from, castle.king_to, null);
+        }
+    }
+
+    const queenside_target: u8 = if (color == .white) 2 else 58;
+    if (self.getCastlingInfo(color, king_from, queenside_target, false)) |castle| {
+        if (canCastle(self, opponent, occupied, castle)) {
+            appendMove(moves, castle.king_from, castle.king_to, null);
+        }
+    }
+}
+
 pub fn filterLegalMoves(self: anytype, pseudo_moves: anytype, moves: anytype, color: pieceInfo.Color) void {
     for (pseudo_moves.slice()) |move| {
         const old_board = self.board;
@@ -524,44 +568,7 @@ fn generateKingQuietMoves(self: anytype, moves: anytype, color: pieceInfo.Color,
         appendMove(moves, from, to, null);
     }
 
-    // Castling
-    const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-
-    if (color == .white) {
-        if (self.board.castle_rights.white_kingside) {
-            if ((occupied & ((@as(u64, 1) << 5) | (@as(u64, 1) << 6))) == 0 and
-                !legality.isSquareAttackedBy(self, 4, opponent) and
-                !legality.isSquareAttackedBy(self, 5, opponent))
-            {
-                appendMove(moves, 4, 6, null);
-            }
-        }
-        if (self.board.castle_rights.white_queenside) {
-            if ((occupied & ((@as(u64, 1) << 1) | (@as(u64, 1) << 2) | (@as(u64, 1) << 3))) == 0 and
-                !legality.isSquareAttackedBy(self, 4, opponent) and
-                !legality.isSquareAttackedBy(self, 3, opponent))
-            {
-                appendMove(moves, 4, 2, null);
-            }
-        }
-    } else {
-        if (self.board.castle_rights.black_kingside) {
-            if ((occupied & ((@as(u64, 1) << 61) | (@as(u64, 1) << 62))) == 0 and
-                !legality.isSquareAttackedBy(self, 60, opponent) and
-                !legality.isSquareAttackedBy(self, 61, opponent))
-            {
-                appendMove(moves, 60, 62, null);
-            }
-        }
-        if (self.board.castle_rights.black_queenside) {
-            if ((occupied & ((@as(u64, 1) << 57) | (@as(u64, 1) << 58) | (@as(u64, 1) << 59))) == 0 and
-                !legality.isSquareAttackedBy(self, 60, opponent) and
-                !legality.isSquareAttackedBy(self, 59, opponent))
-            {
-                appendMove(moves, 60, 58, null);
-            }
-        }
-    }
+    appendCastlingMoves(self, moves, color, occupied);
 }
 
 fn generatePawnMoves(self: anytype, moves: anytype, color: pieceInfo.Color, our_pieces: u64, opponent_pieces: u64, occupied: u64) !void {
@@ -855,47 +862,5 @@ fn generateKingMoves(self: anytype, moves: anytype, color: pieceInfo.Color, our_
         appendMove(moves, from, to, null);
     }
 
-    // Castling - only add if not currently in check and path is clear
-    // Check attacks will be verified during move legality testing
-    const opponent = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
-
-    if (color == .white) {
-        // White kingside
-        if (self.board.castle_rights.white_kingside) {
-            if ((occupied & ((@as(u64, 1) << 5) | (@as(u64, 1) << 6))) == 0 and
-                !legality.isSquareAttackedBy(self, 4, opponent) and
-                !legality.isSquareAttackedBy(self, 5, opponent))
-            {
-                appendMove(moves, 4, 6, null);
-            }
-        }
-        // White queenside
-        if (self.board.castle_rights.white_queenside) {
-            if ((occupied & ((@as(u64, 1) << 1) | (@as(u64, 1) << 2) | (@as(u64, 1) << 3))) == 0 and
-                !legality.isSquareAttackedBy(self, 4, opponent) and
-                !legality.isSquareAttackedBy(self, 3, opponent))
-            {
-                appendMove(moves, 4, 2, null);
-            }
-        }
-    } else {
-        // Black kingside
-        if (self.board.castle_rights.black_kingside) {
-            if ((occupied & ((@as(u64, 1) << 61) | (@as(u64, 1) << 62))) == 0 and
-                !legality.isSquareAttackedBy(self, 60, opponent) and
-                !legality.isSquareAttackedBy(self, 61, opponent))
-            {
-                appendMove(moves, 60, 62, null);
-            }
-        }
-        // Black queenside
-        if (self.board.castle_rights.black_queenside) {
-            if ((occupied & ((@as(u64, 1) << 57) | (@as(u64, 1) << 58) | (@as(u64, 1) << 59))) == 0 and
-                !legality.isSquareAttackedBy(self, 60, opponent) and
-                !legality.isSquareAttackedBy(self, 59, opponent))
-            {
-                appendMove(moves, 60, 58, null);
-            }
-        }
-    }
+    appendCastlingMoves(self, moves, color, occupied);
 }

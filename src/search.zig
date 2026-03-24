@@ -65,7 +65,6 @@ const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
 const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 const SEE_CAPTURE_SCALE: i32 = 128;
-
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
 const REPETITION_BASE_CONTEMPT_CP: i32 = 15;
@@ -75,7 +74,6 @@ const REPETITION_LARGE_ADV_CP: i32 = 80;
 const REPETITION_HUGE_ADV_CP: i32 = 120;
 const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
-
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
     const ns = now.since(start);
@@ -229,6 +227,7 @@ pub const SearchEngine = struct {
     nnue_net: ?*const nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
+    uci_chess960: bool,
     // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
     acc_stack: ?[]nnue.AccumulatorPair,
     acc_ply: u32,
@@ -245,6 +244,7 @@ pub const SearchEngine = struct {
         nnue_net: ?*const nnue.Network,
         nnue_blend: i32,
         nnue_scale: i32,
+        uci_chess960: bool,
     ) Self {
         return Self{
             .board = board_ptr,
@@ -269,6 +269,7 @@ pub const SearchEngine = struct {
             .nnue_net = nnue_net,
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
+            .uci_chess960 = uci_chess960,
             .acc_stack = null,
             .acc_ply = 0,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
