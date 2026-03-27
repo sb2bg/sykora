@@ -14,14 +14,17 @@ $ErrorActionPreference = "Stop"
 # --- Environment Setup ---
 $msvcVer = "14.44.35207"
 $sdkVer = "10.0.26100.0"
+$cudaVer = "12.6"
+$cudaDigits = "12060"
 $msvcRoot = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\$msvcVer"
 $sdkRoot = "C:\Program Files (x86)\Windows Kits\10"
+$cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVer"
 
-$env:PATH = "$msvcRoot\bin\Hostx64\x64;$sdkRoot\bin\$sdkVer\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;$env:LOCALAPPDATA\Programs\Python\Python312;$env:LOCALAPPDATA\Programs\Python\Python312\Scripts;$env:USERPROFILE\.cargo\bin;$env:PATH"
+$env:PATH = "$msvcRoot\bin\Hostx64\x64;$sdkRoot\bin\$sdkVer\x64;$cudaRoot\bin;$env:LOCALAPPDATA\Programs\Python\Python312;$env:LOCALAPPDATA\Programs\Python\Python312\Scripts;$env:USERPROFILE\.cargo\bin;$env:PATH"
 $env:LIB = "$msvcRoot\lib\x64;$sdkRoot\Lib\$sdkVer\ucrt\x64;$sdkRoot\Lib\$sdkVer\um\x64"
 $env:INCLUDE = "$msvcRoot\include;$sdkRoot\Include\$sdkVer\ucrt;$sdkRoot\Include\$sdkVer\um;$sdkRoot\Include\$sdkVer\shared"
-$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
-$env:CUDARC_CUDA_VERSION = "12060"
+$env:CUDA_PATH = $cudaRoot
+$env:CUDARC_CUDA_VERSION = $cudaDigits
 
 # Activate venv
 & "$PSScriptRoot\nnue\.venv\Scripts\Activate.ps1"
@@ -72,7 +75,7 @@ $denseL1 = 16
 $denseL2 = 32
 $endSuperbatch = 1000
 $lrStart = 0.001
-$wdl = 0.5
+$wdl = 0.3
 $saveRate = 10
 $threads = 8
 
