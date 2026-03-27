@@ -22,6 +22,39 @@ from bootstrap import DEFAULT_BULLET_REPO, ensure_bullet_repo  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+SYKORA10_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 4, 5, 5,
+    6, 6, 6, 6,
+    7, 7, 7, 7,
+    8, 8, 8, 8,
+    8, 8, 8, 8,
+    9, 9, 9, 9,
+    9, 9, 9, 9,
+]
+
+SYKORA16_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 5, 6, 7,
+    8, 8, 9, 9,
+    10, 10, 11, 11,
+    12, 12, 13, 13,
+    12, 12, 13, 13,
+    14, 14, 15, 15,
+    14, 14, 15, 15,
+]
+
+
+def expand_mirrored_bucket_layout(layout_32: list[int]) -> list[int]:
+    mirror = [0, 1, 2, 3, 3, 2, 1, 0]
+    return [int(layout_32[(idx // 8) * 4 + mirror[idx % 8]]) for idx in range(64)]
+
+
+def bucket_layout_64(name: str) -> list[int]:
+    if name == "sykora16":
+        return expand_mirrored_bucket_layout(SYKORA16_BUCKET_LAYOUT_32)
+    return expand_mirrored_bucket_layout(SYKORA10_BUCKET_LAYOUT_32)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch Bullet NNUE training runs.")
@@ -207,6 +240,15 @@ def main() -> int:
         "output_dir": str(run_dir.resolve()),
         "checkpoint_dir": str(ckpt_dir.resolve()),
         "command": cmd,
+        "network": {
+            "format": args.network_format,
+            "bucket_layout_name": args.bucket_layout,
+            "bucket_layout_64": bucket_layout_64(args.bucket_layout),
+            "ft_hidden": args.hidden,
+            "dense_l1": args.dense_l1,
+            "dense_l2": args.dense_l2,
+            "stack_count": 8,
+        },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],
             "SYK_HIDDEN": env["SYK_HIDDEN"],

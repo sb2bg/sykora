@@ -35,13 +35,13 @@ const BUCKET_LAYOUT_SYKORA10: [usize; 32] = [
 
 #[rustfmt::skip]
 const BUCKET_LAYOUT_SYKORA16: [usize; 32] = [
-    0, 0, 1, 1,
-    2, 2, 3, 3,
-    4, 4, 5, 5,
-    6, 6, 7, 7,
+    0, 1, 2, 3,
+    4, 5, 6, 7,
     8, 8, 9, 9,
     10, 10, 11, 11,
     12, 12, 13, 13,
+    12, 12, 13, 13,
+    14, 14, 15, 15,
     14, 14, 15, 15,
 ];
 
@@ -267,11 +267,11 @@ fn run_syk4(
                 .quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
             SavedFormat::id("l1w").transpose().round().quantise::<i16>(64),
-            SavedFormat::id("l1b"),
+            SavedFormat::id("l1b").round().quantise::<i32>(255 * 64),
             SavedFormat::id("l2w").transpose().round().quantise::<i16>(64),
-            SavedFormat::id("l2b"),
+            SavedFormat::id("l2b").round().quantise::<i32>(255 * 64),
             SavedFormat::id("outw").transpose().round().quantise::<i16>(64),
-            SavedFormat::id("outb"),
+            SavedFormat::id("outb").round().quantise::<i32>(255 * 64),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs, output_buckets| {
@@ -282,15 +282,15 @@ fn run_syk4(
             l0.init_with_effective_input_size(32);
             l0.weights = l0.weights + expanded_factoriser;
 
-            let l1 = builder.new_affine("l1", hl_size, OUTPUT_BUCKETS * dense_l1);
+            let l1 = builder.new_affine("l1", 2 * hl_size, OUTPUT_BUCKETS * dense_l1);
             let l2 = builder.new_affine("l2", dense_l1, OUTPUT_BUCKETS * dense_l2);
             let out = builder.new_affine("out", dense_l2, OUTPUT_BUCKETS);
 
-            let stm_hidden = l0.forward(stm_inputs).crelu().pairwise_mul();
-            let ntm_hidden = l0.forward(ntm_inputs).crelu().pairwise_mul();
+            let stm_hidden = l0.forward(stm_inputs).screlu();
+            let ntm_hidden = l0.forward(ntm_inputs).screlu();
             let hidden_layer = stm_hidden.concat(ntm_hidden);
-            let dense_1 = l1.forward(hidden_layer).select(output_buckets).screlu();
-            let dense_2 = l2.forward(dense_1).select(output_buckets).screlu();
+            let dense_1 = l1.forward(hidden_layer).select(output_buckets).crelu();
+            let dense_2 = l2.forward(dense_1).select(output_buckets).crelu();
             out.forward(dense_2).select(output_buckets)
         });
 

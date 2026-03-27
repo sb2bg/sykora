@@ -16,6 +16,8 @@ QB = 64
 SCALE = 400
 MAGIC_V3 = b"SYKNNUE3"
 FORMAT_VERSION_V3 = 3
+MAGIC_V4 = b"SYKNNUE4"
+FORMAT_VERSION_V4 = 4
 
 FEATURE_SET_LEGACY = 0
 FEATURE_SET_KING_BUCKETS_MIRRORED = 1
@@ -29,6 +31,17 @@ SYKORA_BUCKET_LAYOUT_32 = [
     8, 8, 8, 8,
     9, 9, 9, 9,
     9, 9, 9, 9,
+]
+
+SYKORA16_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 5, 6, 7,
+    8, 8, 9, 9,
+    10, 10, 11, 11,
+    12, 12, 13, 13,
+    12, 12, 13, 13,
+    14, 14, 15, 15,
+    14, 14, 15, 15,
 ]
 
 
@@ -149,6 +162,10 @@ def _pack_i16(values: Iterable[int]) -> bytes:
     return b"".join(struct.pack("<h", int(v)) for v in values)
 
 
+def _pack_i32(values: Iterable[int]) -> bytes:
+    return b"".join(struct.pack("<i", int(v)) for v in values)
+
+
 def write_syk_nnue(
     path: Path,
     *,
@@ -191,3 +208,115 @@ def write_syk_nnue(
         handle.write(_pack_i16(input_biases_i16))
         handle.write(_pack_i16(input_weights_i16))
         handle.write(_pack_i16(output_weights_i16))
+
+
+def syk_nnue_v4_payload_size(
+    *,
+    feature_set: int,
+    bucket_layout_64: List[int],
+    ft_hidden_size: int,
+    dense_layer_1_size: int,
+    dense_layer_2_size: int,
+    layer_stack_count: int,
+) -> int:
+    input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
+    h = ft_hidden_size
+    l1 = dense_layer_1_size
+    l2 = dense_layer_2_size
+    s = layer_stack_count
+    return (
+        2 * h
+        + 2 * input_size * h
+        + 4 * s * l1
+        + 2 * s * l1 * (2 * h)
+        + 4 * s * l2
+        + 2 * s * l2 * l1
+        + 4 * s
+        + 2 * s * l2
+    )
+
+
+def write_syk_nnue_v4(
+    path: Path,
+    *,
+    ft_hidden_size: int,
+    dense_layer_1_size: int,
+    dense_layer_2_size: int,
+    layer_stack_count: int,
+    ft_biases_i16: List[int],
+    ft_weights_i16: List[int],
+    l1_biases_i32: List[int],
+    l1_weights_i16: List[int],
+    l2_biases_i32: List[int],
+    l2_weights_i16: List[int],
+    out_biases_i32: List[int],
+    out_weights_i16: List[int],
+    feature_set: int = FEATURE_SET_KING_BUCKETS_MIRRORED,
+    bucket_layout_64: List[int] | None = None,
+    ft_activation_type: int = 1,
+    dense_activation_type: int = 0,
+    qa: int = QA,
+    q1: int = QB,
+    q2: int = QB,
+    qo: int = QB,
+) -> None:
+    if feature_set != FEATURE_SET_KING_BUCKETS_MIRRORED:
+        raise ValueError("SYKNNUE4 currently requires king_buckets_mirrored inputs")
+    if bucket_layout_64 is None or len(bucket_layout_64) != 64:
+        raise ValueError("bucket_layout_64 must contain exactly 64 entries")
+    if ft_hidden_size <= 0:
+        raise ValueError("ft_hidden_size must be > 0")
+    if dense_layer_1_size <= 0 or dense_layer_2_size <= 0:
+        raise ValueError("dense layer sizes must be > 0")
+    if layer_stack_count <= 0 or layer_stack_count > 255:
+        raise ValueError("layer_stack_count must fit in u8 and be > 0")
+
+    input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
+    bucket_count = num_buckets(bucket_layout_64)
+    h = ft_hidden_size
+    l1 = dense_layer_1_size
+    l2 = dense_layer_2_size
+    s = layer_stack_count
+
+    if len(ft_biases_i16) != h:
+        raise ValueError("ft_biases length mismatch")
+    if len(ft_weights_i16) != input_size * h:
+        raise ValueError("ft_weights length mismatch")
+    if len(l1_biases_i32) != s * l1:
+        raise ValueError("l1_biases length mismatch")
+    if len(l1_weights_i16) != s * l1 * (2 * h):
+        raise ValueError("l1_weights length mismatch")
+    if len(l2_biases_i32) != s * l2:
+        raise ValueError("l2_biases length mismatch")
+    if len(l2_weights_i16) != s * l2 * l1:
+        raise ValueError("l2_weights length mismatch")
+    if len(out_biases_i32) != s:
+        raise ValueError("out_biases length mismatch")
+    if len(out_weights_i16) != s * l2:
+        raise ValueError("out_weights length mismatch")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.write(MAGIC_V4)
+        handle.write(struct.pack("<H", FORMAT_VERSION_V4))
+        handle.write(struct.pack("<B", feature_set))
+        handle.write(struct.pack("<B", ft_activation_type))
+        handle.write(struct.pack("<H", h))
+        handle.write(struct.pack("<B", dense_activation_type))
+        handle.write(struct.pack("<H", l1))
+        handle.write(struct.pack("<H", l2))
+        handle.write(struct.pack("<B", s))
+        handle.write(struct.pack("<B", bucket_count))
+        handle.write(struct.pack("<H", qa))
+        handle.write(struct.pack("<H", q1))
+        handle.write(struct.pack("<H", q2))
+        handle.write(struct.pack("<H", qo))
+        handle.write(bytes(int(v) for v in bucket_layout_64))
+        handle.write(_pack_i16(ft_biases_i16))
+        handle.write(_pack_i16(ft_weights_i16))
+        handle.write(_pack_i32(l1_biases_i32))
+        handle.write(_pack_i16(l1_weights_i16))
+        handle.write(_pack_i32(l2_biases_i32))
+        handle.write(_pack_i16(l2_weights_i16))
+        handle.write(_pack_i32(out_biases_i32))
+        handle.write(_pack_i16(out_weights_i16))
