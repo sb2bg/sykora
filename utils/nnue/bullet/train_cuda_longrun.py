@@ -34,13 +34,13 @@ SYKORA10_BUCKET_LAYOUT_32 = [
 ]
 
 SYKORA16_BUCKET_LAYOUT_32 = [
-    0, 1, 2, 3,
-    4, 5, 6, 7,
+    0, 0, 1, 1,
+    2, 2, 3, 3,
+    4, 4, 5, 5,
+    6, 6, 7, 7,
     8, 8, 9, 9,
     10, 10, 11, 11,
     12, 12, 13, 13,
-    12, 12, 13, 13,
-    14, 14, 15, 15,
     14, 14, 15, 15,
 ]
 
@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument(
-        "--hidden", type=int, default=128, help="Hidden size for sykora_bucketed"
+        "--hidden", type=int, default=0, help="Hidden size (default: 128 for syk3, 1536 for syk4)"
     )
     parser.add_argument(
         "--network-format",
@@ -87,8 +87,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bucket-layout",
         choices=["sykora10", "sykora16"],
-        default="sykora10",
-        help="Mirrored king-bucket layout",
+        default="",
+        help="Mirrored king-bucket layout (default: sykora10 for syk3, sykora16 for syk4)",
     )
     parser.add_argument(
         "--dense-l1",
@@ -158,6 +158,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+
+    if not args.bucket_layout:
+        args.bucket_layout = "sykora16" if args.network_format == "syk4" else "sykora10"
+    if args.hidden <= 0:
+        args.hidden = 1536 if args.network_format == "syk4" else 128
 
     datasets = [Path(d) for d in args.dataset]
     for dataset in datasets:

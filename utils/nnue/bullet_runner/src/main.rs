@@ -1,10 +1,11 @@
 use bullet_lib::{
     game::{
+        formats::bulletformat::{ChessBoard, chess::MarlinFormat},
         formats::sfbinpack::{
             TrainingDataEntry,
         },
         inputs::{get_num_buckets, ChessBucketsMirrored},
-        outputs::MaterialCount,
+        outputs::OutputBuckets,
     },
     nn::{
         optimiser::{AdamW, AdamWParams},
@@ -35,15 +36,41 @@ const BUCKET_LAYOUT_SYKORA10: [usize; 32] = [
 
 #[rustfmt::skip]
 const BUCKET_LAYOUT_SYKORA16: [usize; 32] = [
-    0, 1, 2, 3,
-    4, 5, 6, 7,
+    0, 0, 1, 1,
+    2, 2, 3, 3,
+    4, 4, 5, 5,
+    6, 6, 7, 7,
     8, 8, 9, 9,
     10, 10, 11, 11,
     12, 12, 13, 13,
-    12, 12, 13, 13,
-    14, 14, 15, 15,
     14, 14, 15, 15,
 ];
+
+#[derive(Clone, Copy, Default)]
+struct SykoraPieceCountBuckets;
+
+impl SykoraPieceCountBuckets {
+    fn bucket_from_piece_count(piece_count: u32) -> u8 {
+        let capped = piece_count.saturating_sub(1) / 4;
+        capped.min((OUTPUT_BUCKETS - 1) as u32) as u8
+    }
+}
+
+impl OutputBuckets<ChessBoard> for SykoraPieceCountBuckets {
+    const BUCKETS: usize = OUTPUT_BUCKETS;
+
+    fn bucket(&self, pos: &ChessBoard) -> u8 {
+        Self::bucket_from_piece_count(pos.occ().count_ones())
+    }
+}
+
+impl OutputBuckets<MarlinFormat> for SykoraPieceCountBuckets {
+    const BUCKETS: usize = OUTPUT_BUCKETS;
+
+    fn bucket(&self, pos: &MarlinFormat) -> u8 {
+        Self::bucket_from_piece_count(pos.occ().count_ones())
+    }
+}
 
 fn env_usize(name: &str, default: usize) -> usize {
     env::var(name)
@@ -251,7 +278,7 @@ fn run_syk4(
         .dual_perspective()
         .optimiser(AdamW)
         .inputs(ChessBucketsMirrored::new(bucket_layout))
-        .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
+        .output_buckets(SykoraPieceCountBuckets)
         .use_threads(threads)
         .save_format(&[
             SavedFormat::id("l0w")
