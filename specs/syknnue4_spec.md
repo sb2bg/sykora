@@ -179,7 +179,7 @@ u16       version = 4
 u8        feature_set              # 0=legacy_psqt, 1=king_buckets_mirrored
 u8        ft_activation_type       # 0=ReLU, 1=SCReLU
 u16       ft_hidden_size           # baseline 1536
-u8        dense_activation_type    # 0=ReLU, 1=SCReLU; baseline ReLU
+u8        dense_activation_type    # 0=clipped_relu, 1=SCReLU; baseline clipped_relu
 u16       dense_layer_1_size       # baseline 16
 u16       dense_layer_2_size       # baseline 32
 u8        layer_stack_count        # baseline 8

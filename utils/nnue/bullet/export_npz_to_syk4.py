@@ -13,6 +13,8 @@ if str(UTILS_NNUE_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_NNUE_DIR))
 
 from common import (  # noqa: E402
+    ACTIVATION_SCRELU,
+    DENSE_ACTIVATION_CLIPPED_RELU,
     FEATURE_SET_KING_BUCKETS_MIRRORED,
     QA,
     QB,
@@ -78,14 +80,14 @@ def main() -> int:
         if "ft_activation_type" in ckpt:
             ft_activation_type = int(np.asarray(ckpt["ft_activation_type"]).reshape(-1)[0])
         else:
-            ft_activation_type = 1
+            ft_activation_type = ACTIVATION_SCRELU
 
         if "dense_activation_type" in ckpt:
             dense_activation_type = int(
                 np.asarray(ckpt["dense_activation_type"]).reshape(-1)[0]
             )
         else:
-            dense_activation_type = 0
+            dense_activation_type = DENSE_ACTIVATION_CLIPPED_RELU
 
     if feature_set != FEATURE_SET_KING_BUCKETS_MIRRORED:
         raise ValueError("SYKNNUE4 only supports king_buckets_mirrored inputs")

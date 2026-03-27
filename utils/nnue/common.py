@@ -22,6 +22,14 @@ FORMAT_VERSION_V4 = 4
 FEATURE_SET_LEGACY = 0
 FEATURE_SET_KING_BUCKETS_MIRRORED = 1
 
+ACTIVATION_RELU = 0
+ACTIVATION_SCRELU = 1
+
+# For the first SYKNNUE4 baseline, dense activation id 0 is the clipped ReLU
+# used by the spec equations and Bullet's `crelu()`.
+DENSE_ACTIVATION_CLIPPED_RELU = 0
+DENSE_ACTIVATION_SCRELU = 1
+
 SYKORA_BUCKET_LAYOUT_32 = [
     0, 1, 2, 3,
     4, 4, 5, 5,
@@ -253,8 +261,8 @@ def write_syk_nnue_v4(
     out_weights_i16: List[int],
     feature_set: int = FEATURE_SET_KING_BUCKETS_MIRRORED,
     bucket_layout_64: List[int] | None = None,
-    ft_activation_type: int = 1,
-    dense_activation_type: int = 0,
+    ft_activation_type: int = ACTIVATION_SCRELU,
+    dense_activation_type: int = DENSE_ACTIVATION_CLIPPED_RELU,
     qa: int = QA,
     q1: int = QB,
     q2: int = QB,

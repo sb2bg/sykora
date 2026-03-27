@@ -12,7 +12,12 @@ UTILS_NNUE_DIR = Path(__file__).resolve().parents[1]
 if str(UTILS_NNUE_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_NNUE_DIR))
 
-from common import SYKORA16_BUCKET_LAYOUT_32, expand_mirrored_bucket_layout  # noqa: E402
+from common import (  # noqa: E402
+    ACTIVATION_SCRELU,
+    DENSE_ACTIVATION_CLIPPED_RELU,
+    SYKORA16_BUCKET_LAYOUT_32,
+    expand_mirrored_bucket_layout,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -172,8 +177,8 @@ def main() -> int:
         out_bias=out_bias.astype(np.float32),
         bucket_layout_64=np.asarray(bucket_layout_64, dtype=np.uint8),
         feature_set=np.asarray([1], dtype=np.uint8),
-        ft_activation_type=np.asarray([1], dtype=np.uint8),
-        dense_activation_type=np.asarray([0], dtype=np.uint8),
+        ft_activation_type=np.asarray([ACTIVATION_SCRELU], dtype=np.uint8),
+        dense_activation_type=np.asarray([DENSE_ACTIVATION_CLIPPED_RELU], dtype=np.uint8),
     )
 
     print(f"Input: {raw_path}")
