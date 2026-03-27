@@ -46,6 +46,30 @@ def parse_args() -> argparse.Namespace:
         "--hidden", type=int, default=128, help="Hidden size for sykora_bucketed"
     )
     parser.add_argument(
+        "--network-format",
+        choices=["syk3", "syk4"],
+        default="syk3",
+        help="Training network format",
+    )
+    parser.add_argument(
+        "--bucket-layout",
+        choices=["sykora10", "sykora16"],
+        default="sykora10",
+        help="Mirrored king-bucket layout",
+    )
+    parser.add_argument(
+        "--dense-l1",
+        type=int,
+        default=16,
+        help="SYKNNUE4 dense layer 1 width",
+    )
+    parser.add_argument(
+        "--dense-l2",
+        type=int,
+        default=32,
+        help="SYKNNUE4 dense layer 2 width",
+    )
+    parser.add_argument(
         "--start-superbatch", type=int, default=1, help="Start superbatch"
     )
     parser.add_argument(
@@ -122,6 +146,9 @@ def main() -> int:
     if args.hidden <= 0:
         print("--hidden must be > 0", file=sys.stderr)
         return 2
+    if args.dense_l1 <= 0 or args.dense_l2 <= 0:
+        print("--dense-l1 and --dense-l2 must be > 0", file=sys.stderr)
+        return 2
     if args.start_superbatch <= 0 or args.end_superbatch < args.start_superbatch:
         print("Invalid superbatch bounds", file=sys.stderr)
         return 2
@@ -147,6 +174,10 @@ def main() -> int:
         {
             "SYK_DATASET": dataset_str,
             "SYK_HIDDEN": str(args.hidden),
+            "SYK_NETWORK_FORMAT": args.network_format,
+            "SYK_BUCKET_LAYOUT": args.bucket_layout,
+            "SYK_DENSE_L1": str(args.dense_l1),
+            "SYK_DENSE_L2": str(args.dense_l2),
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
             "SYK_START_SUPERBATCH": str(args.start_superbatch),
@@ -179,6 +210,10 @@ def main() -> int:
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],
             "SYK_HIDDEN": env["SYK_HIDDEN"],
+            "SYK_NETWORK_FORMAT": env["SYK_NETWORK_FORMAT"],
+            "SYK_BUCKET_LAYOUT": env["SYK_BUCKET_LAYOUT"],
+            "SYK_DENSE_L1": env["SYK_DENSE_L1"],
+            "SYK_DENSE_L2": env["SYK_DENSE_L2"],
             "SYK_LR_START": env["SYK_LR_START"],
             "SYK_LR_FINAL": env["SYK_LR_FINAL"],
             "SYK_START_SUPERBATCH": env["SYK_START_SUPERBATCH"],
