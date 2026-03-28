@@ -129,11 +129,8 @@ pub const ContinuationHistoryTable = struct {
     prev_scores: [CONTINUATION_KEY_COUNT][CONTINUATION_KEY_COUNT]i16,
     prev2_scores: [CONTINUATION_KEY_COUNT][CONTINUATION_KEY_COUNT]i16,
 
-    pub fn init() ContinuationHistoryTable {
-        return ContinuationHistoryTable{
-            .prev_scores = [_][CONTINUATION_KEY_COUNT]i16{[_]i16{0} ** CONTINUATION_KEY_COUNT} ** CONTINUATION_KEY_COUNT,
-            .prev2_scores = [_][CONTINUATION_KEY_COUNT]i16{[_]i16{0} ** CONTINUATION_KEY_COUNT} ** CONTINUATION_KEY_COUNT,
-        };
+    pub fn initInPlace(self: *ContinuationHistoryTable) void {
+        @memset(std.mem.asBytes(self), 0);
     }
 
     pub fn update(

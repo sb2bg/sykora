@@ -84,7 +84,8 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
         net_ptr,
         self.nnue_blend,
         self.nnue_scale,
-    );
+    ) catch return UciError.OutOfMemory;
+    defer search_engine.deinit();
 
     search_engine.uci_output = self.stdout;
     if (prior_count > 0) {
@@ -145,7 +146,11 @@ fn helperSearch(
         net_ptr,
         self.nnue_blend,
         self.nnue_scale,
-    );
+    ) catch {
+        self.helper_results[idx] = EMPTY_HELPER_RESULT;
+        return;
+    };
+    defer search_engine.deinit();
 
     search_engine.uci_output = null;
     if (prior_count > 0) {

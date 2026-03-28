@@ -214,7 +214,7 @@ pub const SearchEngine = struct {
     killer_moves: KillerMoves,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
-    continuation_history: ContinuationHistoryTable,
+    continuation_history: *ContinuationHistoryTable,
     nodes_searched: usize,
     seldepth: u32,
     previous_move: ?Move,
@@ -245,7 +245,11 @@ pub const SearchEngine = struct {
         nnue_net: ?*const nnue.Network,
         nnue_blend: i32,
         nnue_scale: i32,
-    ) Self {
+    ) error{OutOfMemory}!Self {
+        const continuation_history = try allocator.create(ContinuationHistoryTable);
+        errdefer allocator.destroy(continuation_history);
+        continuation_history.initInPlace();
+
         return Self{
             .board = board_ptr,
             .allocator = allocator,
@@ -256,7 +260,7 @@ pub const SearchEngine = struct {
             .killer_moves = KillerMoves.init(),
             .history = HistoryTable.init(),
             .counter_moves = CounterMoveTable.init(),
-            .continuation_history = ContinuationHistoryTable.init(),
+            .continuation_history = continuation_history,
             .nodes_searched = 0,
             .seldepth = 0,
             .previous_move = null,
@@ -275,6 +279,11 @@ pub const SearchEngine = struct {
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.deinitAccumulatorStack();
+        self.allocator.destroy(self.continuation_history);
     }
 
     inline fn evalCacheIndex(hash: u64) usize {
@@ -360,7 +369,7 @@ pub const SearchEngine = struct {
                     nnue.evaluateFromAccumulators(
                         net,
                         &stack[self.acc_ply],
-                        self.board.board.move == .white,
+                        self.board,
                     )
                 else
                     nnue.evaluate(net, self.board);
@@ -725,6 +734,13 @@ pub const SearchEngine = struct {
         return search_depth;
     }
 
+    inline fn moveGivesCheck(self: *Self, move: Move) bool {
+        const probe_undo = self.board.makeMoveWithUndoUnchecked(move);
+        const gives_check = self.board.isInCheck(self.board.board.move);
+        self.board.unmakeMoveUnchecked(move, probe_undo);
+        return gives_check;
+    }
+
     fn trySingularExtension(
         self: *Self,
         tt_probe: TtProbeResult,
@@ -764,7 +780,7 @@ pub const SearchEngine = struct {
             killers,
             counter_move,
             &self.history,
-            &self.continuation_history,
+            self.continuation_history,
             continuation_ctx.prev,
             continuation_ctx.prev2,
             ply,
@@ -819,7 +835,7 @@ pub const SearchEngine = struct {
         self: *Self,
         in_check: bool,
         ply: u32,
-        depth: u32,
+        search_depth: u32,
         is_pv_node: bool,
         alpha: i32,
         beta_adj: i32,
@@ -837,8 +853,8 @@ pub const SearchEngine = struct {
         }
 
         var futile = false;
-        if (!is_pv_node and !in_check and depth <= 3) {
-            var futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(depth));
+        if (!is_pv_node and !in_check and search_depth <= 3) {
+            var futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(search_depth));
             if (improving) futility_margin += 80;
             if (static_eval + futility_margin < alpha) {
                 futile = true;
@@ -856,12 +872,12 @@ pub const SearchEngine = struct {
     inline fn tryReverseFutilityPrune(
         is_pv_node: bool,
         in_check: bool,
-        depth: u32,
+        search_depth: u32,
         static_eval: i32,
         beta_adj: i32,
     ) ?i32 {
-        if (!is_pv_node and !in_check and depth <= 5) {
-            const rfp_margin = 80 * @as(i32, @intCast(depth));
+        if (!is_pv_node and !in_check and search_depth <= 5) {
+            const rfp_margin = 80 * @as(i32, @intCast(search_depth));
             if (static_eval - rfp_margin >= beta_adj) {
                 return static_eval;
             }
@@ -873,13 +889,13 @@ pub const SearchEngine = struct {
         self: *Self,
         is_pv_node: bool,
         in_check: bool,
-        depth: u32,
+        search_depth: u32,
         static_eval: i32,
         alpha: i32,
         beta_adj: i32,
         ply: u32,
     ) !?i32 {
-        if (!is_pv_node and !in_check and depth <= 2 and static_eval + RAZOR_MARGIN < alpha) {
+        if (!is_pv_node and !in_check and search_depth <= 2 and static_eval + RAZOR_MARGIN < alpha) {
             const razor_score = try self.quiescence(alpha, beta_adj, ply);
             if (razor_score < alpha) {
                 return razor_score;
@@ -893,7 +909,7 @@ pub const SearchEngine = struct {
         do_null: bool,
         is_pv_node: bool,
         in_check: bool,
-        depth: u32,
+        search_depth: u32,
         static_eval: i32,
         beta_adj: i32,
         ply: u32,
@@ -901,7 +917,7 @@ pub const SearchEngine = struct {
         if (!(do_null and
             !is_pv_node and
             !in_check and
-            depth >= NULL_MOVE_MIN_DEPTH and
+            search_depth >= NULL_MOVE_MIN_DEPTH and
             static_eval >= beta_adj))
         {
             return null;
@@ -937,11 +953,11 @@ pub const SearchEngine = struct {
         }
 
         var reduction: u32 = NULL_MOVE_REDUCTION;
-        if (depth > 6) reduction += 1;
+        if (search_depth > 6) reduction += 1;
         if (static_eval - beta_adj > 200) reduction += 1;
-        reduction = @min(reduction, depth - 1);
+        reduction = @min(reduction, search_depth - 1);
 
-        const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, depth -| reduction, ply + 1, false);
+        const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false);
 
         self.board.board = old_board;
         self.board.zobrist_hasher.zobrist_hash = old_hash;
@@ -952,8 +968,8 @@ pub const SearchEngine = struct {
         if (null_score < beta_adj) return null;
         if (eval.isMateScore(null_score)) return beta_adj;
 
-        if (depth >= NULL_MOVE_VERIFICATION_DEPTH) {
-            const verify_score = try self.alphaBeta(beta_adj - 1, beta_adj, depth - reduction, ply, false);
+        if (search_depth >= NULL_MOVE_VERIFICATION_DEPTH) {
+            const verify_score = try self.alphaBeta(beta_adj - 1, beta_adj, search_depth - reduction, ply, false);
             if (verify_score >= beta_adj) {
                 return null_score;
             }
@@ -1116,20 +1132,20 @@ pub const SearchEngine = struct {
         }
         const singular_extension = singular.extension;
 
-        const eval_ctx = self.computeStaticEvalContext(in_check, ply, depth, is_pv_node, alpha, beta_adj);
+        const eval_ctx = self.computeStaticEvalContext(in_check, ply, search_depth, is_pv_node, alpha, beta_adj);
         const static_eval = eval_ctx.static_eval;
         const improving = eval_ctx.improving;
         const futile = eval_ctx.futile;
 
-        if (tryReverseFutilityPrune(is_pv_node, in_check, depth, static_eval, beta_adj)) |pruned| {
+        if (tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj)) |pruned| {
             return pruned;
         }
 
-        if (try self.tryRazoring(is_pv_node, in_check, depth, static_eval, alpha, beta_adj, ply)) |razor_score| {
+        if (try self.tryRazoring(is_pv_node, in_check, search_depth, static_eval, alpha, beta_adj, ply)) |razor_score| {
             return razor_score;
         }
 
-        if (try self.tryNullMovePrune(do_null, is_pv_node, in_check, depth, static_eval, beta_adj, ply)) |null_score| {
+        if (try self.tryNullMovePrune(do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply)) |null_score| {
             return null_score;
         }
 
@@ -1143,7 +1159,7 @@ pub const SearchEngine = struct {
             killers,
             counter_move,
             &self.history,
-            &self.continuation_history,
+            self.continuation_history,
             continuation_ctx.prev,
             continuation_ctx.prev2,
             ply,
@@ -1213,21 +1229,19 @@ pub const SearchEngine = struct {
                 moves_searched > 0 and
                 search_depth <= MAIN_SEE_PRUNE_MAX_DEPTH)
             {
-                const see_score = staticExchangeEvalPosition(self.board.board, move);
-                const see_margin = MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
-                if (see_score < -see_margin) {
-                    continue;
+                const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
+                if (!is_tt_move) {
+                    const see_score = staticExchangeEvalPosition(self.board.board, move);
+                    const see_margin = MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+                    if (see_score < -see_margin and !self.moveGivesCheck(move)) {
+                        continue;
+                    }
                 }
             }
 
             // Futility pruning - skip quiet moves if futile (but not if move gives check)
             if (futile and !is_capture and !is_promotion and moves_searched > 0) {
-                // Make the move temporarily to check if it gives check
-                const probe_undo = self.board.makeMoveWithUndoUnchecked(move);
-                const gives_check = self.board.isInCheck(self.board.board.move);
-                self.board.unmakeMoveUnchecked(move, probe_undo);
-
-                if (!gives_check and !self.killer_moves.isKiller(move, ply)) {
+                if (!self.moveGivesCheck(move) and !self.killer_moves.isKiller(move, ply)) {
                     continue;
                 }
             }
@@ -1636,8 +1650,14 @@ pub const SearchEngine = struct {
                 }
 
                 // SEE pruning - skip clearly losing non-promotion captures.
-                if (move.promotion() == null and staticExchangeEvalPosition(self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP) {
-                    continue;
+                if (move.promotion() == null) {
+                    const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
+                    if (!is_tt_move and
+                        staticExchangeEvalPosition(self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP and
+                        !self.moveGivesCheck(move))
+                    {
+                        continue;
+                    }
                 }
             }
 

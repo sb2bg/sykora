@@ -224,7 +224,8 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
             // Search
             stop_flag.store(false, .seq_cst);
             var search_board = b;
-            var engine = SearchEngine.init(&search_board, allocator, &stop_flag, &tt, true, null, 100, 100);
+            var engine = try SearchEngine.init(&search_board, allocator, &stop_flag, &tt, true, null, 100, 100);
+            defer engine.deinit();
             engine.uci_output = null;
             if (hash_count > 0) {
                 engine.setGameHistory(game_hashes[0..hash_count]);
