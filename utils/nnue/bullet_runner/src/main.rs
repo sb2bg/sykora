@@ -166,12 +166,21 @@ fn run_syk4(
         min_weight: -0.99,
         ..Default::default()
     };
+    let l1_i8_clipping = AdamWParams {
+        // l1w is quantised as i8 @ 128, so keep it safely inside [-127/128, 127/128]
+        max_weight: 0.99,
+        min_weight: -0.99,
+        ..Default::default()
+    };
     trainer
         .optimiser
         .set_params_for_weight("l0w", stricter_clipping);
     trainer
         .optimiser
         .set_params_for_weight("l0f", stricter_clipping);
+    trainer
+        .optimiser
+        .set_params_for_weight("l1w", l1_i8_clipping);
 
     let schedule = TrainingSchedule {
         net_id,
