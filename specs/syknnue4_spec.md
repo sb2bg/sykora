@@ -249,15 +249,22 @@ before squaring.
 
 Export the PSQT sparse branch as:
 
-- PSQT bias: `i32`
 - PSQT weights: `i16`
 
 Quantization:
 
 ```text
-psqt_bias_int   = quantize_round(psqt_bias_float, QPSQT)
 psqt_weight_int = quantize_round(psqt_weight_float, QPSQT)
 ```
+
+No stored PSQT bias is included in the format. Since the side path is evaluated
+as:
+
+```text
+A_us_psqt - A_them_psqt
+```
+
+any shared scalar bias would cancel exactly and have no effect on evaluation.
 
 The PSQT branch is a direct sparse scalar accumulator in the `QPSQT` domain.
 
@@ -512,7 +519,6 @@ Payload:
 ```text
 i16[H]                hidden_ft_biases
 i16[I * H]            hidden_ft_weights
-i32[1]                psqt_bias
 i16[I]                psqt_weights
 i32[L1]               l1_biases
 i8[L1 * 2H]           l1_weights

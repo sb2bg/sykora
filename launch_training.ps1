@@ -61,13 +61,13 @@ foreach ($bp in $binpacks) {
 
 # --- Training Parameters ---
 # SYKNNUE4 baseline:
-# mirrored king buckets (sykora16) -> FT 2048 -> product pool -> 16 -> expand32 -> 32 -> 1
+# mirrored king buckets (sykora16) -> FT 2048 + PSQT side path -> shared 32 -> 32 -> 1
 $networkFormat = "syk4"
 $bucketLayout = "sykora16"
 $hidden = 2048
-$denseL1 = 16
+$denseL1 = 32
 $denseL2 = 32
-$endSuperbatch = 1000
+$endSuperbatch = 600
 $lrStart = 0.001
 $wdl = 0.25
 $saveRate = 10
@@ -83,7 +83,8 @@ Write-Host "Format:        binpack (sfbinpack)"
 Write-Host "Net format:    $networkFormat"
 Write-Host "Bucket layout: $bucketLayout"
 Write-Host "FT hidden:     $hidden"
-Write-Host "Dense head:    $denseL1 -> expand($($denseL1 * 2)) -> $denseL2 -> 1"
+Write-Host "Dense head:    shared $($hidden * 2) -> $denseL1 -> $denseL2 -> 1"
+Write-Host "PSQT path:     enabled"
 Write-Host "Superbatches:  1 -> $endSuperbatch"
 Write-Host "Save rate:     every $saveRate superbatches"
 Write-Host "Threads:       $threads"

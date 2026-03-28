@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Run Bullet training with long-run defaults for an RTX 4070 Ti SUPER.
-
-This wraps `cargo run -r --example sykora_bucketed` and records run metadata.
-"""
+"""Run Bullet training with long-run defaults for an RTX 4070 Ti SUPER."""
 
 from __future__ import annotations
 
@@ -81,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dense-l1",
         type=int,
-        default=16,
+        default=32,
         help="SYKNNUE4 dense layer 1 width",
     )
     parser.add_argument(
@@ -239,12 +236,11 @@ def main() -> int:
             "bucket_layout_64": bucket_layout_64(args.bucket_layout),
             "ft_hidden": args.hidden,
             "dense_l1": args.dense_l1,
-            "dense_expand": args.dense_l1 * 2,
             "dense_l2": args.dense_l2,
-            "stack_count": 8,
-            "output_bucket_count": 8,
-            "pooling": "product_pair_halves_q0_255",
-            "output_bucket_rule": "non_king_piece_count_div4",
+            "output_bucket_count": 1,
+            "hidden_activation": "screlu",
+            "psqt_side_channel": True,
+            "output_bucket_rule": "shared",
         },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],

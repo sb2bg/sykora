@@ -18,6 +18,7 @@ from common import (  # noqa: E402
     V4_Q,
     V4_Q0,
     V4_Q1,
+    V4_QPSQT,
     SYKORA16_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
     input_size_for_feature_set,
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--q0", type=int, default=None, help="FT / pooled activation scale")
     parser.add_argument("--q1", type=int, default=None, help="Dense layer 1 scale")
     parser.add_argument("--q", type=int, default=None, help="Dense layer 2 / output scale")
+    parser.add_argument("--qpsqt", type=int, default=None, help="PSQT side-path scale")
     parser.add_argument("--scale", type=int, default=None, help="Final centipawn scale")
     return parser.parse_args()
 
@@ -74,10 +76,11 @@ def main() -> int:
     with np.load(in_path) as ckpt:
         ft_weights = np.asarray(expect_array(ckpt, "ft_weights"), dtype=np.float32)
         ft_bias = np.asarray(expect_array(ckpt, "ft_bias"), dtype=np.float32).reshape(-1)
+        psqt_weights = np.asarray(expect_array(ckpt, "psqt_weights"), dtype=np.float32).reshape(-1)
         l1_weights = np.asarray(expect_array(ckpt, "l1_weights"), dtype=np.float32)
-        l1_bias = np.asarray(expect_array(ckpt, "l1_bias"), dtype=np.float32)
+        l1_bias = np.asarray(expect_array(ckpt, "l1_bias"), dtype=np.float32).reshape(-1)
         l2_weights = np.asarray(expect_array(ckpt, "l2_weights"), dtype=np.float32)
-        l2_bias = np.asarray(expect_array(ckpt, "l2_bias"), dtype=np.float32)
+        l2_bias = np.asarray(expect_array(ckpt, "l2_bias"), dtype=np.float32).reshape(-1)
         out_weights = np.asarray(expect_array(ckpt, "out_weights"), dtype=np.float32)
         out_bias = np.asarray(expect_array(ckpt, "out_bias"), dtype=np.float32).reshape(-1)
 
@@ -95,6 +98,7 @@ def main() -> int:
         q0 = int(np.asarray(ckpt["q0"]).reshape(-1)[0]) if "q0" in ckpt else V4_Q0
         q1 = int(np.asarray(ckpt["q1"]).reshape(-1)[0]) if "q1" in ckpt else V4_Q1
         q = int(np.asarray(ckpt["q"]).reshape(-1)[0]) if "q" in ckpt else V4_Q
+        qpsqt = int(np.asarray(ckpt["qpsqt"]).reshape(-1)[0]) if "qpsqt" in ckpt else V4_QPSQT
         scale = int(np.asarray(ckpt["scale"]).reshape(-1)[0]) if "scale" in ckpt else SCALE
 
     if args.q0 is not None:
@@ -103,6 +107,8 @@ def main() -> int:
         q1 = args.q1
     if args.q is not None:
         q = args.q
+    if args.qpsqt is not None:
+        qpsqt = args.qpsqt
     if args.scale is not None:
         scale = args.scale
 
@@ -123,49 +129,59 @@ def main() -> int:
         raise ValueError(
             f"ft_bias length mismatch: expected {ft_hidden_size}, got {ft_bias.shape[0]}"
         )
-
-    if l1_weights.ndim != 3:
-        raise ValueError(f"l1_weights must be rank-3, got shape {l1_weights.shape}")
-    output_bucket_count, dense_l1_size, l1_inputs = l1_weights.shape
-    if l1_inputs != ft_hidden_size:
+    if psqt_weights.shape[0] != ft_input_size:
         raise ValueError(
-            f"l1_weights input mismatch: expected {ft_hidden_size}, got {l1_inputs}"
-        )
-    if l1_bias.shape != (output_bucket_count, dense_l1_size):
-        raise ValueError(
-            f"l1_bias shape mismatch: expected {(output_bucket_count, dense_l1_size)}, got {l1_bias.shape}"
+            f"psqt_weights length mismatch: expected {ft_input_size}, got {psqt_weights.shape[0]}"
         )
 
-    dense_expand = 2 * dense_l1_size
-    if l2_weights.ndim != 3:
-        raise ValueError(f"l2_weights must be rank-3, got shape {l2_weights.shape}")
-    output_bucket_count_l2, dense_l2_size, l2_inputs = l2_weights.shape
-    if output_bucket_count_l2 != output_bucket_count or l2_inputs != dense_expand:
+    if l1_weights.ndim != 2:
+        raise ValueError(f"l1_weights must be rank-2, got shape {l1_weights.shape}")
+    dense_l1_size, l1_inputs = l1_weights.shape
+    if l1_inputs != 2 * ft_hidden_size:
         raise ValueError(
-            f"l2_weights shape mismatch: expected ({output_bucket_count}, L2, {dense_expand}), got {l2_weights.shape}"
+            f"l1_weights input mismatch: expected {2 * ft_hidden_size}, got {l1_inputs}"
         )
-    if l2_bias.shape != (output_bucket_count, dense_l2_size):
+    if l1_bias.shape[0] != dense_l1_size:
         raise ValueError(
-            f"l2_bias shape mismatch: expected {(output_bucket_count, dense_l2_size)}, got {l2_bias.shape}"
+            f"l1_bias length mismatch: expected {dense_l1_size}, got {l1_bias.shape[0]}"
         )
 
-    if out_weights.shape != (output_bucket_count, dense_l2_size):
+    if l2_weights.ndim != 2:
+        raise ValueError(f"l2_weights must be rank-2, got shape {l2_weights.shape}")
+    dense_l2_size, l2_inputs = l2_weights.shape
+    if l2_inputs != dense_l1_size:
         raise ValueError(
-            f"out_weights shape mismatch: expected {(output_bucket_count, dense_l2_size)}, got {out_weights.shape}"
+            f"l2_weights input mismatch: expected {dense_l1_size}, got {l2_inputs}"
         )
-    if out_bias.shape[0] != output_bucket_count:
+    if l2_bias.shape[0] != dense_l2_size:
         raise ValueError(
-            f"out_bias length mismatch: expected {output_bucket_count}, got {out_bias.shape[0]}"
+            f"l2_bias length mismatch: expected {dense_l2_size}, got {l2_bias.shape[0]}"
+        )
+
+    if out_weights.ndim != 1 or out_weights.shape[0] != dense_l2_size:
+        raise ValueError(
+            f"out_weights shape mismatch: expected {(dense_l2_size,)}, got {out_weights.shape}"
+        )
+    if out_bias.shape[0] != 1:
+        raise ValueError(
+            f"out_bias length mismatch: expected 1, got {out_bias.shape[0]}"
         )
 
     ft_bias_i16 = quantize_clipped(ft_bias, q0, -32768, 32767, np.int16)
     ft_weights_i16 = quantize_clipped(
         ft_weights.reshape(-1), q0, -32768, 32767, np.int16
     )
+    psqt_weights_i16 = quantize_clipped(
+        psqt_weights,
+        qpsqt,
+        -32768,
+        32767,
+        np.int16,
+    )
 
     l1_bias_i32 = quantize_clipped(
-        l1_bias.reshape(-1),
-        q0 * q1,
+        l1_bias,
+        q0 * q0 * q1,
         -2147483648,
         2147483647,
         np.int32,
@@ -174,10 +190,9 @@ def main() -> int:
         l1_weights.reshape(-1), q1, -128, 127, np.int8
     )
 
-    q_cubed = q * q * q
     l2_bias_i32 = quantize_clipped(
-        l2_bias.reshape(-1),
-        q_cubed,
+        l2_bias,
+        q * q,
         -2147483648,
         2147483647,
         np.int32,
@@ -203,20 +218,22 @@ def main() -> int:
         ft_hidden_size=ft_hidden_size,
         dense_layer_1_size=dense_l1_size,
         dense_layer_2_size=dense_l2_size,
-        output_bucket_count=output_bucket_count,
+        output_bucket_count=1,
         ft_biases_i16=ft_bias_i16.tolist(),
         ft_weights_i16=ft_weights_i16.tolist(),
+        psqt_weights_i16=psqt_weights_i16.tolist(),
         l1_biases_i32=l1_bias_i32.tolist(),
         l1_weights_i8=l1_weights_i8.tolist(),
         l2_biases_i32=l2_bias_i32.tolist(),
         l2_weights_i8=l2_weights_i8.tolist(),
-        out_biases_i32=out_bias_i32.tolist(),
+        out_bias_i32=int(out_bias_i32[0]),
         out_weights_i8=out_weights_i8.tolist(),
         feature_set=feature_set,
         bucket_layout_64=bucket_layout,
         q0=q0,
         q1=q1,
         q=q,
+        qpsqt=qpsqt,
         scale=scale,
     )
 
@@ -224,10 +241,8 @@ def main() -> int:
     print("Output format: SYKNNUE4")
     print(f"Bucket count: {max(bucket_layout) + 1}")
     print(f"FT hidden: {ft_hidden_size}")
-    print(
-        f"Dense head: pooled {ft_hidden_size} -> {dense_l1_size} -> expand({dense_expand}) -> "
-        f"{dense_l2_size} -> 1 with {output_bucket_count} buckets"
-    )
+    print(f"Dense head: shared {2 * ft_hidden_size} -> {dense_l1_size} -> {dense_l2_size} -> 1")
+    print("PSQT side path: shared 12288 -> 1")
     print(f"Wrote: {out_path}")
     return 0
 
