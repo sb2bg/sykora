@@ -1,9 +1,7 @@
 use bullet_lib::{
     game::{
-        formats::bulletformat::{ChessBoard, chess::MarlinFormat},
-        formats::sfbinpack::{
-            TrainingDataEntry,
-        },
+        formats::bulletformat::{chess::MarlinFormat, ChessBoard},
+        formats::sfbinpack::TrainingDataEntry,
         inputs::{get_num_buckets, ChessBucketsMirrored},
         outputs::OutputBuckets,
     },
@@ -51,7 +49,8 @@ struct SykoraPieceCountBuckets;
 
 impl SykoraPieceCountBuckets {
     fn bucket_from_piece_count(piece_count: u32) -> u8 {
-        let capped = piece_count.saturating_sub(1) / 4;
+        let non_king_piece_count = piece_count.saturating_sub(2);
+        let capped = non_king_piece_count / 4;
         capped.min((OUTPUT_BUCKETS - 1) as u32) as u8
     }
 }
@@ -293,12 +292,12 @@ fn run_syk4(
                 .round()
                 .quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
-            SavedFormat::id("l1w").transpose().round().quantise::<i16>(64),
-            SavedFormat::id("l1b").round().quantise::<i32>(255 * 64),
-            SavedFormat::id("l2w").transpose().round().quantise::<i16>(64),
-            SavedFormat::id("l2b").round().quantise::<i32>(255 * 64),
-            SavedFormat::id("outw").transpose().round().quantise::<i16>(64),
-            SavedFormat::id("outb").round().quantise::<i32>(255 * 64),
+            SavedFormat::id("l1w").transpose().round().quantise::<i8>(128),
+            SavedFormat::id("l1b").round().quantise::<i32>(255 * 128),
+            SavedFormat::id("l2w").transpose().round().quantise::<i8>(64),
+            SavedFormat::id("l2b").round().quantise::<i32>(64 * 64 * 64),
+            SavedFormat::id("outw").transpose().round().quantise::<i8>(64),
+            SavedFormat::id("outb").round().quantise::<i32>(64 * 64),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs, output_buckets| {
@@ -309,15 +308,19 @@ fn run_syk4(
             l0.init_with_effective_input_size(32);
             l0.weights = l0.weights + expanded_factoriser;
 
-            let l1 = builder.new_affine("l1", 2 * hl_size, OUTPUT_BUCKETS * dense_l1);
-            let l2 = builder.new_affine("l2", dense_l1, OUTPUT_BUCKETS * dense_l2);
+            let dense_expand = 2 * dense_l1;
+
+            let l1 = builder.new_affine("l1", hl_size, OUTPUT_BUCKETS * dense_l1);
+            let l2 = builder.new_affine("l2", dense_expand, OUTPUT_BUCKETS * dense_l2);
             let out = builder.new_affine("out", dense_l2, OUTPUT_BUCKETS);
 
-            let stm_hidden = l0.forward(stm_inputs).screlu();
-            let ntm_hidden = l0.forward(ntm_inputs).screlu();
-            let hidden_layer = stm_hidden.concat(ntm_hidden);
-            let dense_1 = l1.forward(hidden_layer).select(output_buckets).crelu();
-            let dense_2 = l2.forward(dense_1).select(output_buckets).crelu();
+            let stm_pooled = l0.forward(stm_inputs).crelu().pairwise_mul();
+            let ntm_pooled = l0.forward(ntm_inputs).crelu().pairwise_mul();
+            let pooled = stm_pooled.concat(ntm_pooled);
+
+            let dense_1 = l1.forward(pooled).select(output_buckets).crelu();
+            let dense_1_expanded = dense_1.concat(dense_1.abs_pow(2.0));
+            let dense_2 = l2.forward(dense_1_expanded).select(output_buckets).crelu();
             out.forward(dense_2).select(output_buckets)
         });
 
@@ -381,9 +384,12 @@ fn run_syk4(
                 "Input layout: mirrored king buckets ({} buckets), piece-count heads ({})",
                 num_input_buckets, OUTPUT_BUCKETS
             );
+            println!("FT width: {} per perspective, product pooled to {}", hl_size, hl_size / 2);
             println!(
-                "Dense head: {} -> {} -> 1",
-                dense_l1, dense_l2
+                "Dense head: {} -> expand({}) -> {} -> 1",
+                dense_l1,
+                2 * dense_l1,
+                dense_l2
             );
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
@@ -405,9 +411,12 @@ fn run_syk4(
                 "Input layout: mirrored king buckets ({} buckets), piece-count heads ({})",
                 num_input_buckets, OUTPUT_BUCKETS
             );
+            println!("FT width: {} per perspective, product pooled to {}", hl_size, hl_size / 2);
             println!(
-                "Dense head: {} -> {} -> 1",
-                dense_l1, dense_l2
+                "Dense head: {} -> expand({}) -> {} -> 1",
+                dense_l1,
+                2 * dense_l1,
+                dense_l2
             );
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
@@ -420,7 +429,6 @@ fn run_syk4(
 }
 
 fn main() {
-    let hl_size = env_usize("SYK_HIDDEN", 128);
     let dataset_path = env_string("SYK_DATASET", "data/baseline.data");
     let initial_lr = env_f32("SYK_LR_START", 0.001);
     let superbatches = env_usize("SYK_END_SUPERBATCH", 320);
@@ -434,6 +442,10 @@ fn main() {
     let resume_from = env::var("SYK_RESUME").ok();
     let data_format = env_string("SYK_DATA_FORMAT", "bullet");
     let network_format = env_string("SYK_NETWORK_FORMAT", "syk3");
+    let hl_size = env_usize(
+        "SYK_HIDDEN",
+        if network_format == "syk4" { 2048 } else { 128 },
+    );
     let bucket_layout_name = env_string(
         "SYK_BUCKET_LAYOUT",
         if network_format == "syk4" {

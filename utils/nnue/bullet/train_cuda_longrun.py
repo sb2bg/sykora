@@ -44,7 +44,6 @@ SYKORA16_BUCKET_LAYOUT_32 = [
     14, 14, 15, 15,
 ]
 
-
 def expand_mirrored_bucket_layout(layout_32: list[int]) -> list[int]:
     mirror = [0, 1, 2, 3, 3, 2, 1, 0]
     return [int(layout_32[(idx // 8) * 4 + mirror[idx % 8]]) for idx in range(64)]
@@ -76,7 +75,7 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument(
-        "--hidden", type=int, default=0, help="Hidden size (default: 128 for syk3, 1536 for syk4)"
+        "--hidden", type=int, default=0, help="Hidden size (default: 128 for syk3, 2048 for syk4)"
     )
     parser.add_argument(
         "--network-format",
@@ -162,7 +161,7 @@ def main() -> int:
     if not args.bucket_layout:
         args.bucket_layout = "sykora16" if args.network_format == "syk4" else "sykora10"
     if args.hidden <= 0:
-        args.hidden = 1536 if args.network_format == "syk4" else 128
+        args.hidden = 2048 if args.network_format == "syk4" else 128
 
     datasets = [Path(d) for d in args.dataset]
     for dataset in datasets:
@@ -251,8 +250,11 @@ def main() -> int:
             "bucket_layout_64": bucket_layout_64(args.bucket_layout),
             "ft_hidden": args.hidden,
             "dense_l1": args.dense_l1,
+            "dense_expand": args.dense_l1 * 2,
             "dense_l2": args.dense_l2,
             "stack_count": 8,
+            "pooling": "product_pair_halves_q0_255",
+            "output_bucket_rule": "non_king_piece_count_div4",
         },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],

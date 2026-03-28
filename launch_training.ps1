@@ -2,7 +2,6 @@
 # Run from project root: .\launch_training.ps1
 #
 # Dataset: T80-2023 (jun-dec) + T80-2024 (jan-jun) .min-v2.v6 binpacks
-#          plus local non-T80 binpacks in nnue/data/binpack
 # Source:  linrock/test80-2023 + linrock/test80-2024 on HuggingFace
 #
 # Decompress first:
@@ -32,13 +31,8 @@ $env:CUDARC_CUDA_VERSION = $cudaDigits
 # --- Dataset Setup ---
 $dataDir = "$PSScriptRoot\nnue\data\binpack"
 
-# T80-2023 jun-dec + T80-2024 jan-jun, all .min-v2.v6 filtered,
-# plus local non-T80 binpacks.
+# T80-2023 jun-dec + T80-2024 jan-jun, all .min-v2.v6 filtered.
 $binpacks = @(
-    "data_pv-2_diff-100_nodes-5000.binpack",
-    "dfrc_n5000.binpack",
-    "fishpack32.binpack",
-
     # 2023
     "test80-2023-06-jun-2tb7p.min-v2.v6.binpack",
     "test80-2023-07-jul-2tb7p.min-v2.v6.binpack",
@@ -67,29 +61,29 @@ foreach ($bp in $binpacks) {
 
 # --- Training Parameters ---
 # SYKNNUE4 baseline:
-# mirrored king buckets (sykora16) -> FT 1536 -> 16 -> 32 -> 1
+# mirrored king buckets (sykora16) -> FT 2048 -> product pool -> 16 -> expand32 -> 32 -> 1
 $networkFormat = "syk4"
 $bucketLayout = "sykora16"
-$hidden = 1536
+$hidden = 2048
 $denseL1 = 16
 $denseL2 = 32
 $endSuperbatch = 1000
 $lrStart = 0.001
-$wdl = 0.3
+$wdl = 0.25
 $saveRate = 10
 $threads = 8
 
 Write-Host "============================================"
 Write-Host "  Sykora NNUE V4 Training (RTX 4070 Ti SUPER)"
 Write-Host "============================================"
-Write-Host "Data:          T80-2023/2024 filtered set + local non-T80 binpacks"
+Write-Host "Data:          T80-2023/2024 filtered set"
 Write-Host "Filtering:     .min-v2.v6 on T80 inputs"
 Write-Host "Binpacks:      $($binpacks.Count) files"
 Write-Host "Format:        binpack (sfbinpack)"
 Write-Host "Net format:    $networkFormat"
 Write-Host "Bucket layout: $bucketLayout"
 Write-Host "FT hidden:     $hidden"
-Write-Host "Dense head:    $denseL1 -> $denseL2 -> 1"
+Write-Host "Dense head:    $denseL1 -> expand($($denseL1 * 2)) -> $denseL2 -> 1"
 Write-Host "Superbatches:  1 -> $endSuperbatch"
 Write-Host "Save rate:     every $saveRate superbatches"
 Write-Host "Threads:       $threads"
@@ -107,7 +101,7 @@ python "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py" `
     --bullet-repo "$PSScriptRoot\nnue\bullet_repo" `
     --output-root "$PSScriptRoot\nnue\models\bullet" `
     --data-format binpack `
-    --binpack-buffer-mb 16392 `
+    --binpack-buffer-mb 16384 `
     --binpack-threads 6 `
     --network-format $networkFormat `
     --bucket-layout $bucketLayout `
