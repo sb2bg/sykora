@@ -102,7 +102,7 @@ python "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py" `
     --bullet-repo "$PSScriptRoot\nnue\bullet_repo" `
     --output-root "$PSScriptRoot\nnue\models\bullet" `
     --data-format binpack `
-    --binpack-buffer-mb 16384 `
+    --binpack-buffer-mb 12288 `
     --binpack-threads 6 `
     --network-format $networkFormat `
     --bucket-layout $bucketLayout `
