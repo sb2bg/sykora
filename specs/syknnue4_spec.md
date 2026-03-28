@@ -2,48 +2,63 @@
 
 ## Goal
 
-`SYKNNUE4` is the first Sykora NNUE format that moves beyond a pure
-`sparse FT -> linear output` network while keeping the implementation simple
-enough to verify end to end.
+`SYKNNUE4` is the baseline Sykora NNUE format for a large, stable, shared-head
+network.
+
+The design goal is:
+
+- keep the sparse incremental part large
+- remove phase-fragmenting independent output heads
+- add a direct PSQT/material side path so the net can represent large material
+  imbalances and winning endgames cleanly
+- define the integer inference contract explicitly enough to make
+  trainer/export/runtime agreement testable
 
 The baseline `SYKNNUE4` net is:
 
 ```text
 king_buckets_mirrored(16 buckets)
--> shared sparse feature transformer, width 2048, two color-fixed accumulators
--> product pooling per accumulator half-pair
--> concat(us_pooled, them_pooled)            # 2048 inputs
--> 16
--> [linear, squared] expansion to 32
--> 32
--> 1
-with 8 output buckets by non-king piece count
+-> shared sparse hidden branch, width 2048, two color-fixed accumulators
+-> shared sparse PSQT branch, width 1, two color-fixed accumulators
+
+hidden path:
+    concat(screlu(A_us_hidden), screlu(A_them_hidden))   # 4096 inputs
+    -> 32
+    -> 32
+    -> 1
+
+psqt path:
+    psqt_us - psqt_them
+
+final:
+    eval_cp = dense_cp + psqt_cp
 ```
 
 Short form:
 
 ```text
-shared FT: 12288 -> 2048, color-fixed dual perspective
--> product_pool(1024, 1024) per perspective
--> concat(1024, 1024)
--> 16 -> expand(32) -> 32 -> 1, with 8 output buckets
+shared hidden FT: 12288 -> 2048, color-fixed dual perspective
+shared PSQT FT:   12288 -> 1,    color-fixed dual perspective
+-> concat(us, them) -> 32 -> 32 -> 1
+-> add PSQT side output
 ```
 
-This keeps the expensive incremental part sparse and pushes the nonlinearity
-into a very small dense head.
+This follows the older Stockfish-style family more closely than the previous
+bucketed micro-head design.
 
 ## Non-Goals
 
 The first `SYKNNUE4` implementation should not include:
 
+- multiple output heads / phase stacks
+- product pooling
 - threat-side input features
-- PSQT side-channel outputs
 - dual-net switching
 - mixed float/int inference
-- approximate pooling or approximate rescale rules in the reference path
+- approximate rescale rules in the reference path
 
-Those may be added later, but they should not block the first correct
-implementation.
+Those may be revisited later, but they should not block the first correct and
+stable implementation.
 
 ## Architecture
 
@@ -52,17 +67,18 @@ implementation.
 - Feature set: `king_buckets_mirrored`
 - Per-bucket base feature size: `768`
 - Default input bucket count: `16`
+- Output bucket count: `1`
 - Bucket layout: stored explicitly in the file
 - Horizontal mirroring: enabled
 - Training-only factorization is allowed, but exported nets must contain merged
-  real FT weights only
+  real sparse weights only
 
 Per perspective:
 
 ```text
 INPUT_SIZE = 768
 INPUT_BUCKET_COUNT = 16
-OUTPUT_BUCKET_COUNT = 8
+OUTPUT_BUCKET_COUNT = 1
 HORIZONTAL_MIRRORING = true
 ```
 
@@ -86,115 +102,97 @@ Where:
 - `mirrored_square(...)` applies horizontal mirroring so the king is always
   treated as living on one side of the board
 
-### Sparse Feature Transformer
+### Sparse Branches
 
-The FT is shared between perspectives.
-
-For each perspective independently:
+The sparse part has two shared branches:
 
 ```text
-FT: SparseAffine(768, 2048) per king bucket
+hidden FT: SparseAffine(768, 2048) per king bucket
+psqt FT:   SparseAffine(768, 1)    per king bucket
 ```
 
-Maintain two color-fixed accumulators:
+Maintain four color-fixed accumulators:
 
-- `A_white[2048]`
-- `A_black[2048]`
+- `A_white_hidden[2048]`
+- `A_black_hidden[2048]`
+- `A_white_psqt`
+- `A_black_psqt`
 
 For the reference implementation, store these accumulators as `i32`.
-
-This is a bring-up choice, not a final optimization target. It reduces risk
-while validating:
-
-- incremental update correctness
-- trainer/export/runtime agreement
-- bias quantization
-- pooling exactness
 
 At evaluation time:
 
 ```text
 if side_to_move == white:
-    A_us   = A_white
-    A_them = A_black
+    A_us_hidden   = A_white_hidden
+    A_them_hidden = A_black_hidden
+    A_us_psqt     = A_white_psqt
+    A_them_psqt   = A_black_psqt
 else:
-    A_us   = A_black
-    A_them = A_white
+    A_us_hidden   = A_black_hidden
+    A_them_hidden = A_white_hidden
+    A_us_psqt     = A_black_psqt
+    A_them_psqt   = A_white_psqt
 ```
 
-### Product Pooling
+### Hidden Activation
 
-This is the main structural nonlinearity before the head.
-
-Split each accumulator into two halves:
+For each hidden accumulator entry:
 
 ```text
-A_us   = [U0, U1], each length 1024
-A_them = [T0, T1], each length 1024
+u = clamp(A_us_hidden[i],   0, Q0)
+t = clamp(A_them_hidden[i], 0, Q0)
 ```
 
-Clamp each element first:
+Then apply SCReLU:
 
 ```text
-u0 = clamp(U0[i], 0, Q0)
-u1 = clamp(U1[i], 0, Q0)
-t0 = clamp(T0[i], 0, Q0)
-t1 = clamp(T1[i], 0, Q0)
-```
-
-Then compute pooled activations with exact divide-by-`255` normalization:
-
-```text
-P_us[i]   = div_round_nearest_nonneg(u0 * u1, Q0)
-P_them[i] = div_round_nearest_nonneg(t0 * t1, Q0)
-```
-
-With:
-
-```text
-Q0 = 255
+U[i] = u * u
+T[i] = t * t
 ```
 
 Concatenate:
 
 ```text
-P = [P_us, P_them]
+X = [U, T]
 ```
 
 So:
 
-- `P` has length `2048`
-- `P[i]` is stored as `u8`
-- `P[i]` lies in `[0, 255]`
+- `X` has length `4096`
+- each entry is in the `Q0^2` domain
 
-Use the exact divide-by-255 form in the reference implementation.
-Only after correctness is validated may the runtime replace it with a proven
-equivalent optimization.
+This is the only nonlinearity between the sparse transformer and the dense
+head in the baseline design.
 
-### Output Bucket Selection
+### PSQT Side Path
 
-Use `8` output buckets by non-king piece count:
+The PSQT branch is evaluated directly from the sparse scalar outputs:
 
 ```text
-non_king_piece_count = popcount(all occupied squares) - 2
-output_bucket = min(7, non_king_piece_count / 4)
+psqt_delta_int = A_us_psqt - A_them_psqt
 ```
 
-For legal positions, `non_king_piece_count` is in `[0, 30]`.
+This path is intentionally simple. It exists to give the net a direct way to
+represent material imbalance and large coarse advantages that tiny dense heads
+learn poorly from scratch.
 
 ### Dense Head
 
-After pooling, the `2048 -> 16` stage is architecturally dense.
-
-The head for the selected output bucket is:
+The dense head is shared. There are no phase-specific output stacks.
 
 ```text
-L1: Affine(2048, 16)
+L1: Affine(4096, 32)
 -> clipped activation to Q domain
--> mixed [linear, squared] expansion to 32 dims
 -> L2: Affine(32, 32)
 -> clipped activation to Q domain
 -> L3: Affine(32, 1)
+```
+
+Final score:
+
+```text
+eval_cp = dense_cp + psqt_cp
 ```
 
 ## Quantization Contract
@@ -203,16 +201,18 @@ Use the following constants:
 
 ```text
 Q0 = 255
-Q1 = 128
+Q1 = 64
 Q  = 64
+QPSQT = 128
 SCALE = 400
 ```
 
 Interpretation:
 
-- `Q0`: pooled activation clamp / scale
-- `Q1`: first dense layer weight scale
-- `Q`: head activation and later dense-layer weight scale
+- `Q0`: sparse hidden branch clamp / scale
+- `Q1`: first dense-layer weight scale
+- `Q`: later dense-layer activation and weight scale
+- `QPSQT`: PSQT branch scale
 - `SCALE`: final centipawn conversion
 
 All float-to-int quantization in this spec uses:
@@ -227,25 +227,41 @@ quantize_round(x, scale) =
 
 This is “round to nearest, ties away from zero”.
 
-### FT Storage
+### Hidden FT Storage
 
-Export the FT as:
+Export the hidden sparse branch as:
 
-- FT biases: `i16`
-- FT weights: `i16`
+- hidden biases: `i16`
+- hidden weights: `i16`
 
 Quantization:
 
 ```text
-ft_bias_int   = quantize_round(ft_bias_float, Q0)
-ft_weight_int = quantize_round(ft_weight_float, Q0)
+hidden_bias_int   = quantize_round(hidden_bias_float, Q0)
+hidden_weight_int = quantize_round(hidden_weight_float, Q0)
 ```
 
-The reference accumulator domain is therefore the raw integer sum of these
-stored FT values. Pooling clamps accumulator entries into `[0, Q0]` before any
-multiply.
+The reference hidden-accumulator domain is therefore the raw integer sum of
+these stored values. SCReLU clamps hidden accumulator entries into `[0, Q0]`
+before squaring.
 
-### Layer 1: `Affine(2048, 16)`
+### PSQT FT Storage
+
+Export the PSQT sparse branch as:
+
+- PSQT bias: `i32`
+- PSQT weights: `i16`
+
+Quantization:
+
+```text
+psqt_bias_int   = quantize_round(psqt_bias_float, QPSQT)
+psqt_weight_int = quantize_round(psqt_weight_float, QPSQT)
+```
+
+The PSQT branch is a direct sparse scalar accumulator in the `QPSQT` domain.
+
+### Layer 1: `Affine(4096, 32)`
 
 Storage:
 
@@ -254,66 +270,39 @@ Storage:
 
 Input:
 
-- `P[i]` has scale `Q0`
+- `X[i]` is in the `Q0^2` domain
 
 Quantization:
 
 ```text
 W1_int = quantize_round(W1_float, Q1)
-b1_int = quantize_round(b1_float, Q0 * Q1)
+b1_int = quantize_round(b1_float, Q0^2 * Q1)
 ```
 
 Preactivation:
 
 ```text
-z1_int[j] = b1_int[j] + sum_i(P[i] * W1_int[j][i])
+z1_int[j] = b1_int[j] + sum_i(X[i] * W1_int[j][i])
 ```
 
 So the preactivation scale is:
 
 ```text
-Q0 * Q1 = 255 * 128 = 32640
+Q0^2 * Q1 = 255 * 255 * 64 = 4161600
 ```
 
 Rescale into the `Q = 64` activation domain using exact signed rounding:
 
 ```text
-R1_DEN = (Q0 * Q1) / Q = 510
+R1_DEN = (Q0^2 * Q1) / Q = 65025
 u1[j] = div_round_nearest_signed(z1_int[j], R1_DEN)
-t1[j] = clamp(u1[j], 0, Q)
+a1[j] = clamp(u1[j], 0, Q)
 ```
 
 So:
 
-- `t1[j]` lies in `[0, 64]`
-- `t1` is in the `Q` domain
-
-### Mixed Linear/Squared Expansion
-
-For each of the 16 values in `t1`:
-
-```text
-lin[j] = t1[j] * Q
-sq[j]  = t1[j] * t1[j]
-```
-
-Since `Q = 64`, both `lin[j]` and `sq[j]` are in the `Q^2` domain:
-
-```text
-Q^2 = 4096
-```
-
-Concatenate:
-
-```text
-H1 = [lin[0..15], sq[0..15]]
-```
-
-So:
-
-- `H1` has length `32`
-- `H1` scale is `Q^2`
-- `H1` may be stored as `u16` or `i32` scratch in the reference runtime
+- `a1[j]` lies in `[0, 64]`
+- `a1` is in the `Q` domain
 
 ### Layer 2: `Affine(32, 32)`
 
@@ -326,22 +315,20 @@ Quantization:
 
 ```text
 W2_int = quantize_round(W2_float, Q)
-b2_int = quantize_round(b2_float, Q^3)
+b2_int = quantize_round(b2_float, Q^2)
 ```
 
 Preactivation:
 
 ```text
-z2_int[k] = b2_int[k] + sum_j(H1[j] * W2_int[k][j])
+z2_int[k] = b2_int[k] + sum_j(a1[j] * W2_int[k][j])
 ```
 
-Input scale is `Q^2` and weight scale is `Q`, so the preactivation scale is:
+Input scale is `Q` and weight scale is `Q`, so the preactivation scale is:
 
 ```text
-Q^3 = 262144
+Q^2
 ```
-
-Rescale back to the `Q = 64` activation domain:
 
 ```text
 R2_DEN = Q^2 = 4096
@@ -383,13 +370,21 @@ Q^2
 Convert to centipawns:
 
 ```text
-eval_cp = div_round_nearest_signed(z3_int * SCALE, Q^2)
+dense_cp = div_round_nearest_signed(z3_int * SCALE, Q^2)
 ```
 
-with:
+### PSQT Conversion
+
+Convert the direct PSQT side output to centipawns:
 
 ```text
-SCALE = 400
+psqt_cp = div_round_nearest_signed(psqt_delta_int * SCALE, QPSQT)
+```
+
+### Final Evaluation
+
+```text
+eval_cp = dense_cp + psqt_cp
 ```
 
 ## Exact Rounding Rules
@@ -418,10 +413,10 @@ This is “round to nearest, ties away from zero”.
 
 All languages in the project must implement these rules exactly for:
 
-- pooling
-- `z1 -> u1`
-- `z2 -> u2`
-- final centipawn conversion
+- dense rescale after `L1`
+- dense rescale after `L2`
+- final dense centipawn conversion
+- PSQT centipawn conversion
 
 No approximate right-shift substitutions belong in the reference path.
 
@@ -434,35 +429,36 @@ Features:
 - horizontal mirroring
 - 768 inputs per bucket
 
-Transformer:
+Sparse branches:
 
-- shared sparse FT
+- shared hidden FT
 - `12288 -> 2048`
-- two color-fixed accumulators
+- shared PSQT FT
+- `12288 -> 1`
+- four color-fixed accumulators
 - reference accumulator type `i32`
 
-Pooling:
+Dense path:
 
-- split `2048 -> 1024 + 1024`
-- clamp to `[0, 255]`
-- pooled entry = `div_round_nearest_nonneg(a * b, 255)`
-- concatenate `us` and `them` pooled vectors to `2048`
-
-Head:
-
-- 8 output buckets by non-king piece count
-- `L1: 2048 -> 16`
+- clamp hidden accumulators to `[0, 255]`
+- apply SCReLU
+- concatenate `us` and `them` hidden vectors to `4096`
+- `L1: 4096 -> 32`
 - activation clipped to `Q = 64`
-- mixed linear/squared expansion `16 -> 32`
 - `L2: 32 -> 32`
 - activation clipped to `Q = 64`
 - `L3: 32 -> 1`
 
+Side path:
+
+- direct scalar PSQT delta from color-fixed sparse accumulators
+
 Quantization:
 
 - `Q0 = 255`
-- `Q1 = 128`
+- `Q1 = 64`
 - `Q = 64`
+- `QPSQT = 128`
 - `SCALE = 400`
 
 ## File Format
@@ -475,7 +471,11 @@ Magic:
 "SYKNNUE4"
 ```
 
-The format stores merged FT weights plus bucketed dense-head parameters.
+The format stores:
+
+- merged hidden sparse branch
+- merged PSQT sparse branch
+- one shared dense head
 
 ### Header Layout
 
@@ -486,13 +486,14 @@ All values are little-endian.
 u16       version = 4
 u8        feature_set                  # 1 = king_buckets_mirrored
 u16       ft_hidden_size               # baseline 2048
-u16       dense_layer_1_size           # baseline 16
+u16       dense_layer_1_size           # baseline 32
 u16       dense_layer_2_size           # baseline 32
-u8        output_bucket_count          # baseline 8
+u8        output_bucket_count          # baseline 1
 u8        input_bucket_count           # baseline 16
 u16       q0                           # baseline 255
-u16       q1                           # baseline 128
+u16       q1                           # baseline 64
 u16       q                            # baseline 64
+u16       qpsqt                        # baseline 128
 u16       scale                        # baseline 400
 u8[64]    bucket layout by king square
 ```
@@ -504,29 +505,30 @@ Let:
 - `H = ft_hidden_size`
 - `L1 = dense_layer_1_size`
 - `L2 = dense_layer_2_size`
-- `S = output_bucket_count`
 - `I = input_size = 768 * input_bucket_count`
 
 Payload:
 
 ```text
-i16[H]                ft_biases
-i16[I * H]            ft_weights
-i32[S * L1]           l1_biases
-i8[S * L1 * H]        l1_weights
-i32[S * L2]           l2_biases
-i8[S * L2 * 32]       l2_weights
-i32[S]                out_biases
-i8[S * L2]            out_weights
+i16[H]                hidden_ft_biases
+i16[I * H]            hidden_ft_weights
+i32[1]                psqt_bias
+i16[I]                psqt_weights
+i32[L1]               l1_biases
+i8[L1 * 2H]           l1_weights
+i32[L2]               l2_biases
+i8[L2 * L1]           l2_weights
+i32[1]                out_bias
+i8[L2]                out_weights
 ```
 
 Weight order is row-major with output neuron as the major dimension:
 
-- `l1_weights[bucket][out][in]`
-- `l2_weights[bucket][out][in]`
-- `out_weights[bucket][in]`
+- `l1_weights[out][in]`
+- `l2_weights[out][in]`
+- `out_weights[in]`
 
-### Validation Rules
+## Validation Rules
 
 The loader must reject nets where:
 
@@ -534,8 +536,8 @@ The loader must reject nets where:
 - any dimension is zero
 - `feature_set` is unsupported
 - `input_bucket_count == 0`
-- `output_bucket_count == 0`
-- `ft_hidden_size` is odd
+- `output_bucket_count != 1`
+- `ft_hidden_size == 0`
 - any bucket-layout entry is `>= input_bucket_count`
 - any payload-size multiplication overflows
 - payload size does not exactly match the header dimensions
@@ -546,11 +548,12 @@ Reject on overflow during any intermediate size computation before allocating.
 
 ## Size Budget
 
-This format is materially larger than earlier Sykora nets.
-
 Approximate size for the baseline:
 
-- shared FT `16 buckets, 2048 FT, 16 -> expand32 -> 32 -> 1 x8`: about `50 MiB`
+- hidden sparse branch `16 buckets, 2048 hidden`
+- PSQT sparse branch `16 buckets, 1 scalar`
+- shared dense `4096 -> 32 -> 32 -> 1`
+- about `52 MiB`
 
 Recommended loader guard:
 
@@ -564,27 +567,27 @@ Do not remove the guard entirely.
 
 The `SYKNNUE4` evaluation path is:
 
-1. Incrementally update or refresh `A_white` and `A_black`.
-2. Select `A_us` and `A_them` from side to move.
-3. Product-pool each accumulator into `P_us` and `P_them`.
-4. Concatenate into `P`.
-5. Select `output_bucket` from non-king piece count.
+1. Incrementally update or refresh `A_white_hidden`, `A_black_hidden`,
+   `A_white_psqt`, and `A_black_psqt`.
+2. Select `us` and `them` accumulators from side to move.
+3. Clamp hidden accumulators to `[0, Q0]`.
+4. Apply SCReLU on the hidden branch.
+5. Concatenate `us` and `them` hidden activations.
 6. Run `L1`.
 7. Clip into the `Q` domain.
-8. Expand `16 -> 32` via `[linear, squared]`.
-9. Run `L2`.
-10. Clip into the `Q` domain.
-11. Run `L3`.
-12. Convert to centipawns.
+8. Run `L2`.
+9. Clip into the `Q` domain.
+10. Run `L3`.
+11. Convert the dense output to centipawns.
+12. Convert the PSQT delta to centipawns.
+13. Add them.
 
 Dense scratch buffers are per-searcher, not per-node.
 
 Recommended scratch:
 
-- `pooled_us`: `[]u8` length `1024`
-- `pooled_them`: `[]u8` length `1024`
-- `t1`: `[]i32` length `16`
-- `h1`: `[]i32` length `32`
+- `hidden_cat`: `[]i32` length `4096`
+- `a1`: `[]i32` length `32`
 - `a2`: `[]i32` length `32`
 
 ## Trainer / Exporter Requirements
@@ -593,20 +596,21 @@ The training/export pipeline must follow the same integer contract as runtime.
 
 Required properties:
 
-- training may use FT factorization, but exported FT weights must be merged
+- training may use sparse factorization, but exported sparse weights must be
+  merged
 - exported tensor shapes must match the header exactly
 - quantization scales must match the header exactly
 - reference exporter and Zig runtime must agree on:
-  - pooling
-  - bucket selection
+  - hidden activation clamp and SCReLU
+  - PSQT delta sign convention
   - all rescale rules
   - final centipawn conversion
 
 The exporter must support a bit-exact verification mode against the Zig runtime
 on at least:
 
-- one opening or middlegame position
-- one reduced-material endgame position
+- one quiet opening or middlegame position
+- one simple winning endgame position
 
 The quantized Python eval and Zig eval must match exactly.
 
@@ -618,15 +622,15 @@ Implementation order:
 2. verify trainer/export/runtime agreement
 3. verify incremental update correctness
 4. only then optimize:
-   - replace exact `/255` with a faster equivalent if proven identical
    - reduce accumulator storage width if safe
    - add sparse execution tricks where useful
+   - revisit output buckets only after the shared-head baseline is stable
 
 This architecture should be treated as:
 
 ```text
-a product-pooled king-bucket NNUE with an explicit integer inference contract
+a shared-head king-bucket NNUE with a direct PSQT side output
 ```
 
-That makes it a better starting point for a first correct implementation than
-an aggressively optimized but underspecified design.
+That makes it a better starting point for a first strong and stable
+implementation than a fragmented bucketed-head design.
