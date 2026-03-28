@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument(
-        "--hidden", type=int, default=0, help="Hidden size (default: 2048)"
+        "--hidden", type=int, default=0, help="Hidden size (default: 768)"
     )
     parser.add_argument(
         "--network-format",
@@ -74,18 +74,6 @@ def parse_args() -> argparse.Namespace:
         choices=["sykora16"],
         default="",
         help="Mirrored king-bucket layout (default: sykora16)",
-    )
-    parser.add_argument(
-        "--dense-l1",
-        type=int,
-        default=32,
-        help="SYKNNUE4 dense layer 1 width",
-    )
-    parser.add_argument(
-        "--dense-l2",
-        type=int,
-        default=32,
-        help="SYKNNUE4 dense layer 2 width",
     )
     parser.add_argument(
         "--start-superbatch", type=int, default=1, help="Start superbatch"
@@ -147,7 +135,7 @@ def main() -> int:
     if not args.bucket_layout:
         args.bucket_layout = "sykora16"
     if args.hidden <= 0:
-        args.hidden = 2048
+        args.hidden = 768
 
     datasets = [Path(d) for d in args.dataset]
     for dataset in datasets:
@@ -168,9 +156,6 @@ def main() -> int:
 
     if args.hidden <= 0:
         print("--hidden must be > 0", file=sys.stderr)
-        return 2
-    if args.dense_l1 <= 0 or args.dense_l2 <= 0:
-        print("--dense-l1 and --dense-l2 must be > 0", file=sys.stderr)
         return 2
     if args.start_superbatch <= 0 or args.end_superbatch < args.start_superbatch:
         print("Invalid superbatch bounds", file=sys.stderr)
@@ -199,8 +184,6 @@ def main() -> int:
             "SYK_HIDDEN": str(args.hidden),
             "SYK_NETWORK_FORMAT": args.network_format,
             "SYK_BUCKET_LAYOUT": args.bucket_layout,
-            "SYK_DENSE_L1": str(args.dense_l1),
-            "SYK_DENSE_L2": str(args.dense_l2),
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
             "SYK_START_SUPERBATCH": str(args.start_superbatch),
@@ -235,20 +218,14 @@ def main() -> int:
             "bucket_layout_name": args.bucket_layout,
             "bucket_layout_64": bucket_layout_64(args.bucket_layout),
             "ft_hidden": args.hidden,
-            "dense_l1": args.dense_l1,
-            "dense_l2": args.dense_l2,
-            "output_bucket_count": 1,
             "hidden_activation": "screlu",
-            "psqt_side_channel": True,
-            "output_bucket_rule": "shared",
+            "head": "shared_linear",
         },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],
             "SYK_HIDDEN": env["SYK_HIDDEN"],
             "SYK_NETWORK_FORMAT": env["SYK_NETWORK_FORMAT"],
             "SYK_BUCKET_LAYOUT": env["SYK_BUCKET_LAYOUT"],
-            "SYK_DENSE_L1": env["SYK_DENSE_L1"],
-            "SYK_DENSE_L2": env["SYK_DENSE_L2"],
             "SYK_LR_START": env["SYK_LR_START"],
             "SYK_LR_FINAL": env["SYK_LR_FINAL"],
             "SYK_START_SUPERBATCH": env["SYK_START_SUPERBATCH"],

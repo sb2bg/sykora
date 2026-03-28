@@ -61,12 +61,10 @@ foreach ($bp in $binpacks) {
 
 # --- Training Parameters ---
 # SYKNNUE4 baseline:
-# mirrored king buckets (sykora16) -> FT 2048 + PSQT side path -> shared 32 -> 32 -> 1
+# mirrored king buckets (sykora16) -> FT 768 -> shared linear output
 $networkFormat = "syk4"
 $bucketLayout = "sykora16"
-$hidden = 2048
-$denseL1 = 32
-$denseL2 = 32
+$hidden = 768
 $endSuperbatch = 600
 $lrStart = 0.001
 $wdl = 0.25
@@ -83,8 +81,7 @@ Write-Host "Format:        binpack (sfbinpack)"
 Write-Host "Net format:    $networkFormat"
 Write-Host "Bucket layout: $bucketLayout"
 Write-Host "FT hidden:     $hidden"
-Write-Host "Dense head:    shared $($hidden * 2) -> $denseL1 -> $denseL2 -> 1"
-Write-Host "PSQT path:     enabled"
+Write-Host "Dense head:    linear $($hidden * 2) -> 1"
 Write-Host "Superbatches:  1 -> $endSuperbatch"
 Write-Host "Save rate:     every $saveRate superbatches"
 Write-Host "Threads:       $threads"
@@ -107,8 +104,6 @@ python "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py" `
     --network-format $networkFormat `
     --bucket-layout $bucketLayout `
     --hidden $hidden `
-    --dense-l1 $denseL1 `
-    --dense-l2 $denseL2 `
     --end-superbatch $endSuperbatch `
     --save-rate $saveRate `
     --threads $threads `

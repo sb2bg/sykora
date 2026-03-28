@@ -16,8 +16,6 @@ from common import (  # noqa: E402
     SCALE,
     V4_Q0,
     V4_Q,
-    V4_Q1,
-    V4_QPSQT,
     SYKORA16_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
 )
@@ -78,32 +76,25 @@ def take_f32(buf, offset: int, count: int):
 
 
 def expected_raw_sizes(
-    *, bucket_count: int, ft_hidden: int, dense_l1: int, dense_l2: int
+    *, bucket_count: int, ft_hidden: int
 ) -> dict[str, int]:
     input_size = 768 * bucket_count
     return {
         "spec_merged_ft": (
             input_size * ft_hidden
             + ft_hidden
-            + input_size
-            + (2 * ft_hidden) * dense_l1
-            + dense_l1
-            + dense_l1 * dense_l2
-            + dense_l2
-            + dense_l2
+            + (2 * ft_hidden)
             + 1
         ),
     }
 
 
 def detect_layout(
-    *, raw_len: int, bucket_count: int, ft_hidden: int, dense_l1: int, dense_l2: int
+    *, raw_len: int, bucket_count: int, ft_hidden: int
 ) -> str:
     sizes = expected_raw_sizes(
         bucket_count=bucket_count,
         ft_hidden=ft_hidden,
-        dense_l1=dense_l1,
-        dense_l2=dense_l2,
     )
     for name, expected in sizes.items():
         if raw_len == expected:
@@ -139,9 +130,6 @@ def parse_network_config(run_meta: dict) -> dict:
         "format": network_format,
         "bucket_layout_64": bucket_layout_64,
         "ft_hidden": int(network.get("ft_hidden") or env["SYK_HIDDEN"]),
-        "dense_l1": int(network.get("dense_l1") or env["SYK_DENSE_L1"]),
-        "dense_l2": int(network.get("dense_l2") or env["SYK_DENSE_L2"]),
-        "output_bucket_count": int(network.get("output_bucket_count", 1)),
     }
 
 
@@ -160,34 +148,20 @@ def main() -> int:
     bucket_layout_64 = [int(v) for v in network["bucket_layout_64"]]
     bucket_count = max(bucket_layout_64) + 1
     ft_hidden = int(network["ft_hidden"])
-    dense_l1 = int(network["dense_l1"])
-    dense_l2 = int(network["dense_l2"])
-    output_bucket_count = int(network["output_bucket_count"])
     input_size = 768 * bucket_count
-    if output_bucket_count != 1:
-        raise ValueError(
-            f"SYKNNUE4 checkpoint decoder currently expects output_bucket_count == 1, got {output_bucket_count}"
-        )
 
     raw = np.fromfile(raw_path, dtype="<f4")
     layout = detect_layout(
         raw_len=raw.shape[0],
         bucket_count=bucket_count,
         ft_hidden=ft_hidden,
-        dense_l1=dense_l1,
-        dense_l2=dense_l2,
     )
     offset = 0
 
     l0w, offset = take_f32(raw, offset, input_size * ft_hidden)
     l0b, offset = take_f32(raw, offset, ft_hidden)
-    psqtw, offset = take_f32(raw, offset, input_size)
-    l1w, offset = take_f32(raw, offset, (2 * ft_hidden) * dense_l1)
-    l1b, offset = take_f32(raw, offset, dense_l1)
-    l2w, offset = take_f32(raw, offset, dense_l1 * dense_l2)
-    l2b, offset = take_f32(raw, offset, dense_l2)
-    l3w, offset = take_f32(raw, offset, dense_l2)
-    l3b, offset = take_f32(raw, offset, 1)
+    outw, offset = take_f32(raw, offset, 2 * ft_hidden)
+    outb, offset = take_f32(raw, offset, 1)
 
     if offset != raw.shape[0]:
         raise ValueError(
@@ -196,22 +170,8 @@ def main() -> int:
 
     ft_weights = l0w.reshape(input_size, ft_hidden)
     ft_bias = l0b.reshape(ft_hidden)
-    psqt_weights = psqtw.reshape(input_size)
-
-    l1_weights = (
-        l1w.reshape(2 * ft_hidden, dense_l1)
-        .T.reshape(dense_l1, 2 * ft_hidden)
-    )
-    l1_bias = l1b.reshape(dense_l1)
-
-    l2_weights = (
-        l2w.reshape(dense_l1, dense_l2)
-        .T.reshape(dense_l2, dense_l1)
-    )
-    l2_bias = l2b.reshape(dense_l2)
-
-    out_weights = l3w.reshape(dense_l2)
-    out_bias = l3b.reshape(1)
+    out_weights = outw.reshape(2 * ft_hidden)
+    out_bias = outb.reshape(1)
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,21 +179,14 @@ def main() -> int:
         out_path,
         ft_weights=ft_weights.astype(np.float32),
         ft_bias=ft_bias.astype(np.float32),
-        psqt_weights=psqt_weights.astype(np.float32),
-        l1_weights=l1_weights.astype(np.float32),
-        l1_bias=l1_bias.astype(np.float32),
-        l2_weights=l2_weights.astype(np.float32),
-        l2_bias=l2_bias.astype(np.float32),
         out_weights=out_weights.astype(np.float32),
         out_bias=out_bias.astype(np.float32),
         bucket_layout_64=np.asarray(bucket_layout_64, dtype=np.uint8),
         feature_set=np.asarray([1], dtype=np.uint8),
         input_bucket_count=np.asarray([bucket_count], dtype=np.uint8),
-        output_bucket_count=np.asarray([output_bucket_count], dtype=np.uint8),
+        activation_type=np.asarray([1], dtype=np.uint8),
         q0=np.asarray([V4_Q0], dtype=np.uint16),
-        q1=np.asarray([V4_Q1], dtype=np.uint16),
         q=np.asarray([V4_Q], dtype=np.uint16),
-        qpsqt=np.asarray([V4_QPSQT], dtype=np.uint16),
         scale=np.asarray([SCALE], dtype=np.uint16),
     )
 
@@ -243,8 +196,7 @@ def main() -> int:
     print(f"Detected raw layout: {layout}")
     print(f"Bucket count: {bucket_count}")
     print(f"FT hidden: {ft_hidden}")
-    print(f"Dense head: shared {2 * ft_hidden} -> {dense_l1} -> {dense_l2} -> 1")
-    print("PSQT side path: shared 12288 -> 1")
+    print(f"Dense head: linear {2 * ft_hidden} -> 1")
     print(f"Wrote: {out_path}")
     return 0
 

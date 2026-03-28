@@ -67,8 +67,6 @@ fn run_syk4(
     dataset_paths: &[&str],
     data_format: &str,
     hl_size: usize,
-    dense_l1: usize,
-    dense_l2: usize,
     initial_lr: f32,
     final_lr: f32,
     start_superbatch: usize,
@@ -98,15 +96,8 @@ fn run_syk4(
                 .round()
                 .quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
-            SavedFormat::id("psqtw").round().quantise::<i16>(128),
-            SavedFormat::id("l1w").transpose().round().quantise::<i8>(64),
-            SavedFormat::id("l1b")
-                .round()
-                .quantise::<i32>(255 * 255 * 64),
-            SavedFormat::id("l2w").transpose().round().quantise::<i8>(64),
-            SavedFormat::id("l2b").round().quantise::<i32>(64 * 64),
-            SavedFormat::id("outw").round().quantise::<i8>(64),
-            SavedFormat::id("outb").round().quantise::<i32>(64 * 64),
+            SavedFormat::id("outw").round().quantise::<i16>(64),
+            SavedFormat::id("outb").round().quantise::<i32>(255 * 64),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
@@ -117,23 +108,12 @@ fn run_syk4(
             l0.init_with_effective_input_size(32);
             l0.weights = l0.weights + expanded_factoriser;
 
-            let psqt = builder.new_affine("psqt", 768 * num_input_buckets, 1);
-            psqt.init_with_effective_input_size(32);
-
-            let l1 = builder.new_affine("l1", 2 * hl_size, dense_l1);
-            let l2 = builder.new_affine("l2", dense_l1, dense_l2);
-            let out = builder.new_affine("out", dense_l2, 1);
+            let out = builder.new_affine("out", 2 * hl_size, 1);
 
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
             let hidden = stm_hidden.concat(ntm_hidden);
-
-            let dense_1 = l1.forward(hidden).crelu();
-            let dense_2 = l2.forward(dense_1).crelu();
-            let dense_out = out.forward(dense_2);
-
-            let psqt_delta = psqt.forward(stm_inputs) - psqt.forward(ntm_inputs);
-            dense_out + psqt_delta
+            out.forward(hidden)
         });
 
     let stricter_clipping = AdamWParams {
@@ -196,8 +176,8 @@ fn run_syk4(
                 "Input layout: mirrored king buckets ({} buckets), shared head",
                 num_input_buckets
             );
-            println!("FT width: {} per perspective, with PSQT side branch", hl_size);
-            println!("Dense head: {} -> {} -> 1", dense_l1, dense_l2);
+            println!("FT width: {} per perspective", hl_size);
+            println!("Dense head: linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -218,8 +198,8 @@ fn run_syk4(
                 "Input layout: mirrored king buckets ({} buckets), shared head",
                 num_input_buckets
             );
-            println!("FT width: {} per perspective, with PSQT side branch", hl_size);
-            println!("Dense head: {} -> {} -> 1", dense_l1, dense_l2);
+            println!("FT width: {} per perspective", hl_size);
+            println!("Dense head: linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -244,10 +224,8 @@ fn main() {
     let resume_from = env::var("SYK_RESUME").ok();
     let data_format = env_string("SYK_DATA_FORMAT", "bullet");
     let network_format = env_string("SYK_NETWORK_FORMAT", "syk4");
-    let hl_size = env_usize("SYK_HIDDEN", 2048);
+    let hl_size = env_usize("SYK_HIDDEN", 768);
     let bucket_layout_name = env_string("SYK_BUCKET_LAYOUT", "sykora16");
-    let dense_l1 = env_usize("SYK_DENSE_L1", 16);
-    let dense_l2 = env_usize("SYK_DENSE_L2", 32);
 
     let bucket_layout = selected_bucket_layout(&bucket_layout_name);
     let bucket_layout_name = selected_bucket_layout_name(&bucket_layout_name);
@@ -267,8 +245,6 @@ fn main() {
         &dataset_paths,
         &data_format,
         hl_size,
-        dense_l1,
-        dense_l2,
         initial_lr,
         final_lr,
         start_superbatch,

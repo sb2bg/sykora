@@ -14,9 +14,7 @@ LEGACY_INPUT_SIZE = 768
 QA = 255
 QB = 64
 V4_Q0 = 255
-V4_Q1 = 64
 V4_Q = 64
-V4_QPSQT = 128
 SCALE = 400
 MAGIC_V3 = b"SYKNNUE3"
 FORMAT_VERSION_V3 = 3
@@ -225,26 +223,14 @@ def syk_nnue_v4_payload_size(
     feature_set: int,
     bucket_layout_64: List[int],
     ft_hidden_size: int,
-    dense_layer_1_size: int,
-    dense_layer_2_size: int,
-    output_bucket_count: int,
 ) -> int:
     input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
     h = ft_hidden_size
-    l1 = dense_layer_1_size
-    l2 = dense_layer_2_size
-    if output_bucket_count != 1:
-        raise ValueError("SYKNNUE4 currently requires output_bucket_count == 1")
     return (
         2 * h
         + 2 * input_size * h
-        + 2 * input_size
-        + 4 * l1
-        + l1 * (2 * h)
-        + 4 * l2
-        + l2 * l1
         + 4
-        + l2
+        + 4 * h
     )
 
 
@@ -252,24 +238,15 @@ def write_syk_nnue_v4(
     path: Path,
     *,
     ft_hidden_size: int,
-    dense_layer_1_size: int,
-    dense_layer_2_size: int,
-    output_bucket_count: int,
     ft_biases_i16: List[int],
     ft_weights_i16: List[int],
-    psqt_weights_i16: List[int],
-    l1_biases_i32: List[int],
-    l1_weights_i8: List[int],
-    l2_biases_i32: List[int],
-    l2_weights_i8: List[int],
     out_bias_i32: int,
-    out_weights_i8: List[int],
+    out_weights_i16: List[int],
+    activation_type: int = ACTIVATION_SCRELU,
     feature_set: int = FEATURE_SET_KING_BUCKETS_MIRRORED,
     bucket_layout_64: List[int] | None = None,
     q0: int = V4_Q0,
-    q1: int = V4_Q1,
     q: int = V4_Q,
-    qpsqt: int = V4_QPSQT,
     scale: int = SCALE,
 ) -> None:
     if feature_set != FEATURE_SET_KING_BUCKETS_MIRRORED:
@@ -278,34 +255,18 @@ def write_syk_nnue_v4(
         raise ValueError("bucket_layout_64 must contain exactly 64 entries")
     if ft_hidden_size <= 0:
         raise ValueError("ft_hidden_size must be > 0")
-    if dense_layer_1_size <= 0 or dense_layer_2_size <= 0:
-        raise ValueError("dense layer sizes must be > 0")
-    if output_bucket_count <= 0 or output_bucket_count > 255:
-        raise ValueError("output_bucket_count must fit in u8 and be > 0")
-    if output_bucket_count != 1:
-        raise ValueError("SYKNNUE4 currently requires output_bucket_count == 1")
+    if activation_type not in (ACTIVATION_RELU, ACTIVATION_SCRELU):
+        raise ValueError("unsupported activation_type")
 
     input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
     input_bucket_count = num_buckets(bucket_layout_64)
     h = ft_hidden_size
-    l1 = dense_layer_1_size
-    l2 = dense_layer_2_size
 
     if len(ft_biases_i16) != h:
         raise ValueError("ft_biases length mismatch")
     if len(ft_weights_i16) != input_size * h:
         raise ValueError("ft_weights length mismatch")
-    if len(psqt_weights_i16) != input_size:
-        raise ValueError("psqt_weights length mismatch")
-    if len(l1_biases_i32) != l1:
-        raise ValueError("l1_biases length mismatch")
-    if len(l1_weights_i8) != l1 * (2 * h):
-        raise ValueError("l1_weights length mismatch")
-    if len(l2_biases_i32) != l2:
-        raise ValueError("l2_biases length mismatch")
-    if len(l2_weights_i8) != l2 * l1:
-        raise ValueError("l2_weights length mismatch")
-    if len(out_weights_i8) != l2:
+    if len(out_weights_i16) != 2 * h:
         raise ValueError("out_weights length mismatch")
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -314,22 +275,13 @@ def write_syk_nnue_v4(
         handle.write(struct.pack("<H", FORMAT_VERSION_V4))
         handle.write(struct.pack("<B", feature_set))
         handle.write(struct.pack("<H", h))
-        handle.write(struct.pack("<H", l1))
-        handle.write(struct.pack("<H", l2))
-        handle.write(struct.pack("<B", output_bucket_count))
+        handle.write(struct.pack("<B", activation_type))
         handle.write(struct.pack("<B", input_bucket_count))
         handle.write(struct.pack("<H", q0))
-        handle.write(struct.pack("<H", q1))
         handle.write(struct.pack("<H", q))
-        handle.write(struct.pack("<H", qpsqt))
         handle.write(struct.pack("<H", scale))
         handle.write(bytes(int(v) for v in bucket_layout_64))
+        handle.write(struct.pack("<i", int(out_bias_i32)))
         handle.write(_pack_i16(ft_biases_i16))
         handle.write(_pack_i16(ft_weights_i16))
-        handle.write(_pack_i16(psqt_weights_i16))
-        handle.write(_pack_i32(l1_biases_i32))
-        handle.write(_pack_i8(l1_weights_i8))
-        handle.write(_pack_i32(l2_biases_i32))
-        handle.write(_pack_i8(l2_weights_i8))
-        handle.write(struct.pack("<i", int(out_bias_i32)))
-        handle.write(_pack_i8(out_weights_i8))
+        handle.write(_pack_i16(out_weights_i16))
