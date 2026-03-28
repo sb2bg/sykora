@@ -15,7 +15,9 @@ pub const Q: i32 = 64;
 pub const SCALE: i32 = 400;
 const MAX_NETWORK_BYTES = 64 * 1024 * 1024;
 
+const MAGIC_V3 = "SYKNNUE3";
 const MAGIC_V4 = "SYKNNUE4";
+const FORMAT_VERSION_V3: u16 = 3;
 const FORMAT_VERSION_V4: u16 = 4;
 
 pub const FeatureSet = enum(u8) {
@@ -38,6 +40,12 @@ pub const LoadError = error{
 
 /// NNUE format used by Sykora (little-endian).
 pub const Network = struct {
+    pub const V3Head = struct {
+        activation_type: u8, // 0 = ReLU, 1 = SCReLU
+        output_weights: []i16, // [2 * H]
+        output_bias: i32,
+    };
+
     pub const V4Head = struct {
         dense_l1_size: u16,
         dense_l2_size: u16,
@@ -61,22 +69,35 @@ pub const Network = struct {
     ft_hidden_size: u16,
     ft_biases: []i16,
     ft_weights: []i16,
-    v4: V4Head,
+    head: union(enum) {
+        v3: V3Head,
+        v4: V4Head,
+    },
 
     pub fn deinit(self: *Network) void {
         self.allocator.free(self.ft_biases);
         self.allocator.free(self.ft_weights);
-        self.allocator.free(self.v4.l1_biases);
-        self.allocator.free(self.v4.l1_weights);
-        self.allocator.free(self.v4.l2_biases);
-        self.allocator.free(self.v4.l2_weights);
-        self.allocator.free(self.v4.out_biases);
-        self.allocator.free(self.v4.out_weights);
+        switch (self.head) {
+            .v3 => |v3| {
+                self.allocator.free(v3.output_weights);
+            },
+            .v4 => |v4| {
+                self.allocator.free(v4.l1_biases);
+                self.allocator.free(v4.l1_weights);
+                self.allocator.free(v4.l2_biases);
+                self.allocator.free(v4.l2_weights);
+                self.allocator.free(v4.out_biases);
+                self.allocator.free(v4.out_weights);
+            },
+        }
     }
 
     pub fn loadFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
         if (data.len < 8) return error.InvalidNetwork;
 
+        if (std.mem.eql(u8, data[0..8], MAGIC_V3)) {
+            return loadFromBytesV3(allocator, data);
+        }
         if (std.mem.eql(u8, data[0..8], MAGIC_V4)) {
             return loadFromBytesV4(allocator, data);
         }
@@ -172,6 +193,72 @@ fn computeV4PayloadBytes(
     total = checkedAddU64(total, checkedMulU64(out_weight_count, @sizeOf(i8)) orelse return null) orelse return null;
 
     return total;
+}
+
+fn loadFromBytesV3(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
+    var pos: usize = 8;
+
+    const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    if (version != FORMAT_VERSION_V3) return error.UnsupportedVersion;
+
+    if (pos >= data.len) return error.InvalidNetwork;
+    const feature_set = std.meta.intToEnum(FeatureSet, data[pos]) catch return error.InvalidNetwork;
+    pos += 1;
+
+    const hidden_size_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const hidden_size: usize = @intCast(hidden_size_u16);
+    if (hidden_size == 0 or hidden_size > MAX_HIDDEN_SIZE) return error.InvalidNetwork;
+
+    if (pos >= data.len) return error.InvalidNetwork;
+    const activation_type = data[pos];
+    pos += 1;
+    if (activation_type > 1) return error.InvalidNetwork;
+
+    const bucket_count_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    if (bucket_count_u16 == 0 or bucket_count_u16 > 255) return error.InvalidNetwork;
+    if (feature_set == .legacy_psqt and bucket_count_u16 != 1) return error.InvalidNetwork;
+    const bucket_count: u8 = @intCast(bucket_count_u16);
+
+    var bucket_layout = [_]u8{0} ** 64;
+    for (&bucket_layout) |*entry| {
+        if (pos >= data.len) return error.InvalidNetwork;
+        entry.* = data[pos];
+        pos += 1;
+        if (entry.* >= bucket_count) return error.InvalidNetwork;
+    }
+
+    const output_bias = readBytesInt(i32, data, &pos) orelse return error.InvalidNetwork;
+    const ft_biases = try allocAndReadInts(i16, allocator, data, &pos, hidden_size);
+    errdefer allocator.free(ft_biases);
+
+    const input_size = switch (feature_set) {
+        .legacy_psqt => LEGACY_INPUT_SIZE,
+        .king_buckets_mirrored => LEGACY_INPUT_SIZE * @as(usize, bucket_count),
+    };
+    const ft_weights = try allocAndReadInts(i16, allocator, data, &pos, input_size * hidden_size);
+    errdefer allocator.free(ft_weights);
+
+    const output_weights = try allocAndReadInts(i16, allocator, data, &pos, 2 * hidden_size);
+    errdefer allocator.free(output_weights);
+
+    if (pos != data.len) return error.InvalidNetwork;
+
+    return Network{
+        .allocator = allocator,
+        .feature_set = feature_set,
+        .bucket_count = bucket_count,
+        .bucket_layout = bucket_layout,
+        .ft_hidden_size = hidden_size_u16,
+        .ft_biases = ft_biases,
+        .ft_weights = ft_weights,
+        .head = .{
+            .v3 = .{
+                .activation_type = activation_type,
+                .output_weights = output_weights,
+                .output_bias = output_bias,
+            },
+        },
+    };
 }
 
 fn loadFromBytesV4(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
@@ -282,20 +369,22 @@ fn loadFromBytesV4(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         .ft_hidden_size = ft_hidden_size_u16,
         .ft_biases = ft_biases,
         .ft_weights = ft_weights,
-        .v4 = .{
-            .dense_l1_size = dense_l1_size_u16,
-            .dense_l2_size = dense_l2_size_u16,
-            .output_bucket_count = output_bucket_count,
-            .q0 = q0,
-            .q1 = q1,
-            .q = q,
-            .scale = scale,
-            .l1_biases = l1_biases,
-            .l1_weights = l1_weights,
-            .l2_biases = l2_biases,
-            .l2_weights = l2_weights,
-            .out_biases = out_biases,
-            .out_weights = out_weights,
+        .head = .{
+            .v4 = .{
+                .dense_l1_size = dense_l1_size_u16,
+                .dense_l2_size = dense_l2_size_u16,
+                .output_bucket_count = output_bucket_count,
+                .q0 = q0,
+                .q1 = q1,
+                .q = q,
+                .scale = scale,
+                .l1_biases = l1_biases,
+                .l1_weights = l1_weights,
+                .l2_biases = l2_biases,
+                .l2_weights = l2_weights,
+                .out_biases = out_biases,
+                .out_weights = out_weights,
+            },
         },
     };
 }
@@ -924,6 +1013,38 @@ fn evaluateV4FromAccumulators(
     return @intCast(divRoundNearestSigned(z3 * scale, r2_den));
 }
 
+fn evaluateV3FromAccumulators(
+    net: *const Network,
+    head: *const Network.V3Head,
+    acc: *const AccumulatorPair,
+    stm_is_white: bool,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const use_screlu = head.activation_type == 1;
+    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
+    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
+
+    var sum: i64 = 0;
+    for (0..hidden_size) |idx| {
+        const us = clampToActivationRange(us_acc[idx], Q0);
+        const them = clampToActivationRange(them_acc[idx], Q0);
+
+        if (use_screlu) {
+            sum += @as(i64, us) * @as(i64, us) * @as(i64, head.output_weights[idx]);
+            sum += @as(i64, them) * @as(i64, them) * @as(i64, head.output_weights[hidden_size + idx]);
+        } else {
+            sum += @as(i64, us) * @as(i64, head.output_weights[idx]);
+            sum += @as(i64, them) * @as(i64, head.output_weights[hidden_size + idx]);
+        }
+    }
+
+    if (use_screlu) {
+        sum = @divTrunc(sum, Q0);
+    }
+    sum += head.output_bias;
+    return @intCast(@divTrunc(sum * SCALE, Q0 * Q));
+}
+
 /// Evaluate using pre-computed accumulators (activation + head only).
 /// Returns score from the side-to-move perspective.
 pub fn evaluateFromAccumulators(
@@ -932,7 +1053,10 @@ pub fn evaluateFromAccumulators(
     b: *Board,
 ) i32 {
     const stm_is_white = b.board.move == .white;
-    return evaluateV4FromAccumulators(net, &net.v4, acc, stm_is_white, b.board);
+    return switch (net.head) {
+        .v3 => |*head| evaluateV3FromAccumulators(net, head, acc, stm_is_white),
+        .v4 => |*head| evaluateV4FromAccumulators(net, head, acc, stm_is_white, b.board),
+    };
 }
 
 /// Returns score from the side-to-move perspective, same convention as classical eval.
