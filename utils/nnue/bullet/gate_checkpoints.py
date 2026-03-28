@@ -23,9 +23,14 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing Bullet checkpoint folders",
     )
     parser.add_argument(
-        "--converter",
-        default="utils/nnue/bullet/bullet_quantised_to_sknnue.py",
-        help="Path to quantised->sknnue converter",
+        "--raw-to-npz",
+        default="utils/nnue/bullet/checkpoint_raw_to_npz.py",
+        help="Path to raw.bin -> NPZ converter",
+    )
+    parser.add_argument(
+        "--npz-to-net",
+        default="utils/nnue/bullet/export_npz_to_syk4.py",
+        help="Path to NPZ -> SYKNNUE4 exporter",
     )
     parser.add_argument(
         "--engine", default="./zig-out/bin/sykora", help="Engine under test"
@@ -122,9 +127,14 @@ def main() -> int:
         print(f"Checkpoint dir not found: {ckpt_root}", file=sys.stderr)
         return 1
 
-    converter = Path(args.converter)
-    if not converter.is_file():
-        print(f"Converter not found: {converter}", file=sys.stderr)
+    raw_to_npz = Path(args.raw_to_npz)
+    if not raw_to_npz.is_file():
+        print(f"raw->npz converter not found: {raw_to_npz}", file=sys.stderr)
+        return 1
+
+    npz_to_net = Path(args.npz_to_net)
+    if not npz_to_net.is_file():
+        print(f"npz->net exporter not found: {npz_to_net}", file=sys.stderr)
         return 1
 
     engine = Path(args.engine)
@@ -147,13 +157,13 @@ def main() -> int:
         [
             p
             for p in ckpt_root.iterdir()
-            if p.is_dir() and (p / "quantised.bin").is_file()
+            if p.is_dir() and (p / "raw.bin").is_file()
         ],
         key=checkpoint_sort_key,
     )
     if not ckpts:
         print(
-            f"No checkpoints with quantised.bin found under: {ckpt_root}",
+            f"No checkpoints with raw.bin found under: {ckpt_root}",
             file=sys.stderr,
         )
         return 1
@@ -161,13 +171,24 @@ def main() -> int:
     records: list[dict] = []
 
     for ckpt in ckpts:
-        net_out = nets_dir / f"{ckpt.name}.sknnue"
+        npz_out = nets_dir / f"{ckpt.name}.npz"
+        net_out = nets_dir / f"{ckpt.name}.sknnue4"
         run_capture(
             [
                 sys.executable,
-                str(converter),
+                str(raw_to_npz),
                 "--input",
-                str(ckpt / "quantised.bin"),
+                str(ckpt),
+                "--output",
+                str(npz_out),
+            ]
+        )
+        run_capture(
+            [
+                sys.executable,
+                str(npz_to_net),
+                "--input",
+                str(npz_out),
                 "--output-net",
                 str(net_out),
             ]
@@ -176,6 +197,7 @@ def main() -> int:
         rec = {
             "checkpoint": str(ckpt.resolve()),
             "checkpoint_name": ckpt.name,
+            "npz": str(npz_out.resolve()),
             "net": str(net_out.resolve()),
         }
         records.append(rec)

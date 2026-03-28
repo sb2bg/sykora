@@ -118,7 +118,7 @@ def parse_network_config(run_meta: dict) -> dict:
     network = dict(run_meta.get("network", {}))
     env = run_meta.get("env", {})
 
-    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk3"
+    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk4"
     if network_format != "syk4":
         raise ValueError(
             f"run_meta.json does not describe a SYKNNUE4 run: {network_format!r}"

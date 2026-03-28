@@ -22,17 +22,6 @@ from bootstrap import DEFAULT_BULLET_REPO, ensure_bullet_repo  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-SYKORA10_BUCKET_LAYOUT_32 = [
-    0, 1, 2, 3,
-    4, 4, 5, 5,
-    6, 6, 6, 6,
-    7, 7, 7, 7,
-    8, 8, 8, 8,
-    8, 8, 8, 8,
-    9, 9, 9, 9,
-    9, 9, 9, 9,
-]
-
 SYKORA16_BUCKET_LAYOUT_32 = [
     0, 0, 1, 1,
     2, 2, 3, 3,
@@ -50,9 +39,9 @@ def expand_mirrored_bucket_layout(layout_32: list[int]) -> list[int]:
 
 
 def bucket_layout_64(name: str) -> list[int]:
-    if name == "sykora16":
-        return expand_mirrored_bucket_layout(SYKORA16_BUCKET_LAYOUT_32)
-    return expand_mirrored_bucket_layout(SYKORA10_BUCKET_LAYOUT_32)
+    if name != "sykora16":
+        raise ValueError(f"unsupported bucket layout: {name!r}")
+    return expand_mirrored_bucket_layout(SYKORA16_BUCKET_LAYOUT_32)
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,19 +64,19 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument(
-        "--hidden", type=int, default=0, help="Hidden size (default: 128 for syk3, 2048 for syk4)"
+        "--hidden", type=int, default=0, help="Hidden size (default: 2048)"
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk3", "syk4"],
-        default="syk3",
+        choices=["syk4"],
+        default="syk4",
         help="Training network format",
     )
     parser.add_argument(
         "--bucket-layout",
-        choices=["sykora10", "sykora16"],
+        choices=["sykora16"],
         default="",
-        help="Mirrored king-bucket layout (default: sykora10 for syk3, sykora16 for syk4)",
+        help="Mirrored king-bucket layout (default: sykora16)",
     )
     parser.add_argument(
         "--dense-l1",
@@ -159,9 +148,9 @@ def main() -> int:
     args = parse_args()
 
     if not args.bucket_layout:
-        args.bucket_layout = "sykora16" if args.network_format == "syk4" else "sykora10"
+        args.bucket_layout = "sykora16"
     if args.hidden <= 0:
-        args.hidden = 2048 if args.network_format == "syk4" else 128
+        args.hidden = 2048
 
     datasets = [Path(d) for d in args.dataset]
     for dataset in datasets:

@@ -44,6 +44,21 @@ def expect_array(ckpt, key: str):
     return ckpt[key]
 
 
+def round_away_from_zero(values):
+    """Round to nearest with ties away from zero."""
+    import numpy as np
+
+    values = np.asarray(values, dtype=np.float64)
+    return np.where(values >= 0.0, np.floor(values + 0.5), -np.floor(-values + 0.5))
+
+
+def quantize_clipped(values, scale: int, min_value: int, max_value: int, dtype):
+    import numpy as np
+
+    rounded = round_away_from_zero(np.asarray(values, dtype=np.float64) * float(scale))
+    return np.clip(rounded, min_value, max_value).astype(dtype)
+
+
 def main() -> int:
     args = parse_args()
 
@@ -143,38 +158,44 @@ def main() -> int:
             f"out_bias length mismatch: expected {output_bucket_count}, got {out_bias.shape[0]}"
         )
 
-    ft_bias_i16 = np.clip(np.rint(ft_bias * float(q0)), -32768, 32767).astype(np.int16)
-    ft_weights_i16 = np.clip(
-        np.rint(ft_weights.reshape(-1) * float(q0)), -32768, 32767
-    ).astype(np.int16)
+    ft_bias_i16 = quantize_clipped(ft_bias, q0, -32768, 32767, np.int16)
+    ft_weights_i16 = quantize_clipped(
+        ft_weights.reshape(-1), q0, -32768, 32767, np.int16
+    )
 
-    l1_bias_i32 = np.clip(
-        np.rint(l1_bias.reshape(-1) * float(q0 * q1)),
+    l1_bias_i32 = quantize_clipped(
+        l1_bias.reshape(-1),
+        q0 * q1,
         -2147483648,
         2147483647,
-    ).astype(np.int32)
-    l1_weights_i8 = np.clip(
-        np.rint(l1_weights.reshape(-1) * float(q1)), -128, 127
-    ).astype(np.int8)
+        np.int32,
+    )
+    l1_weights_i8 = quantize_clipped(
+        l1_weights.reshape(-1), q1, -128, 127, np.int8
+    )
 
     q_cubed = q * q * q
-    l2_bias_i32 = np.clip(
-        np.rint(l2_bias.reshape(-1) * float(q_cubed)),
+    l2_bias_i32 = quantize_clipped(
+        l2_bias.reshape(-1),
+        q_cubed,
         -2147483648,
         2147483647,
-    ).astype(np.int32)
-    l2_weights_i8 = np.clip(
-        np.rint(l2_weights.reshape(-1) * float(q)), -128, 127
-    ).astype(np.int8)
+        np.int32,
+    )
+    l2_weights_i8 = quantize_clipped(
+        l2_weights.reshape(-1), q, -128, 127, np.int8
+    )
 
-    out_bias_i32 = np.clip(
-        np.rint(out_bias * float(q * q)),
+    out_bias_i32 = quantize_clipped(
+        out_bias,
+        q * q,
         -2147483648,
         2147483647,
-    ).astype(np.int32)
-    out_weights_i8 = np.clip(
-        np.rint(out_weights.reshape(-1) * float(q)), -128, 127
-    ).astype(np.int8)
+        np.int32,
+    )
+    out_weights_i8 = quantize_clipped(
+        out_weights.reshape(-1), q, -128, 127, np.int8
+    )
 
     out_path = Path(args.output_net)
     write_syk_nnue_v4(
