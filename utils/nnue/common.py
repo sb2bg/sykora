@@ -13,6 +13,9 @@ import chess
 LEGACY_INPUT_SIZE = 768
 QA = 255
 QB = 64
+V4_Q0 = 255
+V4_Q1 = 128
+V4_Q = 64
 SCALE = 400
 MAGIC_V3 = b"SYKNNUE3"
 FORMAT_VERSION_V3 = 3
@@ -24,11 +27,6 @@ FEATURE_SET_KING_BUCKETS_MIRRORED = 1
 
 ACTIVATION_RELU = 0
 ACTIVATION_SCRELU = 1
-
-# For the first SYKNNUE4 baseline, dense activation id 0 is the clipped ReLU
-# used by the spec equations and Bullet's `crelu()`.
-DENSE_ACTIVATION_CLIPPED_RELU = 0
-DENSE_ACTIVATION_SCRELU = 1
 
 SYKORA_BUCKET_LAYOUT_32 = [
     0, 1, 2, 3,
@@ -51,7 +49,6 @@ SYKORA16_BUCKET_LAYOUT_32 = [
     12, 12, 13, 13,
     14, 14, 15, 15,
 ]
-
 
 def expand_mirrored_bucket_layout(layout_32: List[int]) -> List[int]:
     if len(layout_32) != 32:
@@ -174,6 +171,10 @@ def _pack_i32(values: Iterable[int]) -> bytes:
     return b"".join(struct.pack("<i", int(v)) for v in values)
 
 
+def _pack_i8(values: Iterable[int]) -> bytes:
+    return b"".join(struct.pack("<b", int(v)) for v in values)
+
+
 def write_syk_nnue(
     path: Path,
     *,
@@ -225,22 +226,23 @@ def syk_nnue_v4_payload_size(
     ft_hidden_size: int,
     dense_layer_1_size: int,
     dense_layer_2_size: int,
-    layer_stack_count: int,
+    output_bucket_count: int,
 ) -> int:
     input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
     h = ft_hidden_size
     l1 = dense_layer_1_size
     l2 = dense_layer_2_size
-    s = layer_stack_count
+    s = output_bucket_count
+    dense_expand = 2 * l1
     return (
         2 * h
         + 2 * input_size * h
         + 4 * s * l1
-        + 2 * s * l1 * (2 * h)
+        + s * l1 * h
         + 4 * s * l2
-        + 2 * s * l2 * l1
+        + s * l2 * dense_expand
         + 4 * s
-        + 2 * s * l2
+        + s * l2
     )
 
 
@@ -250,23 +252,21 @@ def write_syk_nnue_v4(
     ft_hidden_size: int,
     dense_layer_1_size: int,
     dense_layer_2_size: int,
-    layer_stack_count: int,
+    output_bucket_count: int,
     ft_biases_i16: List[int],
     ft_weights_i16: List[int],
     l1_biases_i32: List[int],
-    l1_weights_i16: List[int],
+    l1_weights_i8: List[int],
     l2_biases_i32: List[int],
-    l2_weights_i16: List[int],
+    l2_weights_i8: List[int],
     out_biases_i32: List[int],
-    out_weights_i16: List[int],
+    out_weights_i8: List[int],
     feature_set: int = FEATURE_SET_KING_BUCKETS_MIRRORED,
     bucket_layout_64: List[int] | None = None,
-    ft_activation_type: int = ACTIVATION_SCRELU,
-    dense_activation_type: int = DENSE_ACTIVATION_CLIPPED_RELU,
-    qa: int = QA,
-    q1: int = QB,
-    q2: int = QB,
-    qo: int = QB,
+    q0: int = V4_Q0,
+    q1: int = V4_Q1,
+    q: int = V4_Q,
+    scale: int = SCALE,
 ) -> None:
     if feature_set != FEATURE_SET_KING_BUCKETS_MIRRORED:
         raise ValueError("SYKNNUE4 currently requires king_buckets_mirrored inputs")
@@ -276,15 +276,16 @@ def write_syk_nnue_v4(
         raise ValueError("ft_hidden_size must be > 0")
     if dense_layer_1_size <= 0 or dense_layer_2_size <= 0:
         raise ValueError("dense layer sizes must be > 0")
-    if layer_stack_count <= 0 or layer_stack_count > 255:
-        raise ValueError("layer_stack_count must fit in u8 and be > 0")
+    if output_bucket_count <= 0 or output_bucket_count > 255:
+        raise ValueError("output_bucket_count must fit in u8 and be > 0")
 
     input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
-    bucket_count = num_buckets(bucket_layout_64)
+    input_bucket_count = num_buckets(bucket_layout_64)
     h = ft_hidden_size
     l1 = dense_layer_1_size
     l2 = dense_layer_2_size
-    s = layer_stack_count
+    s = output_bucket_count
+    dense_expand = 2 * l1
 
     if len(ft_biases_i16) != h:
         raise ValueError("ft_biases length mismatch")
@@ -292,15 +293,15 @@ def write_syk_nnue_v4(
         raise ValueError("ft_weights length mismatch")
     if len(l1_biases_i32) != s * l1:
         raise ValueError("l1_biases length mismatch")
-    if len(l1_weights_i16) != s * l1 * (2 * h):
+    if len(l1_weights_i8) != s * l1 * h:
         raise ValueError("l1_weights length mismatch")
     if len(l2_biases_i32) != s * l2:
         raise ValueError("l2_biases length mismatch")
-    if len(l2_weights_i16) != s * l2 * l1:
+    if len(l2_weights_i8) != s * l2 * dense_expand:
         raise ValueError("l2_weights length mismatch")
     if len(out_biases_i32) != s:
         raise ValueError("out_biases length mismatch")
-    if len(out_weights_i16) != s * l2:
+    if len(out_weights_i8) != s * l2:
         raise ValueError("out_weights length mismatch")
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -308,23 +309,21 @@ def write_syk_nnue_v4(
         handle.write(MAGIC_V4)
         handle.write(struct.pack("<H", FORMAT_VERSION_V4))
         handle.write(struct.pack("<B", feature_set))
-        handle.write(struct.pack("<B", ft_activation_type))
         handle.write(struct.pack("<H", h))
-        handle.write(struct.pack("<B", dense_activation_type))
         handle.write(struct.pack("<H", l1))
         handle.write(struct.pack("<H", l2))
         handle.write(struct.pack("<B", s))
-        handle.write(struct.pack("<B", bucket_count))
-        handle.write(struct.pack("<H", qa))
+        handle.write(struct.pack("<B", input_bucket_count))
+        handle.write(struct.pack("<H", q0))
         handle.write(struct.pack("<H", q1))
-        handle.write(struct.pack("<H", q2))
-        handle.write(struct.pack("<H", qo))
+        handle.write(struct.pack("<H", q))
+        handle.write(struct.pack("<H", scale))
         handle.write(bytes(int(v) for v in bucket_layout_64))
         handle.write(_pack_i16(ft_biases_i16))
         handle.write(_pack_i16(ft_weights_i16))
         handle.write(_pack_i32(l1_biases_i32))
-        handle.write(_pack_i16(l1_weights_i16))
+        handle.write(_pack_i8(l1_weights_i8))
         handle.write(_pack_i32(l2_biases_i32))
-        handle.write(_pack_i16(l2_weights_i16))
+        handle.write(_pack_i8(l2_weights_i8))
         handle.write(_pack_i32(out_biases_i32))
-        handle.write(_pack_i16(out_weights_i16))
+        handle.write(_pack_i8(out_weights_i8))

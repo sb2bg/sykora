@@ -13,8 +13,10 @@ if str(UTILS_NNUE_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_NNUE_DIR))
 
 from common import (  # noqa: E402
-    ACTIVATION_SCRELU,
-    DENSE_ACTIVATION_CLIPPED_RELU,
+    SCALE,
+    V4_Q0,
+    V4_Q,
+    V4_Q1,
     SYKORA16_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
 )
@@ -74,6 +76,44 @@ def take_f32(buf, offset: int, count: int):
     return buf[offset:end], end
 
 
+def expected_raw_sizes(
+    *, bucket_count: int, ft_hidden: int, dense_l1: int, dense_l2: int, stack_count: int
+) -> dict[str, int]:
+    input_size = 768 * bucket_count
+    dense_expand = 2 * dense_l1
+    return {
+        "spec_merged_ft": (
+            input_size * ft_hidden
+            + ft_hidden
+            + ft_hidden * (stack_count * dense_l1)
+            + stack_count * dense_l1
+            + dense_expand * (stack_count * dense_l2)
+            + stack_count * dense_l2
+            + dense_l2 * stack_count
+            + stack_count
+        ),
+    }
+
+
+def detect_layout(
+    *, raw_len: int, bucket_count: int, ft_hidden: int, dense_l1: int, dense_l2: int, stack_count: int
+) -> str:
+    sizes = expected_raw_sizes(
+        bucket_count=bucket_count,
+        ft_hidden=ft_hidden,
+        dense_l1=dense_l1,
+        dense_l2=dense_l2,
+        stack_count=stack_count,
+    )
+    for name, expected in sizes.items():
+        if raw_len == expected:
+            return name
+    expected_str = ", ".join(f"{k}={v}" for k, v in sizes.items())
+    raise ValueError(
+        f"raw.bin length mismatch: found {raw_len} floats, expected one of {expected_str}"
+    )
+
+
 def parse_network_config(run_meta: dict) -> dict:
     network = dict(run_meta.get("network", {}))
     env = run_meta.get("env", {})
@@ -100,8 +140,9 @@ def parse_network_config(run_meta: dict) -> dict:
         "bucket_layout_64": bucket_layout_64,
         "ft_hidden": int(network.get("ft_hidden") or env["SYK_HIDDEN"]),
         "dense_l1": int(network.get("dense_l1") or env["SYK_DENSE_L1"]),
+        "dense_expand": int(network.get("dense_expand") or (2 * int(network.get("dense_l1") or env["SYK_DENSE_L1"]))),
         "dense_l2": int(network.get("dense_l2") or env["SYK_DENSE_L2"]),
-        "stack_count": int(network.get("stack_count", 8)),
+        "stack_count": int(network.get("output_bucket_count", network.get("stack_count", 8))),
     }
 
 
@@ -121,19 +162,27 @@ def main() -> int:
     bucket_count = max(bucket_layout_64) + 1
     ft_hidden = int(network["ft_hidden"])
     dense_l1 = int(network["dense_l1"])
+    dense_expand = int(network["dense_expand"])
     dense_l2 = int(network["dense_l2"])
     stack_count = int(network["stack_count"])
     input_size = 768 * bucket_count
 
     raw = np.fromfile(raw_path, dtype="<f4")
+    layout = detect_layout(
+        raw_len=raw.shape[0],
+        bucket_count=bucket_count,
+        ft_hidden=ft_hidden,
+        dense_l1=dense_l1,
+        dense_l2=dense_l2,
+        stack_count=stack_count,
+    )
     offset = 0
 
     l0w, offset = take_f32(raw, offset, input_size * ft_hidden)
     l0b, offset = take_f32(raw, offset, ft_hidden)
-    l0f, offset = take_f32(raw, offset, 768 * ft_hidden)
-    l1w, offset = take_f32(raw, offset, (2 * ft_hidden) * (stack_count * dense_l1))
+    l1w, offset = take_f32(raw, offset, ft_hidden * (stack_count * dense_l1))
     l1b, offset = take_f32(raw, offset, stack_count * dense_l1)
-    l2w, offset = take_f32(raw, offset, dense_l1 * (stack_count * dense_l2))
+    l2w, offset = take_f32(raw, offset, dense_expand * (stack_count * dense_l2))
     l2b, offset = take_f32(raw, offset, stack_count * dense_l2)
     l3w, offset = take_f32(raw, offset, dense_l2 * stack_count)
     l3b, offset = take_f32(raw, offset, stack_count)
@@ -145,18 +194,16 @@ def main() -> int:
 
     ft_weights = l0w.reshape(input_size, ft_hidden)
     ft_bias = l0b.reshape(ft_hidden)
-    factoriser = l0f.reshape(768, ft_hidden)
-    ft_weights = ft_weights + np.tile(factoriser, (bucket_count, 1))
 
     l1_weights = (
-        l1w.reshape(2 * ft_hidden, stack_count * dense_l1)
-        .T.reshape(stack_count, dense_l1, 2 * ft_hidden)
+        l1w.reshape(ft_hidden, stack_count * dense_l1)
+        .T.reshape(stack_count, dense_l1, ft_hidden)
     )
     l1_bias = l1b.reshape(stack_count, dense_l1)
 
     l2_weights = (
-        l2w.reshape(dense_l1, stack_count * dense_l2)
-        .T.reshape(stack_count, dense_l2, dense_l1)
+        l2w.reshape(dense_expand, stack_count * dense_l2)
+        .T.reshape(stack_count, dense_l2, dense_expand)
     )
     l2_bias = l2b.reshape(stack_count, dense_l2)
 
@@ -177,16 +224,25 @@ def main() -> int:
         out_bias=out_bias.astype(np.float32),
         bucket_layout_64=np.asarray(bucket_layout_64, dtype=np.uint8),
         feature_set=np.asarray([1], dtype=np.uint8),
-        ft_activation_type=np.asarray([ACTIVATION_SCRELU], dtype=np.uint8),
-        dense_activation_type=np.asarray([DENSE_ACTIVATION_CLIPPED_RELU], dtype=np.uint8),
+        input_bucket_count=np.asarray([bucket_count], dtype=np.uint8),
+        output_bucket_count=np.asarray([stack_count], dtype=np.uint8),
+        dense_expand=np.asarray([dense_expand], dtype=np.uint16),
+        q0=np.asarray([V4_Q0], dtype=np.uint16),
+        q1=np.asarray([V4_Q1], dtype=np.uint16),
+        q=np.asarray([V4_Q], dtype=np.uint16),
+        scale=np.asarray([SCALE], dtype=np.uint16),
     )
 
     print(f"Input: {raw_path}")
     print(f"Run metadata: {run_meta_path}")
     print("Network format: SYKNNUE4")
+    print(f"Detected raw layout: {layout}")
     print(f"Bucket count: {bucket_count}")
     print(f"FT hidden: {ft_hidden}")
-    print(f"Dense head: {dense_l1} -> {dense_l2} -> 1 with {stack_count} stacks")
+    print(
+        f"Dense head: pooled {ft_hidden} -> {dense_l1} -> expand({dense_expand}) -> {dense_l2} -> 1 "
+        f"with {stack_count} buckets"
+    )
     print(f"Wrote: {out_path}")
     return 0
 

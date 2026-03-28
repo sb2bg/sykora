@@ -253,6 +253,7 @@ def main() -> int:
             "dense_expand": args.dense_l1 * 2,
             "dense_l2": args.dense_l2,
             "stack_count": 8,
+            "output_bucket_count": 8,
             "pooling": "product_pair_halves_q0_255",
             "output_bucket_rule": "non_king_piece_count_div4",
         },
