@@ -95,7 +95,7 @@ foreach ($bp in $binpacks) {
 Write-Host ""
 
 python "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py" `
-    --dataset @datasets `
+    --dataset $datasets `
     --bullet-repo "$PSScriptRoot\nnue\bullet_repo" `
     --output-root "$PSScriptRoot\nnue\models\bullet" `
     --data-format binpack `
