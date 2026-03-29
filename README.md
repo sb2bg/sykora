@@ -9,6 +9,16 @@
 
 Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, a full alpha-beta search with LMR/null-move/futility pruning, Lazy SMP parallel search, a hand-tuned classical evaluation, and NNUE evaluation trained via the [Bullet](https://github.com/jw1912/bullet) trainer. An NNUE net is embedded in the binary and enabled by default. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
 
+## Strength
+
+Sykora is tested by CCRL. Current known entries:
+
+| Version               | CCRL Rating | Rank  | % Change vs `0.1.0` |
+| --------------------- | ----------- | ----- | ------------------- |
+| `Sykora 0.2.2 64-bit` | `3240`      | `163` | `+36.82%`           |
+| `Sykora 0.2.1 64-bit` | N/A         | N/A   | N/A                 |
+| `Sykora 0.1.0 64-bit` | `2368`      | `423` | baseline            |
+
 ## Features
 
 ### Engine Core
