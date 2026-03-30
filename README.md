@@ -1,5 +1,6 @@
 # Sykora
 
+[![Sykora CCRL badge](https://ccrl-badges.vercel.app/badge?engine=Sykora&list=blitz&showList=false&showRank=true)](<https://computerchess.org.uk/ccrl/404/cgi/engine_details.cgi?match_length=30&print=Details+(text)&eng=Sykora%200.2.2%2064-bit#Sykora_0_2_2_64-bit>)
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
