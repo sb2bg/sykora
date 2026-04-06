@@ -727,13 +727,6 @@ pub const SearchEngine = struct {
         };
     }
 
-    inline fn applyInternalIterativeReduction(is_pv_node: bool, tt_move: ?Move, search_depth: u32) u32 {
-        if (!is_pv_node and tt_move == null and search_depth >= 4) {
-            return search_depth - 1;
-        }
-        return search_depth;
-    }
-
     inline fn moveGivesCheck(self: *Self, move: Move) bool {
         const probe_undo = self.board.makeMoveWithUndoUnchecked(move);
         const gives_check = self.board.isInCheck(self.board.board.move);
@@ -1116,8 +1109,6 @@ pub const SearchEngine = struct {
             return tt_score;
         }
         const tt_move = tt_probe.tt_move;
-
-        search_depth = applyInternalIterativeReduction(is_pv_node, tt_move, search_depth);
 
         const singular = try self.trySingularExtension(
             tt_probe,
