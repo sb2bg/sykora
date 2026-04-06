@@ -68,12 +68,6 @@ const SEE_CAPTURE_SCALE: i32 = 128;
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
-const REPETITION_BASE_CONTEMPT_CP: i32 = 15;
-const REPETITION_SMALL_ADV_CP: i32 = 30;
-const REPETITION_MEDIUM_ADV_CP: i32 = 50;
-const REPETITION_LARGE_ADV_CP: i32 = 80;
-const REPETITION_HUGE_ADV_CP: i32 = 120;
-const REPETITION_ADV_EVAL_THRESHOLD_CP: i32 = 30;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
 
 fn elapsedMs(start: std.time.Instant) i64 {
@@ -1436,43 +1430,8 @@ pub const SearchEngine = struct {
         return false;
     }
 
-    /// Return a contempt-adjusted score for repetition draws.
-    /// Positive means draw is attractive for side-to-move (typically when worse),
-    /// negative means avoid draw when better.
     fn repetitionScore(self: *Self) i32 {
-        const static_eval = self.evaluatePosition();
-        const stm = self.board.board.move;
-        const opp = if (stm == .white) piece.Color.black else piece.Color.white;
-
-        const stm_material = countMaterial(self.board.board, stm);
-        const opp_material = countMaterial(self.board.board, opp);
-        const material_adv = stm_material - opp_material;
-
-        var contempt: i32 = REPETITION_BASE_CONTEMPT_CP;
-        const abs_eval = @abs(static_eval);
-        const abs_material_adv = @abs(material_adv);
-
-        if (abs_eval >= 80 or abs_material_adv >= eval.PAWN_VALUE) {
-            contempt = REPETITION_SMALL_ADV_CP;
-        }
-        if (abs_eval >= 160 or abs_material_adv >= 2 * eval.PAWN_VALUE) {
-            contempt = REPETITION_MEDIUM_ADV_CP;
-        }
-        if (abs_eval >= 280 or abs_material_adv >= eval.ROOK_VALUE) {
-            contempt = REPETITION_LARGE_ADV_CP;
-        }
-        if (abs_eval >= 500 or abs_material_adv >= eval.QUEEN_VALUE) {
-            contempt = REPETITION_HUGE_ADV_CP;
-        }
-
-        // Side to move appears better: avoid repetition draw.
-        if (static_eval > REPETITION_ADV_EVAL_THRESHOLD_CP or material_adv > eval.PAWN_VALUE / 2) {
-            return -contempt;
-        }
-        // Side to move appears worse: prefer repetition draw.
-        if (static_eval < -REPETITION_ADV_EVAL_THRESHOLD_CP or material_adv < -(eval.PAWN_VALUE / 2)) {
-            return contempt;
-        }
+        _ = self;
         return DRAW_SCORE;
     }
 
