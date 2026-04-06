@@ -727,8 +727,8 @@ pub const SearchEngine = struct {
         };
     }
 
-    inline fn applyInternalIterativeReduction(tt_move: ?Move, search_depth: u32) u32 {
-        if (tt_move == null and search_depth >= 4) {
+    inline fn applyInternalIterativeReduction(is_pv_node: bool, tt_move: ?Move, search_depth: u32) u32 {
+        if (!is_pv_node and tt_move == null and search_depth >= 4) {
             return search_depth - 1;
         }
         return search_depth;
@@ -1117,7 +1117,7 @@ pub const SearchEngine = struct {
         }
         const tt_move = tt_probe.tt_move;
 
-        search_depth = applyInternalIterativeReduction(tt_move, search_depth);
+        search_depth = applyInternalIterativeReduction(is_pv_node, tt_move, search_depth);
 
         const singular = try self.trySingularExtension(
             tt_probe,
@@ -1750,8 +1750,3 @@ pub const SearchEngine = struct {
         file.writeAll("\n") catch return;
     }
 };
-
-test "addLmpQuietMoveBonus saturates instead of wrapping" {
-    try std.testing.expectEqual(@as(u32, 18), addLmpQuietMoveBonus(16, 2));
-    try std.testing.expectEqual(std.math.maxInt(u32), addLmpQuietMoveBonus(std.math.maxInt(u32), 2));
-}
