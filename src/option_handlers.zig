@@ -40,7 +40,7 @@ pub fn registerOptions(uci: *Uci) !void {
     try uci.options.items.append(uci.allocator, Option{
         .name = "NnueScale",
         .type = .spin,
-        .default_value = "100",
+        .default_value = "38",
         .min_value = 10,
         .max_value = 400,
         .on_changed = handleNnueScaleChange,

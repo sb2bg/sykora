@@ -109,7 +109,7 @@ Sykora is tested by CCRL. Current known entries:
 | `UseNNUE`        | bool   | `true`  | Enable NNUE evaluation (embedded net loads automatically)  |
 | `EvalFile`       | string | `""`    | Path to external `.sknnue` file (overrides embedded net)   |
 | `NnueBlend`      | int    | `100`   | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
-| `NnueScale`      | int    | `100`   | NNUE output scaling factor (10..400)                       |
+| `NnueScale`      | int    | `38`    | NNUE output scaling factor (10..400)                       |
 | `Threads`        | int    | `1`     | Search threads (1..64, Lazy SMP)                           |
 | `Hash`           | int    | `64`    | Transposition table size in MB (1..4096)                   |
 
@@ -392,7 +392,7 @@ zig build -Doptimize=ReleaseFast
 python utils/nnue/bullet/gate_checkpoints.py \
   --checkpoints-dir nnue/models/bullet/<run_id>/checkpoints \
   --engine ./zig-out/bin/sykora \
-  --blend 100 --nnue-scale 100 \
+  --blend 100 --nnue-scale 38 \
   --selfplay-games 80 --selfplay-movetime-ms 120 --selfplay-top-k 3 \
   --threads 1 --hash-mb 64 \
   --min-elo 0 --max-p-value 0.25 \
