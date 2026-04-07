@@ -51,7 +51,7 @@ pub const Uci = struct {
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
         const stop_search = std.atomic.Value(bool).init(false);
-        const default_hash_mb: usize = 64;
+        const default_hash_mb: usize = 128;
         const tt = try TranspositionTable.init(allocator, default_hash_mb);
 
         uci_ptr.* = Uci{

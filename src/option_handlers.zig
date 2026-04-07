@@ -58,7 +58,7 @@ pub fn registerOptions(uci: *Uci) !void {
     try uci.options.items.append(uci.allocator, Option{
         .name = "Hash",
         .type = .spin,
-        .default_value = "64",
+        .default_value = "128",
         .min_value = 1,
         .max_value = 4096,
         .on_changed = handleHashChange,

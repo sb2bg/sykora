@@ -111,13 +111,13 @@ Sykora is tested by CCRL. Current known entries:
 | `NnueBlend`      | int    | `100`   | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
 | `NnueScale`      | int    | `38`    | NNUE output scaling factor (10..400)                       |
 | `Threads`        | int    | `1`     | Search threads (1..64, Lazy SMP)                           |
-| `Hash`           | int    | `64`    | Transposition table size in MB (1..4096)                   |
+| `Hash`           | int    | `128`   | Transposition table size in MB (1..4096)                   |
 
 The activation function (ReLU or SCReLU) is auto-detected from the network file header -- no manual configuration needed.
 
 ## Prerequisites
 
-- [Zig](https://ziglang.org/) compiler (latest stable version recommended)
+- [Zig](https://ziglang.org/) compiler (`0.15.2` currently used for local builds)
 - Python 3.10+ (for benchmark, STS, match, history, NNUE, and bot utilities)
 - A UCI-compatible chess GUI (like Arena, Cutechess, or similar)
 
