@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--blend", type=int, default=100, help="NnueBlend for evaluation")
     parser.add_argument(
-        "--nnue-scale", type=int, default=38, help="NnueScale during eval"
+        "--nnue-scale", type=int, default=100, help="NnueScale during eval"
     )
 
     parser.add_argument(
