@@ -239,7 +239,7 @@ Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed ne
 ### Runtime
 
 - The embedded net (`src/net.sknnue`) is compiled into the binary and loaded automatically at startup.
-- NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`, `NnueScale = 38`).
+- NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`, `NnueScale = 100`).
 - The activation function is stored in the network file header and auto-detected on load.
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
