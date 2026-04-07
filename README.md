@@ -8,7 +8,7 @@
 
 <img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="200" alt="Sykora Logo">
 
-Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, a full alpha-beta search with LMR/null-move/futility pruning, Lazy SMP parallel search, a hand-tuned classical evaluation, and NNUE evaluation trained via the [Bullet](https://github.com/jw1912/bullet) trainer. An NNUE net is embedded in the binary and enabled by default. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
+Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, alpha-beta search with modern pruning and reductions, Lazy SMP parallel search, a hand-tuned classical evaluation, and NNUE evaluation trained via the [Bullet](https://github.com/jw1912/bullet) trainer. An NNUE net is embedded in the binary and enabled by default. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
 
 ## Strength
 
@@ -56,20 +56,20 @@ Sykora is tested by CCRL. Current known entries:
   - Check evasions when in check
   - Delta pruning
   - SEE-based pruning of clearly losing captures
-- Repetition detection with contempt shaping and cycle penalties.
+- Repetition detection.
 - 50-move-rule handling.
-- Basic time management for clocked play.
+- Time management for clocked play.
 - Evaluation cache for expensive eval paths.
 
 ### Evaluation
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `SYKNNUE3` net generation with backward-compatible `SYKNNUE2` loading
+  - `SYKNNUE3` and `SYKNNUE4` network loading
   - Legacy `768 -> Nx2 -> 1` and mirrored king-bucketed sparse-input nets
   - SCReLU activation with incremental accumulators during search
   - Trained on high-depth self-play data via the Bullet trainer
   - King-bucket training path via `nnue/bullet_repo/examples/sykora_bucketed.rs`
-  - Blendable with classical eval via `NnueBlend` (default: 100 = pure NNUE)
+  - Blendable with classical eval via `NnueBlend` (default: `100` = pure NNUE)
 - **Classical handcrafted evaluation** (fallback):
   - Material and piece-square tables
   - Pawn structure terms (isolated/doubled/backward/passed)
@@ -105,9 +105,9 @@ Sykora is tested by CCRL. Current known entries:
 
 | Option           | Type   | Default | Description                                                |
 | ---------------- | ------ | ------- | ---------------------------------------------------------- |
-| `Debug Log File` | string | `""`    | Path for debug logging                                     |
+| `Debug Log File` | string | `<empty>` | Path for debug logging                                   |
 | `UseNNUE`        | bool   | `true`  | Enable NNUE evaluation (embedded net loads automatically)  |
-| `EvalFile`       | string | `""`    | Path to external `.sknnue` file (overrides embedded net)   |
+| `EvalFile`       | string | `<empty>` | Path to external `.sknnue` file (overrides embedded net) |
 | `NnueBlend`      | int    | `100`   | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
 | `NnueScale`      | int    | `38`    | NNUE output scaling factor (10..400)                       |
 | `Threads`        | int    | `1`     | Search threads (1..64, Lazy SMP)                           |
@@ -151,7 +151,7 @@ This will create an executable named `sykora` in the `zig-out/bin` directory. Th
 To run the engine:
 
 ```bash
-zig build -Doptimize=ReleaseFast run
+zig build run -Doptimize=ReleaseFast
 ```
 
 Or directly run the executable:
@@ -234,54 +234,21 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed `SYKNNUE3` nets with dual-perspective accumulator updates and SCReLU activation, trained via the [Bullet](https://github.com/jw1912/bullet) trainer. The current embedded net in `src/net.sknnue` is a `SYKNNUE3` mirrored king-bucketed net with 10 buckets and hidden size 512, equivalent to `7680 -> 512x2 -> 1`.
+Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed nets with dual-perspective accumulator updates and SCReLU activation. The engine can load both `SYKNNUE3` and `SYKNNUE4` files.
 
-### How It Works
+### Runtime
 
 - The embedded net (`src/net.sknnue`) is compiled into the binary and loaded automatically at startup.
-- NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`).
-- The activation function (ReLU or SCReLU) is stored in the network file header and auto-detected on load.
+- NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`, `NnueScale = 38`).
+- The activation function is stored in the network file header and auto-detected on load.
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
-- `NnueBlend` remains available for fallback/debugging, but the primary workflow is pure NNUE.
+- `NnueScale` scales the NNUE score before it is fed into the search.
 
-### Network Formats (`SYKNNUE2` / `SYKNNUE3`)
-
-New tooling writes `SYKNNUE3` only. `SYKNNUE2` remains loadable for backward compatibility with older external nets.
-
-Legacy `SYKNNUE2`:
-
-```
-8 bytes   magic: "SYKNNUE2"
-u16       version: 2
-u16       hidden_size
-u8        activation_type (0=ReLU, 1=SCReLU)
-i32       output_bias
-i16[hidden_size]                accumulator biases
-i16[768 * hidden_size]          input -> accumulator weights
-i16[2 * hidden_size]            output weights (stm half, nstm half)
-```
-
-Bucketed `SYKNNUE3`:
-
-```
-8 bytes   magic: "SYKNNUE3"
-u16       version: 3
-u8        feature_set (0=legacy_psqt, 1=king_buckets_mirrored)
-u16       hidden_size
-u8        activation_type (0=ReLU, 1=SCReLU)
-u16       bucket_count
-u8[64]    bucket layout by king square
-i32       output_bias
-i16[hidden_size]                         accumulator biases
-i16[input_size * hidden_size]            input -> accumulator weights
-i16[2 * hidden_size]                     output weights (stm half, nstm half)
-```
-
-For `king_buckets_mirrored`, `input_size = 768 * bucket_count`. The current embedded net uses `bucket_count = 10`, so its effective input size is `7680`. For `legacy_psqt`, `SYKNNUE3` uses `bucket_count = 1` with a zero bucket layout, so old 768-input nets can be represented without using `SYKNNUE2`. All values are little-endian.
+For exact file-format details, see [specs/syknnue4_spec.md](specs/syknnue4_spec.md) and `src/nnue.zig`.
 
 ### Training Pipeline
 
-Training uses the [Bullet](https://github.com/jw1912/bullet) NNUE trainer with CUDA. Two data formats are supported. `SYKNNUE3` remains the default training format; `SYKNNUE4` training/export support is now available behind `--network-format syk4`.
+Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`.
 
 **Using binpack data:**
 
@@ -326,7 +293,7 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   ...
 ```
 
-**Training a SYKNNUE4 baseline:**
+**Training a `SYKNNUE4` baseline:**
 
 ```bash
 python utils/nnue/bullet/train_cuda_longrun.py \
@@ -344,24 +311,11 @@ python utils/nnue/bullet/train_cuda_longrun.py \
 Sykora can generate its own training data via the `gensfen` command:
 
 ```bash
-# Generate positions using the engine's own evaluation
-./zig-out/bin/sykora gensfen output.data depth 7 count 1000000 threads 4
+# Generate Bullet-format training data
+./zig-out/bin/sykora gensfen --output output.data --games 100000 --depth 7
 ```
 
 ### Exporting a Trained Net
-
-Convert a Bullet checkpoint to `.sknnue`:
-
-```bash
-# From quantised.bin (default after Bullet training)
-python utils/nnue/bullet/bullet_quantised_to_sknnue.py \
-  nnue/models/bullet/<run_id>/checkpoints/<checkpoint>/quantised.bin \
-  output.sknnue --activation screlu
-
-# From NPZ export
-python utils/nnue/bullet/export_npz_to_sknnue.py \
-  checkpoint.npz output.sknnue --activation screlu
-```
 
 Export a `SYKNNUE4` checkpoint:
 
@@ -374,8 +328,6 @@ python utils/nnue/bullet/export_npz_to_syk4.py \
   --input checkpoint_syk4.npz \
   --output-net output.sknnue
 ```
-
-`SYKNNUE4` engine-side loading/eval is still separate work. The new tooling here covers training metadata, checkpoint export, and file generation only.
 
 ### Embedding a New Net
 
