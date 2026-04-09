@@ -1235,6 +1235,10 @@ pub const SearchEngine = struct {
                 }
             }
 
+            // Pre-compute SEE for bad capture detection (needs pre-move board).
+            const is_bad_capture = is_capture and !is_promotion and
+                staticExchangeEvalPosition(self.board.board, move) < 0;
+
             // Make move
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
@@ -1264,38 +1268,45 @@ pub const SearchEngine = struct {
 
             var score: i32 = undefined;
 
-            // Late Move Reductions (LMR) — logarithmic formula with history modulation
-            if (moves_searched >= LMR_FULL_DEPTH_MOVES and
+            // Late Move Reductions (LMR) — logarithmic formula with history modulation.
+            // Applied to quiet moves and losing captures (bad SEE).
+            const is_lmr_candidate = moves_searched >= LMR_FULL_DEPTH_MOVES and
                 search_depth >= LMR_MIN_DEPTH and
                 !in_check and
-                !is_capture and
-                !is_promotion and
-                !gives_check)
-            {
+                !gives_check and
+                (!is_capture or is_bad_capture) and
+                !is_promotion;
+
+            if (is_lmr_candidate) {
                 // Base reduction from pre-computed log table
                 const move_number = moves_searched + 1;
                 const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
                 const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
                 var reduction: i32 = lmr_table[d_idx][m_idx];
 
-                // History modulation: good history reduces less, bad history reduces more
-                const hist_score = self.quietHeuristicScore(move, color, ply);
-                reduction -= @divTrunc(hist_score, 8192);
+                if (is_bad_capture) {
+                    // Bad captures get a fixed moderate reduction
+                    reduction = @max(reduction, 2);
+                } else {
+                    // History modulation: good history reduces less, bad history reduces more
+                    const hist_score = self.quietHeuristicScore(move, color, ply);
+                    reduction -= @divTrunc(hist_score, 8192);
 
-                // Killer and counter moves get reduced less
-                const is_killer = self.killer_moves.isKiller(move, ply);
-                var is_counter_move = false;
-                if (counter_move) |cm| {
-                    is_counter_move = cm.from() == move.from() and cm.to() == move.to();
-                }
-                if (is_killer) {
-                    reduction -= 1;
-                }
-                if (is_counter_move) {
-                    reduction -= 1;
-                }
-                if (improving) {
-                    reduction -= 1;
+                    // Killer and counter moves get reduced less
+                    const is_killer = self.killer_moves.isKiller(move, ply);
+                    var is_counter_move = false;
+                    if (counter_move) |cm| {
+                        is_counter_move = cm.from() == move.from() and cm.to() == move.to();
+                    }
+                    if (is_killer) {
+                        reduction -= 1;
+                    }
+                    if (is_counter_move) {
+                        reduction -= 1;
+                    }
+                    if (improving) {
+                        reduction -= 1;
+                    }
                 }
 
                 // PV nodes get reduced less
