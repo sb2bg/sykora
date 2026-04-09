@@ -159,6 +159,7 @@ const LMP_MAX_DEPTH: u32 = 3;
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
 const NULL_MOVE_REDUCTION: u32 = 3;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8; // Verify at deeper depths
+const NULL_MOVE_STATIC_EVAL_MARGIN: i32 = 80;
 const SINGULAR_MIN_DEPTH: u32 = 8;
 const SINGULAR_REDUCTION: u32 = 2;
 const SINGULAR_MARGIN_BASE_CP: i32 = 30;
@@ -169,8 +170,11 @@ const SINGULAR_MULTICUT_MIN_BEATERS: u32 = 2;
 const FUTILITY_MARGIN: i32 = 200;
 const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
 
+// Reverse futility pruning parameters
+const REVERSE_FUTILITY_MARGIN_PER_PLY: i32 = 100;
+
 // Razoring parameters
-const RAZOR_MARGIN: i32 = 400;
+const RAZOR_MARGIN: i32 = 500;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
 const MAIN_SEE_PRUNE_MAX_DEPTH: u32 = 4;
 const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
@@ -864,7 +868,7 @@ pub const SearchEngine = struct {
         beta_adj: i32,
     ) ?i32 {
         if (!is_pv_node and !in_check and search_depth <= 5) {
-            const rfp_margin = 80 * @as(i32, @intCast(search_depth));
+            const rfp_margin = REVERSE_FUTILITY_MARGIN_PER_PLY * @as(i32, @intCast(search_depth));
             if (static_eval - rfp_margin >= beta_adj) {
                 return static_eval;
             }
@@ -905,7 +909,7 @@ pub const SearchEngine = struct {
             !is_pv_node and
             !in_check and
             search_depth >= NULL_MOVE_MIN_DEPTH and
-            static_eval >= beta_adj))
+            static_eval >= beta_adj + NULL_MOVE_STATIC_EVAL_MARGIN))
         {
             return null;
         }
