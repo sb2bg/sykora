@@ -1604,11 +1604,12 @@ pub const SearchEngine = struct {
                 }
 
                 // SEE pruning - skip clearly losing non-promotion captures.
+                // No check exemption: in QS the NPS cost of moveGivesCheck on every
+                // capture outweighs the rare benefit of keeping a losing-SEE checking capture.
                 if (move.promotion() == null) {
                     const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
                     if (!is_tt_move and
-                        staticExchangeEvalPosition(self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP and
-                        !self.moveGivesCheck(move))
+                        staticExchangeEvalPosition(self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP)
                     {
                         continue;
                     }
