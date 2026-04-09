@@ -866,9 +866,13 @@ pub const SearchEngine = struct {
         search_depth: u32,
         static_eval: i32,
         beta_adj: i32,
+        improving: bool,
     ) ?i32 {
         if (!is_pv_node and !in_check and search_depth <= 5) {
-            const rfp_margin = REVERSE_FUTILITY_MARGIN_PER_PLY * @as(i32, @intCast(search_depth));
+            // When the position is improving, use a tighter margin (more aggressive pruning).
+            // When not improving, use a wider margin (more conservative — search more).
+            const improving_bonus: i32 = if (improving) 0 else 80;
+            const rfp_margin = REVERSE_FUTILITY_MARGIN_PER_PLY * @as(i32, @intCast(search_depth)) + improving_bonus;
             if (static_eval - rfp_margin >= beta_adj) {
                 return static_eval;
             }
@@ -1126,7 +1130,7 @@ pub const SearchEngine = struct {
         const improving = eval_ctx.improving;
         const futile = eval_ctx.futile;
 
-        if (tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj)) |pruned| {
+        if (tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj, improving)) |pruned| {
             return pruned;
         }
 
