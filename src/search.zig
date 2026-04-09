@@ -943,9 +943,12 @@ pub const SearchEngine = struct {
             self.continuation_keys[ply] = INVALID_CONTINUATION_KEY;
         }
 
-        var reduction: u32 = NULL_MOVE_REDUCTION;
-        if (search_depth > 6) reduction += 1;
-        if (static_eval - beta_adj > 200) reduction += 1;
+        // Depth-scaled null move reduction: R = 3 + depth/3 + min((eval-beta)/200, 3)
+        var reduction: u32 = NULL_MOVE_REDUCTION + search_depth / 3;
+        const eval_margin = static_eval - beta_adj;
+        if (eval_margin > 0) {
+            reduction += @min(@as(u32, @intCast(@divTrunc(eval_margin, 200))), 3);
+        }
         reduction = @min(reduction, search_depth - 1);
 
         const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false);
