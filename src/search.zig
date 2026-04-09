@@ -178,6 +178,8 @@ const RAZOR_MARGIN: i32 = 500;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
 const MAIN_SEE_PRUNE_MAX_DEPTH: u32 = 4;
 const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
+const QUIET_SEE_PRUNE_MAX_DEPTH: u32 = 7;
+const QUIET_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = -20;
 
 pub const SearchEngine = struct {
     const Self = @This();
@@ -1207,6 +1209,20 @@ pub const SearchEngine = struct {
                     self.quietHeuristicScore(move, color, ply) <= 0)
                 {
                     continue;
+                }
+
+                // Quiet SEE pruning: at shallow non-PV nodes, prune quiet moves that lose material
+                // (e.g. moving a piece to a square where it will be captured for free).
+                if (!is_pv_node and
+                    !in_check and
+                    moves_searched > 0 and
+                    search_depth <= QUIET_SEE_PRUNE_MAX_DEPTH and
+                    !self.killer_moves.isKiller(move, ply))
+                {
+                    const see_threshold = QUIET_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+                    if (staticExchangeEvalPosition(self.board.board, move) < see_threshold) {
+                        continue;
+                    }
                 }
             }
 
