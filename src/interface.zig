@@ -47,6 +47,9 @@ pub const Uci = struct {
     hash_size_mb: usize,
     helper_threads: [smp.MAX_HELPERS]?std.Thread,
     helper_results: [smp.MAX_HELPERS]smp.HelperResult,
+    pondering: bool,
+    defer_bestmove: bool,
+    ponder_resume_opts: ?uci_command.GoOptions,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -78,6 +81,9 @@ pub const Uci = struct {
             .hash_size_mb = default_hash_mb,
             .helper_threads = [_]?std.Thread{null} ** smp.MAX_HELPERS,
             .helper_results = [_]smp.HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** smp.MAX_HELPERS,
+            .pondering = false,
+            .defer_bestmove = false,
+            .ponder_resume_opts = null,
         };
 
         uci_ptr.resetPositionHistory();
@@ -116,6 +122,9 @@ pub const Uci = struct {
         }
         if (self.nnue_network) |*network| {
             network.deinit();
+        }
+        if (self.ponder_resume_opts) |*opts| {
+            opts.deinit(self.allocator);
         }
         self.tt.deinit();
         self.options.deinit();
@@ -186,11 +195,14 @@ pub const Uci = struct {
             },
             .ucinewgame => {
                 try smp.terminateSearch(self);
+                self.clearPonderState();
                 self.board = Board.startpos();
                 self.resetPositionHistory();
                 self.tt.clear();
             },
             .position => |pos_opts| {
+                try smp.terminateSearch(self);
+                self.clearPonderState();
                 switch (pos_opts.value) {
                     .startpos => {
                         self.board = Board.startpos();
@@ -221,19 +233,27 @@ pub const Uci = struct {
             },
             .go => |go_opts| {
                 try smp.terminateSearch(self);
-                try self.writeInfoString("{any}", .{go_opts});
-                try self.writeInfoString("starting search thread", .{});
-                self.stop_search.store(false, .seq_cst);
-                self.best_move = board.Move.init(0, 0, null);
-
-                // Use larger stack size (8MB) for search thread due to large SearchEngine struct
-                self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, smp.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
+                self.clearPonderState();
+                try self.startSearch(go_opts);
             },
             .stop => {
                 try smp.terminateSearch(self);
+                try self.flushDeferredBestMove();
+                self.clearPonderState();
             },
             .ponderhit => {
-                return error.Unimplemented;
+                if (!self.pondering) {
+                    return;
+                }
+
+                const resume_opts = self.ponder_resume_opts orelse return;
+                self.ponder_resume_opts = null;
+
+                try smp.terminateSearch(self);
+                self.pondering = false;
+                self.defer_bestmove = false;
+                self.best_move = board.Move.init(0, 0, null);
+                try self.startSearch(resume_opts);
             },
             .setoption => |opts| {
                 defer self.allocator.free(opts.name);
@@ -375,5 +395,58 @@ pub const Uci = struct {
             self.position_hash_history[1..self.position_hash_history.len],
         );
         self.position_hash_history[self.position_hash_history.len - 1] = hash;
+    }
+
+    fn clearPonderState(self: *Self) void {
+        self.pondering = false;
+        self.defer_bestmove = false;
+        if (self.ponder_resume_opts) |*opts| {
+            opts.deinit(self.allocator);
+        }
+        self.ponder_resume_opts = null;
+    }
+
+    fn flushDeferredBestMove(self: *Self) UciError!void {
+        if (!self.defer_bestmove) {
+            return;
+        }
+
+        try self.writeStdout("bestmove {f}", .{self.best_move});
+    }
+
+    fn startSearch(self: *Self, go_opts: uci_command.GoOptions) UciError!void {
+        var thread_opts = go_opts;
+        errdefer thread_opts.deinit(self.allocator);
+
+        try self.writeInfoString("{any}", .{thread_opts});
+        try self.writeInfoString("starting search thread", .{});
+
+        if (thread_opts.ponder orelse false) {
+            var resume_opts = thread_opts.clone(self.allocator) catch return UciError.OutOfMemory;
+            errdefer resume_opts.deinit(self.allocator);
+            resume_opts.ponder = false;
+
+            self.ponder_resume_opts = resume_opts;
+            self.pondering = true;
+            self.defer_bestmove = true;
+
+            thread_opts.ponder = false;
+            thread_opts.infinite = true;
+            thread_opts.move_time = null;
+            thread_opts.wtime = null;
+            thread_opts.btime = null;
+            thread_opts.winc = null;
+            thread_opts.binc = null;
+            thread_opts.moves_to_go = null;
+        } else {
+            self.pondering = false;
+            self.defer_bestmove = false;
+        }
+
+        self.stop_search.store(false, .seq_cst);
+        self.best_move = board.Move.init(0, 0, null);
+
+        // Use larger stack size (8MB) for search thread due to large SearchEngine struct
+        self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, smp.search, .{ self, thread_opts }) catch return UciError.ThreadCreationFailed;
     }
 };

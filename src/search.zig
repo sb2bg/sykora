@@ -41,13 +41,17 @@ inline fn movesEqual(a: Move, b: Move) bool {
 }
 
 pub const SearchOptions = struct {
+    search_moves: ?[][]const u8 = null,
     infinite: bool = false,
     move_time: ?u64 = null,
     wtime: ?u64 = null,
     btime: ?u64 = null,
     winc: ?u64 = null,
     binc: ?u64 = null,
+    moves_to_go: ?u64 = null,
     depth: ?u64 = null,
+    nodes: ?u64 = null,
+    mate: ?u64 = null,
     start_depth: u32 = 1,
 };
 
@@ -57,9 +61,11 @@ pub const SearchResult = struct {
     nodes: usize,
     time_ms: i64,
     depth: u32,
+    pv: PvLine,
 };
 
 const MAX_PLY = 64;
+const MAX_PV_LEN = MAX_PLY;
 const MAX_KILLER_MOVES = 2;
 const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
@@ -69,6 +75,22 @@ const SEE_CAPTURE_SCALE: i32 = 128;
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
+
+pub const PvLine = struct {
+    moves: [MAX_PV_LEN]Move = undefined,
+    count: usize = 0,
+
+    pub fn append(self: *PvLine, move: Move) void {
+        if (self.count >= self.moves.len) return;
+        self.moves[self.count] = move;
+        self.count += 1;
+    }
+
+    pub fn ponderMove(self: *const PvLine) ?Move {
+        if (self.count < 2) return null;
+        return self.moves[1];
+    }
+};
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
@@ -233,6 +255,10 @@ pub const SearchEngine = struct {
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
+    search_start_time: std.time.Instant,
+    hard_time_limit_ms: ?u64,
+    node_limit: ?u64,
+    root_search_moves: ?[]const Move,
 
     pub fn init(
         board_ptr: *Board,
@@ -276,6 +302,10 @@ pub const SearchEngine = struct {
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
+            .search_start_time = undefined,
+            .hard_time_limit_ms = null,
+            .node_limit = null,
+            .root_search_moves = null,
         };
     }
 
@@ -438,10 +468,38 @@ pub const SearchEngine = struct {
 
         // Calculate time limit
         const time_limit = self.calculateTimeLimit(options);
+        self.search_start_time = start_time;
+        self.hard_time_limit_ms = time_limit;
+        self.node_limit = options.nodes;
+        self.root_search_moves = null;
+
+        var parsed_search_moves: ?[]Move = null;
+        if (options.search_moves) |search_moves| {
+            var move_list = std.ArrayList(Move).empty;
+            defer move_list.deinit(self.allocator);
+
+            for (search_moves) |move_str| {
+                try move_list.append(self.allocator, try Move.fromString(move_str));
+            }
+
+            parsed_search_moves = try move_list.toOwnedSlice(self.allocator);
+            self.root_search_moves = parsed_search_moves;
+        }
+        defer if (parsed_search_moves) |moves| self.allocator.free(moves);
 
         // Generate legal moves
         var legal_moves = MoveList.init();
         try self.board.generateLegalMoves(&legal_moves);
+
+        if (self.root_search_moves) |search_moves| {
+            var filtered_moves = MoveList.init();
+            for (legal_moves.slice()) |legal_move| {
+                if (containsMove(search_moves, legal_move)) {
+                    filtered_moves.append(legal_move);
+                }
+            }
+            legal_moves = filtered_moves;
+        }
 
         if (legal_moves.count == 0) {
             return SearchResult{
@@ -450,24 +508,36 @@ pub const SearchEngine = struct {
                 .nodes = 0,
                 .time_ms = 0,
                 .depth = 0,
+                .pv = .{},
             };
         }
 
         // If only one legal move, return it immediately
         if (legal_moves.count == 1) {
+            var pv: PvLine = .{};
+            pv.append(legal_moves.moves[0]);
             return SearchResult{
                 .best_move = legal_moves.moves[0],
                 .score = 0,
                 .nodes = 1,
                 .time_ms = elapsedMs(start_time),
                 .depth = 0,
+                .pv = pv,
             };
         }
 
         var best_move = legal_moves.moves[0];
         var best_score: i32 = -INF;
+        var best_pv: PvLine = .{};
         self.root_best_move = best_move;
-        const max_depth: u32 = if (options.depth) |d| @intCast(d) else 64;
+        const mate_depth_limit: u32 = if (options.mate) |moves_to_mate|
+            @max(@as(u32, 1), @as(u32, @intCast(@min(moves_to_mate * 2, 64))))
+        else
+            64;
+        const max_depth: u32 = if (options.depth) |d|
+            @min(@as(u32, @intCast(d)), mate_depth_limit)
+        else
+            mate_depth_limit;
         var completed_depth: u32 = 0;
 
         // Iterative deepening
@@ -514,22 +584,17 @@ pub const SearchEngine = struct {
             best_move = self.root_best_move;
             best_score = score;
             completed_depth = depth;
+            best_pv = self.extractPv(depth);
+            if (best_pv.count == 0) {
+                best_pv.append(best_move);
+            }
 
             const iter_time = elapsedMs(iter_start);
             const total_time = elapsedMs(start_time);
 
             // UCI info output at every depth
             if (self.uci_output != null) {
-                const nps = if (total_time > 0) (self.nodes_searched * 1000) / @as(usize, @intCast(total_time)) else 0;
-                self.writeUciLine("info depth {d} seldepth {d} score cp {d} nodes {d} time {d} nps {d} pv {f}", .{
-                    depth,
-                    self.seldepth,
-                    score,
-                    self.nodes_searched,
-                    total_time,
-                    nps,
-                    best_move,
-                });
+                self.writeUciInfoLine(depth, score, total_time, best_pv);
             }
 
             // Check time limit
@@ -551,12 +616,15 @@ pub const SearchEngine = struct {
         const elapsed = elapsedMs(start_time);
 
         if (completed_depth == 0) {
+            var pv: PvLine = .{};
+            pv.append(legal_moves.moves[0]);
             return SearchResult{
                 .best_move = legal_moves.moves[0],
                 .score = 0,
                 .nodes = self.nodes_searched,
                 .time_ms = elapsed,
                 .depth = 0,
+                .pv = pv,
             };
         }
 
@@ -566,6 +634,7 @@ pub const SearchEngine = struct {
             .nodes = self.nodes_searched,
             .time_ms = elapsed,
             .depth = completed_depth,
+            .pv = best_pv,
         };
     }
 
@@ -595,7 +664,10 @@ pub const SearchEngine = struct {
 
         // Calculate moves played and estimate moves remaining
         const moves_played = self.board.board.fullmove_number;
-        const estimated_moves_remaining = @max(20, 40 - @min(moves_played, 40));
+        const estimated_moves_remaining = if (options.moves_to_go) |moves_to_go|
+            @max(@as(u64, 1), moves_to_go)
+        else
+            @max(@as(u64, 20), 40 - @min(@as(u64, moves_played), 40));
 
         // Base time allocation: divide remaining time by estimated moves
         // Use a slightly larger divisor for safety margin
@@ -619,6 +691,41 @@ pub const SearchEngine = struct {
         const time_for_move = @max(min_time, @min(time_budget, max_time));
 
         return time_for_move;
+    }
+
+    fn containsMove(moves: []const Move, candidate: Move) bool {
+        for (moves) |move| {
+            if (movesEqual(move, candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn shouldAbortSearch(self: *Self) bool {
+        if (self.stop_search.load(.seq_cst)) {
+            return true;
+        }
+
+        if (self.node_limit) |limit| {
+            if (self.nodes_searched >= limit) {
+                self.stop_search.store(true, .seq_cst);
+                return true;
+            }
+        }
+
+        if (self.hard_time_limit_ms) |limit| {
+            if ((self.nodes_searched & 1023) == 0) {
+                const elapsed = elapsedMs(self.search_start_time);
+                const elapsed_ms: u64 = @intCast(@max(elapsed, 0));
+                if (elapsed_ms >= limit) {
+                    self.stop_search.store(true, .seq_cst);
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     inline fn continuationContext(self: *const Self, ply: u32) struct { prev: ?u16, prev2: ?u16 } {
@@ -1065,7 +1172,7 @@ pub const SearchEngine = struct {
             return self.quiescence(alpha_in, beta, ply);
         }
 
-        if (self.stop_search.load(.seq_cst)) {
+        if (self.shouldAbortSearch()) {
             return 0;
         }
 
@@ -1164,6 +1271,14 @@ pub const SearchEngine = struct {
         const root_pawn_endgame = ply == 0 and search_depth >= 2 and isPurePawnEndgame(self.board.board);
 
         while (move_picker.next()) |move| {
+            if (ply == 0) {
+                if (self.root_search_moves) |root_moves| {
+                    if (!containsMove(root_moves, move)) {
+                        continue;
+                    }
+                }
+            }
+
             const old_previous = self.previous_move;
 
             const move_color = self.board.board.move;
@@ -1495,7 +1610,7 @@ pub const SearchEngine = struct {
 
     /// Quiescence search - search only tactical moves to avoid horizon effect
     fn quiescence(self: *Self, alpha_in: i32, beta: i32, ply: u32) anyerror!i32 {
-        if (self.stop_search.load(.seq_cst)) {
+        if (self.shouldAbortSearch()) {
             return 0;
         }
 
@@ -1694,6 +1809,72 @@ pub const SearchEngine = struct {
                 scores[best_idx] = tmp_score;
             }
         }
+    }
+
+    fn extractPv(self: *Self, max_len: u32) PvLine {
+        var pv: PvLine = .{};
+        var pv_board = self.board.*;
+        var seen_hashes: [MAX_PV_LEN]u64 = undefined;
+        var seen_count: usize = 0;
+        const limit = @min(@as(usize, @intCast(max_len)), MAX_PV_LEN);
+
+        while (pv.count < limit) {
+            const hash = pv_board.zobrist_hasher.zobrist_hash;
+            for (seen_hashes[0..seen_count]) |seen_hash| {
+                if (seen_hash == hash) return pv;
+            }
+            seen_hashes[seen_count] = hash;
+            seen_count += 1;
+
+            const entry = self.tt.probe(hash) orelse return pv;
+            const tt_move = entry.best_move;
+            if (tt_move.from() == 0 and tt_move.to() == 0 and tt_move.promotion() == null) {
+                return pv;
+            }
+
+            var legal_moves = MoveList.init();
+            pv_board.generateLegalMoves(&legal_moves) catch return pv;
+
+            var matched_move: ?Move = null;
+            for (legal_moves.slice()) |move| {
+                if (movesEqual(move, tt_move)) {
+                    matched_move = move;
+                    break;
+                }
+            }
+
+            const move = matched_move orelse return pv;
+            pv.append(move);
+            pv_board.makeMoveUnchecked(move);
+        }
+
+        return pv;
+    }
+
+    fn writeUciInfoLine(self: *Self, depth: u32, score: i32, total_time: i64, pv: PvLine) void {
+        const file = self.uci_output orelse return;
+        var out_buf: [4096]u8 = undefined;
+        var writer = file.writer(&out_buf);
+        const nps = if (total_time > 0) (self.nodes_searched * 1000) / @as(usize, @intCast(total_time)) else 0;
+
+        writer.interface.print("info depth {d} seldepth {d} score cp {d} nodes {d} time {d} nps {d}", .{
+            depth,
+            self.seldepth,
+            score,
+            self.nodes_searched,
+            total_time,
+            nps,
+        }) catch return;
+
+        if (pv.count > 0) {
+            writer.interface.writeAll(" pv") catch return;
+            for (pv.moves[0..pv.count]) |move| {
+                writer.interface.print(" {f}", .{move}) catch return;
+            }
+        }
+
+        writer.interface.writeAll("\n") catch return;
+        writer.interface.flush() catch return;
     }
 
     fn writeUciLine(self: *Self, comptime fmt: []const u8, args: anytype) void {

@@ -85,7 +85,7 @@ Sykora is tested by CCRL. Current known entries:
 
 ### UCI and Developer Commands
 
-- Standard UCI command support (`uci`, `isready`, `position`, `go`, `stop`, `setoption`, `ucinewgame`, `quit`).
+- Standard UCI command support (`uci`, `isready`, `position`, `go`, `stop`, `setoption`, `ucinewgame`, `quit`), including `searchmoves`, `movestogo`, and a safe `go ponder`/`ponderhit` fallback flow.
 - `display` helper command for board/FEN/hash inspection.
 - `perft` helper command with:
   - Fast node count mode

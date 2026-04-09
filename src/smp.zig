@@ -25,6 +25,12 @@ const EMPTY_HELPER_RESULT = HelperResult{
     .nodes = 0,
 };
 
+fn movesEqual(a: board.Move, b: board.Move) bool {
+    return a.from() == b.from() and
+        a.to() == b.to() and
+        board.Move.eqlPromotion(a.promotion(), b.promotion());
+}
+
 pub fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
     const ns = now.since(start);
@@ -44,6 +50,11 @@ pub fn terminateSearch(self: *Uci) !void {
 }
 
 pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
+    defer {
+        var owned_opts = go_opts;
+        owned_opts.deinit(self.allocator);
+    }
+
     try self.writeInfoString("search thread started", .{});
 
     const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
@@ -95,13 +106,17 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
     }
 
     const search_opts = SearchOptions{
+        .search_moves = go_opts.search_moves,
         .infinite = go_opts.infinite orelse false,
         .move_time = go_opts.move_time,
         .wtime = go_opts.wtime,
         .btime = go_opts.btime,
         .winc = go_opts.winc,
         .binc = go_opts.binc,
+        .moves_to_go = go_opts.moves_to_go,
         .depth = go_opts.depth,
+        .nodes = go_opts.nodes,
+        .mate = go_opts.mate,
     };
 
     const result = search_engine.search(search_opts) catch {
@@ -125,7 +140,15 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
     }
 
     try self.writeInfoString("search thread stopped, total nodes {d}", .{total_nodes});
-    try self.writeStdout("bestmove {f}", .{self.best_move});
+    if (!self.defer_bestmove) {
+        if (movesEqual(self.best_move, result.best_move)) {
+            if (result.pv.ponderMove()) |ponder_move| {
+                try self.writeStdout("bestmove {f} ponder {f}", .{ self.best_move, ponder_move });
+                return;
+            }
+        }
+        try self.writeStdout("bestmove {f}", .{self.best_move});
+    }
 }
 
 fn helperSearch(
@@ -163,8 +186,10 @@ fn helperSearch(
     const start_depth: u32 = @min(maxDepthStagger(idx), max_depth);
 
     const search_opts = SearchOptions{
+        .search_moves = go_opts.search_moves,
         .infinite = true,
         .depth = go_opts.depth,
+        .mate = go_opts.mate,
         .start_depth = start_depth,
     };
 

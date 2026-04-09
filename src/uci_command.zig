@@ -142,4 +142,28 @@ pub const GoOptions = struct {
     mate: ?u64 = null,
     move_time: ?u64 = null,
     infinite: ?bool = null,
+
+    pub fn clone(self: GoOptions, allocator: std.mem.Allocator) !GoOptions {
+        var copy = self;
+        if (self.search_moves) |moves| {
+            var move_copies = try allocator.alloc([]const u8, moves.len);
+            errdefer allocator.free(move_copies);
+
+            for (moves, 0..) |move, i| {
+                move_copies[i] = try allocator.dupe(u8, move);
+            }
+            copy.search_moves = move_copies;
+        }
+        return copy;
+    }
+
+    pub fn deinit(self: *GoOptions, allocator: std.mem.Allocator) void {
+        if (self.search_moves) |moves| {
+            for (moves) |move| {
+                allocator.free(move);
+            }
+            allocator.free(moves);
+        }
+        self.* = .{};
+    }
 };

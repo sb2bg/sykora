@@ -82,7 +82,6 @@ pub const UciParser = struct {
                     return error.UnknownCommand;
                 }
 
-                // TODO: check if value can have spaces
                 const value = parser.next() orelse return error.UnexpectedEOF;
                 return ToEngineCommand{ .setoption = .{ .name = name, .value = value } };
             },
@@ -183,9 +182,9 @@ pub const UciParser = struct {
                                 break;
                             }
                             const move = parser.next() orelse break;
-                            try moves_list.append(self.allocator, move);
+                            try moves_list.append(self.allocator, try self.allocator.dupe(u8, move));
                         }
-                        go_params.search_moves = moves_list.toOwnedSlice(self.allocator) catch &[_][]const u8{};
+                        go_params.search_moves = try moves_list.toOwnedSlice(self.allocator);
                     } else if (std.mem.eql(u8, param, "ponder")) {
                         go_params.ponder = true;
                     } else if (std.mem.eql(u8, param, "wtime")) {
