@@ -1210,7 +1210,8 @@ pub const SearchEngine = struct {
                 }
             }
 
-            // SEE capture pruning - trim clearly losing captures at shallow non-PV nodes.
+            // Pre-compute SEE for capture pruning (before make-move, since SEE needs pre-move board).
+            var see_prune_candidate = false;
             if (!is_pv_node and
                 !in_check and
                 is_capture and
@@ -1222,16 +1223,7 @@ pub const SearchEngine = struct {
                 if (!is_tt_move) {
                     const see_score = staticExchangeEvalPosition(self.board.board, move);
                     const see_margin = MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
-                    if (see_score < -see_margin and !self.moveGivesCheck(move)) {
-                        continue;
-                    }
-                }
-            }
-
-            // Futility pruning - skip quiet moves if futile (but not if move gives check)
-            if (futile and !is_capture and !is_promotion and moves_searched > 0) {
-                if (!self.moveGivesCheck(move) and !self.killer_moves.isKiller(move, ply)) {
-                    continue;
+                    see_prune_candidate = see_score < -see_margin;
                 }
             }
 
@@ -1245,6 +1237,26 @@ pub const SearchEngine = struct {
             }
             self.nodes_searched += 1;
             const gives_check = self.board.isInCheck(self.board.board.move);
+
+            // Post-move pruning: SEE capture pruning and futility pruning use gives_check
+            // from the already-made move, avoiding a separate make/unmake for check detection.
+            const should_prune = blk: {
+                // SEE capture pruning - trim clearly losing non-checking captures.
+                if (see_prune_candidate and !gives_check) break :blk true;
+                // Futility pruning - skip quiet moves if futile (but not if move gives check)
+                if (futile and !is_capture and !is_promotion and moves_searched > 0 and
+                    !gives_check and !self.killer_moves.isKiller(move, ply)) break :blk true;
+                break :blk false;
+            };
+            if (should_prune) {
+                self.popAccumulator();
+                self.board.unmakeMoveUnchecked(move, undo);
+                self.previous_move = old_previous;
+                if (ply < MAX_PLY) {
+                    self.continuation_keys[ply] = old_continuation_key;
+                }
+                continue;
+            }
 
             // Add position to history for repetition detection
             const old_hist_count = self.history_count;
