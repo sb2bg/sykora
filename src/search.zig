@@ -473,7 +473,7 @@ pub const SearchEngine = struct {
         // Iterative deepening
         var depth: u32 = options.start_depth;
         while (depth <= max_depth) : (depth += 1) {
-            if (self.stop_search.load(.seq_cst)) break;
+            if (self.stop_search.load(.monotonic)) break;
 
             const iter_start = std.time.Instant.now() catch unreachable;
 
@@ -493,7 +493,7 @@ pub const SearchEngine = struct {
             while (true) {
                 score = try self.alphaBeta(asp_alpha, asp_beta, depth, 0, true);
 
-                if (self.stop_search.load(.seq_cst)) break;
+                if (self.stop_search.load(.monotonic)) break;
 
                 if (score <= asp_alpha) {
                     // Fail low - widen alpha
@@ -509,7 +509,7 @@ pub const SearchEngine = struct {
             }
 
             // Skip incomplete iterations (stopped mid-search)
-            if (self.stop_search.load(.seq_cst)) break;
+            if (self.stop_search.load(.monotonic)) break;
 
             best_move = self.root_best_move;
             best_score = score;
@@ -1065,7 +1065,7 @@ pub const SearchEngine = struct {
             return self.quiescence(alpha_in, beta, ply);
         }
 
-        if (self.stop_search.load(.seq_cst)) {
+        if (self.stop_search.load(.monotonic)) {
             return 0;
         }
 
@@ -1495,7 +1495,7 @@ pub const SearchEngine = struct {
 
     /// Quiescence search - search only tactical moves to avoid horizon effect
     fn quiescence(self: *Self, alpha_in: i32, beta: i32, ply: u32) anyerror!i32 {
-        if (self.stop_search.load(.seq_cst)) {
+        if (self.stop_search.load(.monotonic)) {
             return 0;
         }
 

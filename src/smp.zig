@@ -32,7 +32,7 @@ pub fn elapsedMs(start: std.time.Instant) i64 {
 }
 
 pub fn terminateSearch(self: *Uci) !void {
-    self.stop_search.store(true, .seq_cst);
+    self.stop_search.store(true, .monotonic);
 
     if (self.search_thread) |thread| {
         const start = std.time.Instant.now() catch return UciError.IOError;
@@ -105,12 +105,12 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
     };
 
     const result = search_engine.search(search_opts) catch {
-        self.stop_search.store(true, .seq_cst);
+        self.stop_search.store(true, .monotonic);
         joinHelpers(self, num_helpers);
         return UciError.IOError;
     };
 
-    self.stop_search.store(true, .seq_cst);
+    self.stop_search.store(true, .monotonic);
     joinHelpers(self, num_helpers);
 
     if (num_helpers > 0) {

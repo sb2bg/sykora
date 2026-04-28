@@ -102,7 +102,7 @@ pub const Uci = struct {
 
     pub fn deinit(self: *Self) void {
         // Ensure search thread is terminated before cleanup
-        self.stop_search.store(true, .seq_cst);
+        self.stop_search.store(true, .monotonic);
         if (self.search_thread) |thread| {
             thread.join();
             self.search_thread = null;
@@ -223,7 +223,7 @@ pub const Uci = struct {
                 try smp.terminateSearch(self);
                 try self.writeInfoString("{any}", .{go_opts});
                 try self.writeInfoString("starting search thread", .{});
-                self.stop_search.store(false, .seq_cst);
+                self.stop_search.store(false, .monotonic);
                 self.best_move = board.Move.init(0, 0, null);
 
                 // Use larger stack size (8MB) for search thread due to large SearchEngine struct
