@@ -388,6 +388,7 @@ pub const AccumulatorPair = struct {
 
 const SimdWeightVec = @Vector(8, i16);
 const SimdAccVec = @Vector(8, i32);
+const SimdSumVec = @Vector(8, i64);
 const SIMD_LANES = @typeInfo(SimdAccVec).vector.len;
 
 inline fn perspectiveMirrored(king_sq: u8) bool {
@@ -504,6 +505,114 @@ inline fn applyFeatureSlicesAddAddSubSub(
     }
 }
 
+inline fn applyFeatureSlicesFromPrevAddSub(
+    dest: []i32,
+    prev: []const i32,
+    add_weights: []const i16,
+    sub_weights: []const i16,
+) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const prev_ptr: *align(1) const SimdAccVec = @ptrCast(&prev[h]);
+        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
+        const sub_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = prev_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_ptr.*));
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] = prev[h] + add_weights[h] - sub_weights[h];
+    }
+}
+
+inline fn applyFeatureSlicesFromPrevAddSubSub(
+    dest: []i32,
+    prev: []const i32,
+    add_weights: []const i16,
+    sub_a_weights: []const i16,
+    sub_b_weights: []const i16,
+) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const prev_ptr: *align(1) const SimdAccVec = @ptrCast(&prev[h]);
+        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
+        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
+        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = prev_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] = prev[h] + add_weights[h] - sub_a_weights[h] - sub_b_weights[h];
+    }
+}
+
+inline fn applyFeatureSlicesFromPrevAddAddSubSub(
+    dest: []i32,
+    prev: []const i32,
+    add_a_weights: []const i16,
+    add_b_weights: []const i16,
+    sub_a_weights: []const i16,
+    sub_b_weights: []const i16,
+) void {
+    var h: usize = 0;
+    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
+        const prev_ptr: *align(1) const SimdAccVec = @ptrCast(&prev[h]);
+        const add_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_a_weights[h]);
+        const add_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_b_weights[h]);
+        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
+        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
+        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = prev_ptr.* + @as(SimdAccVec, @intCast(add_a_ptr.*)) + @as(SimdAccVec, @intCast(add_b_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
+    }
+
+    while (h < dest.len) : (h += 1) {
+        dest[h] = prev[h] + add_a_weights[h] + add_b_weights[h] - sub_a_weights[h] - sub_b_weights[h];
+    }
+}
+
+inline fn clampVecToActivationRange(values: SimdAccVec, max_value: i32) SimdAccVec {
+    const zero: SimdAccVec = @splat(0);
+    const max_vec: SimdAccVec = @splat(max_value);
+    return @min(@max(values, zero), max_vec);
+}
+
+inline fn reduceProductToI64(values: SimdAccVec, weights: SimdAccVec) i64 {
+    const product = values * weights;
+    return @reduce(.Add, @as(SimdSumVec, @intCast(product)));
+}
+
+inline fn activatedDot(
+    acc_values: []const i32,
+    weights: []const i16,
+    hidden_size: usize,
+    activation_type: u8,
+    q0: i32,
+) i64 {
+    const use_screlu = activation_type == 1;
+    var sum: i64 = 0;
+    var h: usize = 0;
+
+    while (h + SIMD_LANES <= hidden_size) : (h += SIMD_LANES) {
+        const acc_ptr: *align(1) const SimdAccVec = @ptrCast(&acc_values[h]);
+        const weight_ptr: *align(1) const SimdWeightVec = @ptrCast(&weights[h]);
+        const clamped = clampVecToActivationRange(acc_ptr.*, q0);
+        const activated = if (use_screlu) clamped * clamped else clamped;
+        sum += reduceProductToI64(activated, @intCast(weight_ptr.*));
+    }
+
+    while (h < hidden_size) : (h += 1) {
+        const v = clampToActivationRange(acc_values[h], q0);
+        if (use_screlu) {
+            sum += @as(i64, v) * @as(i64, v) * @as(i64, weights[h]);
+        } else {
+            sum += @as(i64, v) * @as(i64, weights[h]);
+        }
+    }
+
+    return sum;
+}
+
 fn initPerspectiveAccumulator(
     net: *const Network,
     b: *Board,
@@ -580,6 +689,17 @@ inline fn perspectiveAccumulatorSlice(
     perspective: piece.Color,
     hidden_size: usize,
 ) []i32 {
+    return switch (perspective) {
+        .white => acc.white[0..hidden_size],
+        .black => acc.black[0..hidden_size],
+    };
+}
+
+inline fn perspectiveAccumulatorSliceConst(
+    acc: *const AccumulatorPair,
+    perspective: piece.Color,
+    hidden_size: usize,
+) []const i32 {
     return switch (perspective) {
         .white => acc.white[0..hidden_size],
         .black => acc.black[0..hidden_size],
@@ -669,8 +789,83 @@ inline fn applyPerspectiveAddAddSubSub(
     applyFeatureSlicesAddAddSubSub(dest, add_a_weights, add_b_weights, sub_a_weights, sub_b_weights);
 }
 
+inline fn applyPerspectiveFromPrevAddSub(
+    net: *const Network,
+    prev: *const AccumulatorPair,
+    result: *AccumulatorPair,
+    perspective: piece.Color,
+    king_sq: u8,
+    add_sq: u8,
+    add_pt: piece.Type,
+    add_color: piece.Color,
+    sub_sq: u8,
+    sub_pt: piece.Type,
+    sub_color: piece.Color,
+    hidden_size: usize,
+) void {
+    const dest = perspectiveAccumulatorSlice(result, perspective, hidden_size);
+    const prev_slice = perspectiveAccumulatorSliceConst(prev, perspective, hidden_size);
+    const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
+    const sub_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_sq, sub_pt, sub_color, hidden_size);
+    applyFeatureSlicesFromPrevAddSub(dest, prev_slice, add_weights, sub_weights);
+}
+
+inline fn applyPerspectiveFromPrevAddSubSub(
+    net: *const Network,
+    prev: *const AccumulatorPair,
+    result: *AccumulatorPair,
+    perspective: piece.Color,
+    king_sq: u8,
+    add_sq: u8,
+    add_pt: piece.Type,
+    add_color: piece.Color,
+    sub_a_sq: u8,
+    sub_a_pt: piece.Type,
+    sub_a_color: piece.Color,
+    sub_b_sq: u8,
+    sub_b_pt: piece.Type,
+    sub_b_color: piece.Color,
+    hidden_size: usize,
+) void {
+    const dest = perspectiveAccumulatorSlice(result, perspective, hidden_size);
+    const prev_slice = perspectiveAccumulatorSliceConst(prev, perspective, hidden_size);
+    const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
+    const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
+    const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
+    applyFeatureSlicesFromPrevAddSubSub(dest, prev_slice, add_weights, sub_a_weights, sub_b_weights);
+}
+
+inline fn applyPerspectiveFromPrevAddAddSubSub(
+    net: *const Network,
+    prev: *const AccumulatorPair,
+    result: *AccumulatorPair,
+    perspective: piece.Color,
+    king_sq: u8,
+    add_a_sq: u8,
+    add_a_pt: piece.Type,
+    add_a_color: piece.Color,
+    add_b_sq: u8,
+    add_b_pt: piece.Type,
+    add_b_color: piece.Color,
+    sub_a_sq: u8,
+    sub_a_pt: piece.Type,
+    sub_a_color: piece.Color,
+    sub_b_sq: u8,
+    sub_b_pt: piece.Type,
+    sub_b_color: piece.Color,
+    hidden_size: usize,
+) void {
+    const dest = perspectiveAccumulatorSlice(result, perspective, hidden_size);
+    const prev_slice = perspectiveAccumulatorSliceConst(prev, perspective, hidden_size);
+    const add_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_a_sq, add_a_pt, add_a_color, hidden_size);
+    const add_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_b_sq, add_b_pt, add_b_color, hidden_size);
+    const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
+    const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
+    applyFeatureSlicesFromPrevAddAddSubSub(dest, prev_slice, add_a_weights, add_b_weights, sub_a_weights, sub_b_weights);
+}
+
 /// Incremental accumulator update after a move.
-/// Copies `prev` into `result`, then applies feature deltas.
+/// Writes `result = prev + feature deltas` for each unchanged perspective.
 pub fn updateAccumulators(
     net: *const Network,
     b: *Board,
@@ -702,16 +897,10 @@ pub fn updateAccumulators(
     const final_piece = promotion orelse moved_piece;
     const opp_color = oppositeColor(moved_color);
 
-    if (!refresh_white) {
-        @memcpy(result.white[0..hidden_size], prev.white[0..hidden_size]);
-    }
-    if (!refresh_black) {
-        @memcpy(result.black[0..hidden_size], prev.black[0..hidden_size]);
-    }
-
     const applyPerspective = struct {
         inline fn run(
             net_: *const Network,
+            prev_: *const AccumulatorPair,
             result_: *AccumulatorPair,
             perspective: piece.Color,
             king_sq: u8,
@@ -730,8 +919,9 @@ pub fn updateAccumulators(
         ) void {
             if (is_castling_) {
                 if (rook_from_) |rf| {
-                    applyPerspectiveAddAddSubSub(
+                    applyPerspectiveFromPrevAddAddSubSub(
                         net_,
+                        prev_,
                         result_,
                         perspective,
                         king_sq,
@@ -750,8 +940,9 @@ pub fn updateAccumulators(
                         hidden_size_,
                     );
                 } else {
-                    applyPerspectiveAddSub(
+                    applyPerspectiveFromPrevAddSub(
                         net_,
+                        prev_,
                         result_,
                         perspective,
                         king_sq,
@@ -765,8 +956,9 @@ pub fn updateAccumulators(
                     );
                 }
             } else if (captured_piece_) |cp| {
-                applyPerspectiveAddSubSub(
+                applyPerspectiveFromPrevAddSubSub(
                     net_,
+                    prev_,
                     result_,
                     perspective,
                     king_sq,
@@ -782,8 +974,9 @@ pub fn updateAccumulators(
                     hidden_size_,
                 );
             } else {
-                applyPerspectiveAddSub(
+                applyPerspectiveFromPrevAddSub(
                     net_,
+                    prev_,
                     result_,
                     perspective,
                     king_sq,
@@ -802,6 +995,7 @@ pub fn updateAccumulators(
     if (!refresh_white) {
         applyPerspective(
             net,
+            prev,
             result,
             .white,
             white_king_sq,
@@ -822,6 +1016,7 @@ pub fn updateAccumulators(
     if (!refresh_black) {
         applyPerspective(
             net,
+            prev,
             result,
             .black,
             black_king_sq,
@@ -864,19 +1059,8 @@ fn evaluateV4FromAccumulators(
     const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
     const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
 
-    var sum: i64 = 0;
-    for (0..hidden_size) |idx| {
-        const us = clampToActivationRange(us_acc[idx], q0);
-        const them = clampToActivationRange(them_acc[idx], q0);
-
-        if (use_screlu) {
-            sum += @as(i64, us) * @as(i64, us) * @as(i64, head.output_weights[idx]);
-            sum += @as(i64, them) * @as(i64, them) * @as(i64, head.output_weights[hidden_size + idx]);
-        } else {
-            sum += @as(i64, us) * @as(i64, head.output_weights[idx]);
-            sum += @as(i64, them) * @as(i64, head.output_weights[hidden_size + idx]);
-        }
-    }
+    var sum = activatedDot(us_acc, head.output_weights[0..hidden_size], hidden_size, head.activation_type, q0) +
+        activatedDot(them_acc, head.output_weights[hidden_size .. 2 * hidden_size], hidden_size, head.activation_type, q0);
 
     if (use_screlu) {
         sum = divRoundNearestSigned(sum, q0);
@@ -896,19 +1080,8 @@ fn evaluateV3FromAccumulators(
     const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
     const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
 
-    var sum: i64 = 0;
-    for (0..hidden_size) |idx| {
-        const us = clampToActivationRange(us_acc[idx], Q0);
-        const them = clampToActivationRange(them_acc[idx], Q0);
-
-        if (use_screlu) {
-            sum += @as(i64, us) * @as(i64, us) * @as(i64, head.output_weights[idx]);
-            sum += @as(i64, them) * @as(i64, them) * @as(i64, head.output_weights[hidden_size + idx]);
-        } else {
-            sum += @as(i64, us) * @as(i64, head.output_weights[idx]);
-            sum += @as(i64, them) * @as(i64, head.output_weights[hidden_size + idx]);
-        }
-    }
+    var sum = activatedDot(us_acc, head.output_weights[0..hidden_size], hidden_size, head.activation_type, Q0) +
+        activatedDot(them_acc, head.output_weights[hidden_size .. 2 * hidden_size], hidden_size, head.activation_type, Q0);
 
     if (use_screlu) {
         sum = @divTrunc(sum, Q0);
