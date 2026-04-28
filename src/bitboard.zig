@@ -281,12 +281,85 @@ pub const Board = struct {
             captured_square = if (color == .white) to_sq - 8 else to_sq + 8;
         }
 
-        self.applyMoveUnchecked(move);
+        const color_idx: usize = @intFromEnum(color);
+        const opponent_idx: usize = @intFromEnum(opponent_color);
+        const from_mask = @as(u64, 1) << @intCast(from_sq);
+        const to_mask = @as(u64, 1) << @intCast(to_sq);
+        const final_piece = if (move.promotion()) |promo| promo else moved_piece;
+
+        if (captured_piece) |cp| {
+            const capture_mask = @as(u64, 1) << @intCast(captured_square.?);
+            self.board.color_sets[opponent_idx] &= ~capture_mask;
+            self.board.kind_sets[@intFromEnum(cp)] &= ~capture_mask;
+        }
+
+        self.board.color_sets[color_idx] &= ~from_mask;
+        self.board.color_sets[color_idx] |= to_mask;
+
+        self.board.kind_sets[@intFromEnum(moved_piece)] &= ~from_mask;
+        self.board.kind_sets[@intFromEnum(final_piece)] |= to_mask;
+
+        if (castle_rook_from) |rook_from| {
+            const rook_from_mask = @as(u64, 1) << @intCast(rook_from);
+            const rook_to_mask = @as(u64, 1) << @intCast(castle_rook_to.?);
+            self.board.color_sets[color_idx] &= ~rook_from_mask;
+            self.board.color_sets[color_idx] |= rook_to_mask;
+            self.board.kind_sets[@intFromEnum(pieceInfo.Type.rook)] &= ~rook_from_mask;
+            self.board.kind_sets[@intFromEnum(pieceInfo.Type.rook)] |= rook_to_mask;
+        }
+
+        self.board.en_passant_square = null;
+        if (moved_piece == .pawn) {
+            const from_rank = from_sq / 8;
+            const to_rank = to_sq / 8;
+            if (@as(i16, to_rank) - @as(i16, from_rank) == 2 or @as(i16, to_rank) - @as(i16, from_rank) == -2) {
+                self.board.en_passant_square = if (color == .white) from_sq + 8 else from_sq - 8;
+            }
+        }
+
+        if (moved_piece == .king) {
+            if (color == .white) {
+                self.board.castle_rights.white_kingside = false;
+                self.board.castle_rights.white_queenside = false;
+            } else {
+                self.board.castle_rights.black_kingside = false;
+                self.board.castle_rights.black_queenside = false;
+            }
+        } else if (moved_piece == .rook) {
+            if (color == .white) {
+                if (from_sq == 0) self.board.castle_rights.white_queenside = false;
+                if (from_sq == 7) self.board.castle_rights.white_kingside = false;
+            } else {
+                if (from_sq == 56) self.board.castle_rights.black_queenside = false;
+                if (from_sq == 63) self.board.castle_rights.black_kingside = false;
+            }
+        }
+
+        if (captured_piece == .rook) {
+            if (opponent_color == .white) {
+                if (to_sq == 0) self.board.castle_rights.white_queenside = false;
+                if (to_sq == 7) self.board.castle_rights.white_kingside = false;
+            } else {
+                if (to_sq == 56) self.board.castle_rights.black_queenside = false;
+                if (to_sq == 63) self.board.castle_rights.black_kingside = false;
+            }
+        }
+
+        if (moved_piece == .pawn or captured_piece != null) {
+            self.board.halfmove_clock = 0;
+        } else if (self.board.halfmove_clock < std.math.maxInt(u8)) {
+            self.board.halfmove_clock += 1;
+        }
+
+        if (color == .black and self.board.fullmove_number < std.math.maxInt(u16)) {
+            self.board.fullmove_number += 1;
+        }
+
+        self.board.move = opponent_color;
 
         var hash = prev_hash;
         hash ^= zobrist.RandomTurn;
         hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(moved_piece, color, from_sq)];
-        const final_piece = if (move.promotion()) |promo| promo else moved_piece;
         hash ^= zobrist.RandomPiece[zobrist.ZobristHasher.pieceRandomIndex(final_piece, color, to_sq)];
 
         if (captured_piece) |cp| {
