@@ -1,4 +1,12 @@
+<div align="center">
+
+<img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="180" alt="Sykora Logo">
+
 # Sykora
+
+**A UCI chess engine written from scratch in Zig.**
+
+Magic bitboards, alpha-beta with modern pruning and reductions, Lazy SMP, embedded NNUE trained via [Bullet](https://github.com/jw1912/bullet).
 
 [![Sykora CCRL badge](https://ccrl-badges.vercel.app/badge?engine=Sykora&list=blitz&showList=false&showRank=true)](<https://computerchess.org.uk/ccrl/404/cgi/engine_details.cgi?match_length=30&print=Details+(text)&eng=Sykora%200.2.2%2064-bit#Sykora_0_2_2_64-bit>)
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
@@ -6,23 +14,37 @@
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
 [![Release SPRT](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml/badge.svg)](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml)
 
-<img src="https://github.com/sb2bg/sykora/blob/main/assets/logo.png" width="200" alt="Sykora Logo">
+[Play live on Lichess →](https://lichess.org/@/sykorabot)
 
-Sykora is a UCI chess engine written from scratch in Zig. It features magic bitboard move generation, alpha-beta search with modern pruning and reductions, Lazy SMP parallel search, a hand-tuned classical evaluation, and NNUE evaluation trained via the [Bullet](https://github.com/jw1912/bullet) trainer. An NNUE net is embedded in the binary and enabled by default. Sykora plays live on Lichess as [SykoraBot](https://lichess.org/@/sykorabot).
+</div>
+
+---
+
+## Quick Start
+
+Requires [Zig](https://ziglang.org/) `0.15.2`.
+
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/sykora
+```
+
+Engine is compatible with any UCI GUI (Arena, Cutechess, etc.)
 
 ## Strength
 
-Sykora is tested by CCRL. Current known entries:
+Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entries:
 
-| Version               | CCRL Rating | Rank  | % Change vs `0.1.0` |
-| --------------------- | ----------- | ----- | ------------------- |
-| `Sykora 0.2.2 64-bit` | `3240`      | `163` | `+36.82%`           |
-| `Sykora 0.2.1 64-bit` | N/A         | N/A   | N/A                 |
-| `Sykora 0.1.0 64-bit` | `2368`      | `423` | baseline            |
+| Version               | CCRL Rating | Rank  | Elo vs `0.1.0` |
+| --------------------- | ----------- | ----- | -------------- |
+| `Sykora 0.2.2 64-bit` | `3240`      | `163` | `+872`         |
+| `Sykora 0.2.1 64-bit` | N/A         | N/A   | N/A            |
+| `Sykora 0.1.0 64-bit` | `2368`      | `423` | baseline       |
 
 ## Features
 
-### Engine Core
+<details>
+<summary><b>Engine Core</b>: bitboards, magic move generation, Zobrist hashing</summary>
 
 - Bitboard-based board representation with fast occupancy/piece set operations.
 - Precomputed attack tables for king/knight/pawn moves.
@@ -31,7 +53,10 @@ Sykora is tested by CCRL. Current known entries:
 - Incremental make/unmake move pipeline with Zobrist hashing.
 - Polyglot-compatible en-passant hash handling.
 
-### Search
+</details>
+
+<details>
+<summary><b>Search</b>: PVS, aspiration windows, full pruning/reduction stack</summary>
 
 - Negamax alpha-beta search with iterative deepening.
 - Aspiration windows around prior iteration score.
@@ -61,7 +86,10 @@ Sykora is tested by CCRL. Current known entries:
 - Time management for clocked play.
 - Evaluation cache for expensive eval paths.
 
-### Evaluation
+</details>
+
+<details>
+<summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
   - `SYKNNUE3` and `SYKNNUE4` network loading
@@ -77,13 +105,19 @@ Sykora is tested by CCRL. Current known entries:
   - King safety and castling terms
   - Endgame mop-up/king activity terms
 
-### Parallel Search
+</details>
+
+<details>
+<summary><b>Parallel Search</b>: Lazy SMP with shared TT</summary>
 
 - Lazy SMP-style parallel search with helper threads.
 - Shared transposition table across threads.
 - Best-move voting across main/helper results.
 
-### UCI and Developer Commands
+</details>
+
+<details>
+<summary><b>UCI and Developer Commands</b></summary>
 
 - Standard UCI command support (`uci`, `isready`, `position`, `go`, `stop`, `setoption`, `ucinewgame`, `quit`).
 - `display` helper command for board/FEN/hash inspection.
@@ -92,7 +126,10 @@ Sykora is tested by CCRL. Current known entries:
   - `stats` mode (captures, checks, promotions, mates, etc.)
   - `divide` mode
 
-### Tooling
+</details>
+
+<details>
+<summary><b>Tooling</b>: perft, NPS, STS, SPRT, ratings, NNUE pipelines</summary>
 
 - Perft and movegen shell tests (`utils/test`).
 - NPS benchmarking (`utils/bench/nps.py`).
@@ -101,19 +138,21 @@ Sykora is tested by CCRL. Current known entries:
 - Long-term archived experiment history, SPRT, and ratings workflow (`utils/history`).
 - NNUE data prep/training/export pipelines (`utils/nnue`, `utils/data`).
 
+</details>
+
 ## UCI Options
 
-| Option           | Type   | Default | Description                                                |
-| ---------------- | ------ | ------- | ---------------------------------------------------------- |
-| `Debug Log File` | string | `<empty>` | Path for debug logging                                   |
-| `UseNNUE`        | bool   | `true`  | Enable NNUE evaluation (embedded net loads automatically)  |
-| `EvalFile`       | string | `<empty>` | Path to external `.sknnue` file (overrides embedded net) |
-| `NnueBlend`      | int    | `100`   | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
-| `NnueScale`      | int    | `100`   | NNUE output scaling factor (10..400)                       |
-| `Threads`        | int    | `1`     | Search threads (1..64, Lazy SMP)                           |
-| `Hash`           | int    | `128`   | Transposition table size in MB (1..4096)                   |
+| Option           | Type   | Default   | Description                                                |
+| ---------------- | ------ | --------- | ---------------------------------------------------------- |
+| `Debug Log File` | string | `<empty>` | Path for debug logging                                     |
+| `UseNNUE`        | bool   | `true`    | Enable NNUE evaluation (embedded net loads automatically)  |
+| `EvalFile`       | string | `<empty>` | Path to external `.sknnue` file (overrides embedded net)   |
+| `NnueBlend`      | int    | `100`     | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
+| `NnueScale`      | int    | `100`     | NNUE output scaling factor (10..400)                       |
+| `Threads`        | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
+| `Hash`           | int    | `128`     | Transposition table size in MB (1..4096)                   |
 
-The activation function (ReLU or SCReLU) is auto-detected from the network file header -- no manual configuration needed.
+The activation function (ReLU or SCReLU) is auto-detected from the network file header.
 
 ## Prerequisites
 
@@ -136,35 +175,22 @@ python3 utils/nnue/bullet/bootstrap.py --build-utils
 
 The tracked training runner lives under `utils/nnue/bullet_runner/`; datasets, checkpoints, and Bullet build output remain untracked.
 
-## Building
+## Building & Running
 
-To build the project, run:
+Build a release binary:
 
 ```bash
 zig build -Doptimize=ReleaseFast
 ```
 
-This will create an executable named `sykora` in the `zig-out/bin` directory. The embedded NNUE net (`src/net.sknnue`) is compiled into the binary -- no external files needed to play at full strength.
+The executable lands at `zig-out/bin/sykora`. The embedded NNUE net (`src/net.sknnue`) is compiled in.
 
-## Running
-
-To run the engine:
-
-```bash
-zig build run -Doptimize=ReleaseFast
-```
-
-Or directly run the executable:
+Run directly, or via the build system:
 
 ```bash
 ./zig-out/bin/sykora
+zig build run -Doptimize=ReleaseFast
 ```
-
-The engine starts with NNUE enabled and the embedded net loaded. No configuration is required for normal use.
-
-## Play On Lichess
-
-Sykora is available on Lichess at [SykoraBot](https://lichess.org/@/sykorabot).
 
 ## Testing
 
@@ -361,4 +387,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
