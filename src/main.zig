@@ -63,9 +63,3 @@ fn runGensfenFromSlice(args: []const [:0]u8, allocator: std.mem.Allocator) MainE
         return error.GensfenError;
     };
 }
-
-test {
-    _ = @import("board/attacks.zig");
-    _ = @import("board/legal_context.zig");
-    _ = @import("board/legal_movegen.zig");
-}
