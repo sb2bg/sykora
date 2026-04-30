@@ -393,13 +393,14 @@ fn epIsLegal(
     // if a rook/queen now attacks the king on the rank.
     const them = oppositeColor(b.move);
     const enemy = b.getColorBitboard(them);
-    const enemy_rq = enemy & (b.getKindBitboard(.rook) | b.getKindBitboard(.queen));
-    if (enemy_rq == 0) return true;
-
     const occ = b.occupied();
     const occ_after =
         (occ & ~(@as(u64, 1) << from) & ~(@as(u64, 1) << captured_sq)) | (@as(u64, 1) << to);
-    if ((attacks.getRookAttacks(ctx.king_sq, occ_after) & enemy_rq) != 0) return false;
+
+    const enemy_rq = enemy & (b.getKindBitboard(.rook) | b.getKindBitboard(.queen));
+    if (enemy_rq != 0) {
+        if ((attacks.getRookAttacks(ctx.king_sq, occ_after) & enemy_rq) != 0) return false;
+    }
 
     // Diagonal x-ray pin: same shape, with bishops/queens. Rare but possible
     // when our king sits on a diagonal to an enemy bishop and the captured
