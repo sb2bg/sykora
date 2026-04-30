@@ -421,3 +421,73 @@ pub inline fn getBishopAttacks(square: u6, occupied: u64) u64 {
 pub inline fn getQueenAttacks(square: u6, occupied: u64) u64 {
     return getRookAttacks(square, occupied) | getBishopAttacks(square, occupied);
 }
+
+// BETWEEN[a][b]: bits strictly between squares `a` and `b` along a rank, file,
+// or diagonal. 0 if not collinear or if a == b. For adjacent collinear squares
+// the result is 0 (no squares strictly between).
+const BETWEEN_BB = initBetween();
+// LINE[a][b]: every square on the rank/file/diagonal that contains both `a` and
+// `b`, with both endpoints included. 0 if not collinear or if a == b.
+const LINE_BB = initLine();
+
+fn initBetween() [64][64]u64 {
+    @setEvalBranchQuota(20_000_000);
+    var table: [64][64]u64 = undefined;
+    for (0..64) |a| {
+        const a_sq: u6 = @intCast(a);
+        const a_bit = @as(u64, 1) << a_sq;
+        const r_a = computeRookAttacks(a_sq, 0);
+        const b_a = computeBishopAttacks(a_sq, 0);
+        for (0..64) |b| {
+            const b_sq: u6 = @intCast(b);
+            if (a == b) {
+                table[a][b] = 0;
+                continue;
+            }
+            const b_bit = @as(u64, 1) << b_sq;
+            if ((r_a & b_bit) != 0) {
+                table[a][b] = computeRookAttacks(a_sq, b_bit) & computeRookAttacks(b_sq, a_bit);
+            } else if ((b_a & b_bit) != 0) {
+                table[a][b] = computeBishopAttacks(a_sq, b_bit) & computeBishopAttacks(b_sq, a_bit);
+            } else {
+                table[a][b] = 0;
+            }
+        }
+    }
+    return table;
+}
+
+fn initLine() [64][64]u64 {
+    @setEvalBranchQuota(20_000_000);
+    var table: [64][64]u64 = undefined;
+    for (0..64) |a| {
+        const a_sq: u6 = @intCast(a);
+        const a_bit = @as(u64, 1) << a_sq;
+        const r_a = computeRookAttacks(a_sq, 0);
+        const b_a = computeBishopAttacks(a_sq, 0);
+        for (0..64) |b| {
+            const b_sq: u6 = @intCast(b);
+            if (a == b) {
+                table[a][b] = 0;
+                continue;
+            }
+            const b_bit = @as(u64, 1) << b_sq;
+            if ((r_a & b_bit) != 0) {
+                table[a][b] = (r_a & computeRookAttacks(b_sq, 0)) | a_bit | b_bit;
+            } else if ((b_a & b_bit) != 0) {
+                table[a][b] = (b_a & computeBishopAttacks(b_sq, 0)) | a_bit | b_bit;
+            } else {
+                table[a][b] = 0;
+            }
+        }
+    }
+    return table;
+}
+
+pub inline fn between(a: u6, b: u6) u64 {
+    return BETWEEN_BB[a][b];
+}
+
+pub inline fn line(a: u6, b: u6) u64 {
+    return LINE_BB[a][b];
+}

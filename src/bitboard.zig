@@ -9,7 +9,8 @@ const ZobristHasher = zobrist.ZobristHasher;
 const attacks = @import("board/attacks.zig");
 const legality = @import("board/legality.zig");
 const make_unmake = @import("board/make_unmake.zig");
-const movegen = @import("board/movegen.zig");
+const legal_context_mod = @import("board/legal_context.zig");
+const legal_movegen = @import("board/legal_movegen.zig");
 
 pub const MAX_MOVES = 256;
 
@@ -471,9 +472,8 @@ pub const Board = struct {
 
     /// Generate all legal moves for the current position
     pub fn generateLegalMoves(self: *Self, moves: *MoveList) !void {
-        var pseudo_legal = MoveList.init();
-        try self.generatePseudoLegalMoves(&pseudo_legal);
-        movegen.filterLegalMoves(self, &pseudo_legal, moves, self.board.move);
+        const ctx = legal_context_mod.computeLegalContext(self.board);
+        legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .all);
     }
 
     pub const PerftStats = struct {
@@ -507,38 +507,19 @@ pub const Board = struct {
             return 1;
         }
 
-        // Generate pseudo-legal moves once
-        var pseudo_legal = MoveList.init();
-        try self.generatePseudoLegalMoves(&pseudo_legal);
+        var legal_moves = MoveList.init();
+        try self.generateLegalMoves(&legal_moves);
 
         var nodes: u64 = 0;
-        const color = self.board.move;
-
-        // Test each pseudo-legal move for legality
-        for (pseudo_legal.slice()) |move| {
-            // Save state
+        for (legal_moves.slice()) |move| {
             const old_board = self.board;
 
-            // Make move
             self.applyMoveUnchecked(move);
-
-            // Check if our king is in check after the move (illegal)
-            if (self.isInCheck(color)) {
-                // Illegal move, restore and skip
-                self.board = old_board;
-                continue;
-            }
-
-            // Legal move
             if (depth == 1) {
-                // Bulk counting at depth 1
                 nodes += 1;
             } else {
-                // Recurse
                 nodes += try self.perft(depth - 1);
             }
-
-            // Restore state
             self.board = old_board;
         }
 
@@ -552,30 +533,19 @@ pub const Board = struct {
             return;
         }
 
-        // Generate pseudo-legal moves once
-        var pseudo_legal = MoveList.init();
-        try self.generatePseudoLegalMoves(&pseudo_legal);
+        var legal_moves = MoveList.init();
+        try self.generateLegalMoves(&legal_moves);
 
         const moving_color = self.board.move;
         const opponent_color = if (moving_color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
         if (depth == 1) {
             // At depth 1, count move types for legal moves only
-            for (pseudo_legal.slice()) |move| {
-                // Save state
+            for (legal_moves.slice()) |move| {
                 const old_board = self.board;
 
-                // Make move
                 self.applyMoveUnchecked(move);
 
-                // Check if our king is in check after the move (illegal)
-                if (self.isInCheck(moving_color)) {
-                    // Illegal move, restore and skip
-                    self.board = old_board;
-                    continue;
-                }
-
-                // Legal move - count it and check properties
                 stats.nodes += 1;
 
                 // Check piece type before checking move properties
@@ -639,26 +609,15 @@ pub const Board = struct {
         }
 
         // Recursive case
-        for (pseudo_legal.slice()) |move| {
-            // Save state
+        for (legal_moves.slice()) |move| {
             const old_board = self.board;
 
-            // Make move
             self.applyMoveUnchecked(move);
 
-            // Check if our king is in check after the move (illegal)
-            if (self.isInCheck(moving_color)) {
-                // Illegal move, restore and skip
-                self.board = old_board;
-                continue;
-            }
-
-            // Recurse
             var child_stats = PerftStats{};
             try self.perftWithStats(depth - 1, &child_stats);
             stats.add(child_stats);
 
-            // Restore state
             self.board = old_board;
         }
     }
@@ -717,24 +676,14 @@ pub const Board = struct {
         make_unmake.applyMoveUncheckedForLegality(self, move);
     }
 
-    fn generatePseudoLegalMoves(self: *Self, moves: *MoveList) !void {
-        try movegen.generatePseudoLegalMoves(self, moves);
-    }
-
-    pub fn generateCaptures(self: *Self, moves: *MoveList) void {
-        movegen.generateCaptures(self, moves);
-    }
-
     pub fn generateLegalCaptures(self: *Self, moves: *MoveList) void {
-        movegen.generateLegalCaptures(self, moves);
-    }
-
-    pub fn generateQuietMoves(self: *Self, moves: *MoveList) void {
-        movegen.generateQuietMoves(self, moves);
+        const ctx = legal_context_mod.computeLegalContext(self.board);
+        legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .captures);
     }
 
     pub fn generateLegalQuietMoves(self: *Self, moves: *MoveList) void {
-        movegen.generateLegalQuietMoves(self, moves);
+        const ctx = legal_context_mod.computeLegalContext(self.board);
+        legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .quiets);
     }
 
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
