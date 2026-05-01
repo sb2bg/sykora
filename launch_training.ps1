@@ -1,4 +1,4 @@
-# Sykora NNUE V4 Training Launch Script
+# Sykora NNUE V5 Training Launch Script
 # Run from project root: .\launch_training.ps1
 #
 # Dataset: T80-2023 (jun-dec) + T80-2024 (jan-jun) .min-v2.v6 binpacks
@@ -60,11 +60,12 @@ foreach ($bp in $binpacks) {
 }
 
 # --- Training Parameters ---
-# SYKNNUE4 baseline:
-# mirrored king buckets (sykora16) -> FT 768 -> shared linear output
-$networkFormat = "syk4"
+# SYKNNUE5:
+# mirrored king buckets (sykora16) -> FT 512 -> 8 material-count output heads
+$networkFormat = "syk5"
 $bucketLayout = "sykora16"
-$hidden = 768
+$hidden = 512
+$outputBuckets = 8
 $endSuperbatch = 600
 $lrStart = 0.001
 $wdl = 0.25
@@ -72,7 +73,7 @@ $saveRate = 10
 $threads = 8
 
 Write-Host "============================================"
-Write-Host "  Sykora NNUE V4 Training (RTX 4070 Ti SUPER)"
+Write-Host "  Sykora NNUE V5 Training (RTX 4070 Ti SUPER)"
 Write-Host "============================================"
 Write-Host "Data:          T80-2023/2024 filtered set"
 Write-Host "Filtering:     .min-v2.v6 on T80 inputs"
@@ -81,7 +82,8 @@ Write-Host "Format:        binpack (sfbinpack)"
 Write-Host "Net format:    $networkFormat"
 Write-Host "Bucket layout: $bucketLayout"
 Write-Host "FT hidden:     $hidden"
-Write-Host "Dense head:    linear $($hidden * 2) -> 1"
+Write-Host "Output heads:  $outputBuckets material-count buckets"
+Write-Host "Dense head:    bucketed linear $($hidden * 2) -> 1"
 Write-Host "Superbatches:  1 -> $endSuperbatch"
 Write-Host "Save rate:     every $saveRate superbatches"
 Write-Host "Threads:       $threads"
@@ -104,6 +106,7 @@ python "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py" `
     --network-format $networkFormat `
     --bucket-layout $bucketLayout `
     --hidden $hidden `
+    --output-buckets $outputBuckets `
     --end-superbatch $endSuperbatch `
     --save-rate $saveRate `
     --threads $threads `

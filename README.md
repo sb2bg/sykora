@@ -92,8 +92,8 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 <summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `SYKNNUE3`, `SYKNNUE4`, and `SYKNNUE5` network loading
-  - Legacy `768 -> Nx2 -> 1` and mirrored king-bucketed sparse-input nets
+  - `SYKNNUE5` material-output-bucket nets, with compatibility for the current embedded net
+  - Mirrored king-bucketed sparse-input nets
   - SCReLU activation with incremental accumulators during search
   - Trained on high-depth self-play data via the Bullet trainer
   - King-bucket training path via `nnue/bullet_repo/examples/sykora_bucketed.rs`
@@ -260,7 +260,7 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed nets with dual-perspective accumulator updates and SCReLU activation. The engine can load `SYKNNUE3`, `SYKNNUE4`, and `SYKNNUE5` files. `SYKNNUE5` adds material-count output buckets on top of the `SYKNNUE4` sparse transformer.
+Sykora's current training target is `SYKNNUE5`: mirrored king-bucketed sparse inputs with dual-perspective accumulator updates, SCReLU activation, and material-count output buckets. The engine still keeps loader compatibility for the current embedded net until `src/net.sknnue` is replaced.
 
 ### Runtime
 
@@ -270,7 +270,7 @@ Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed ne
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For exact file-format details, see [specs/syknnue4_spec.md](specs/syknnue4_spec.md), [specs/syknnue5_spec.md](specs/syknnue5_spec.md), and `src/nnue.zig`.
+For exact file-format details, see [specs/syknnue5_spec.md](specs/syknnue5_spec.md) and `src/nnue.zig`.
 
 ### Training Pipeline
 
@@ -284,8 +284,9 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --data-format binpack \
   --bullet-repo nnue/bullet_repo \
   --output-root nnue/models/bullet \
-  --network-format syk3 \
-  --hidden 256 --end-superbatch 320 --threads 8
+  --network-format syk5 \
+  --bucket-layout sykora16 \
+  --hidden 512 --end-superbatch 320 --threads 8
 ```
 
 **Using BulletFormat .data files:**
@@ -295,8 +296,9 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --dataset nnue/data/bullet/train/train_main.data \
   --bullet-repo nnue/bullet_repo \
   --output-root nnue/models/bullet \
-  --network-format syk3 \
-  --hidden 256 --end-superbatch 320 --threads 8
+  --network-format syk5 \
+  --bucket-layout sykora16 \
+  --hidden 512 --end-superbatch 320 --threads 8
 ```
 
 **Multiple datasets** can be passed space-separated:
@@ -317,19 +319,6 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --resume nnue/models/bullet/<run_id>/checkpoints/<checkpoint>/raw.bin \
   --start-superbatch 161 --end-superbatch 320 \
   ...
-```
-
-**Training a `SYKNNUE4` baseline:**
-
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset data/training.binpack \
-  --data-format binpack \
-  --network-format syk4 \
-  --bucket-layout sykora16 \
-  --hidden 1536 \
-  --dense-l1 16 --dense-l2 32 \
-  --end-superbatch 320 --threads 8
 ```
 
 **Training a `SYKNNUE5` material-output-bucket net:**
@@ -354,18 +343,6 @@ Sykora can generate its own training data via the `gensfen` command:
 ```
 
 ### Exporting a Trained Net
-
-Export a `SYKNNUE4` checkpoint:
-
-```bash
-python utils/nnue/bullet/checkpoint_raw_to_npz.py \
-  --input nnue/models/bullet/<run_id>/checkpoints/<checkpoint> \
-  --output checkpoint_syk4.npz
-
-python utils/nnue/bullet/export_npz_to_syk4.py \
-  --input checkpoint_syk4.npz \
-  --output-net output.sknnue
-```
 
 Export a `SYKNNUE5` checkpoint:
 
@@ -403,7 +380,7 @@ python utils/nnue/bullet/gate_checkpoints.py \
 
 This gate now evaluates recent checkpoints by selfplay only. STS is intentionally not part of the checkpoint promotion path.
 
-SYKNNUE4 design spec: `specs/syknnue4_spec.md`. SYKNNUE5 design spec: `specs/syknnue5_spec.md`.
+SYKNNUE5 design spec: `specs/syknnue5_spec.md`.
 
 ## Contributing
 

@@ -16,8 +16,8 @@ from common import (  # noqa: E402
     ACTIVATION_SCRELU,
     FEATURE_SET_KING_BUCKETS_MIRRORED,
     SCALE,
-    V4_Q,
-    V4_Q0,
+    NNUE_Q,
+    NNUE_Q0,
     SYKORA16_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
     input_size_for_feature_set,
@@ -92,8 +92,8 @@ def main() -> int:
         else:
             activation_type = ACTIVATION_SCRELU
 
-        q0 = int(np.asarray(ckpt["q0"]).reshape(-1)[0]) if "q0" in ckpt else V4_Q0
-        q = int(np.asarray(ckpt["q"]).reshape(-1)[0]) if "q" in ckpt else V4_Q
+        q0 = int(np.asarray(ckpt["q0"]).reshape(-1)[0]) if "q0" in ckpt else NNUE_Q0
+        q = int(np.asarray(ckpt["q"]).reshape(-1)[0]) if "q" in ckpt else NNUE_Q
         scale = int(np.asarray(ckpt["scale"]).reshape(-1)[0]) if "scale" in ckpt else SCALE
 
     if args.q0 is not None:

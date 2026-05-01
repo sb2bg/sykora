@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--npz-to-net",
-        default="utils/nnue/bullet/export_npz_to_syk4.py",
-        help="Path to NPZ -> SYKNNUE4 exporter",
+        default="utils/nnue/bullet/export_npz_to_syk5.py",
+        help="Path to NPZ -> SYKNNUE5 exporter",
     )
     parser.add_argument(
         "--engine", default="./zig-out/bin/sykora", help="Engine under test"
@@ -172,7 +172,7 @@ def main() -> int:
 
     for ckpt in ckpts:
         npz_out = nets_dir / f"{ckpt.name}.npz"
-        net_out = nets_dir / f"{ckpt.name}.sknnue4"
+        net_out = nets_dir / f"{ckpt.name}.sknnue"
         run_capture(
             [
                 sys.executable,

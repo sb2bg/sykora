@@ -65,8 +65,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk4", "syk5"],
-        default="syk4",
+        choices=["syk5"],
+        default="syk5",
         help="Training network format",
     )
     parser.add_argument(
@@ -169,7 +169,7 @@ def main() -> int:
     if args.lr_start <= 0:
         print("--lr-start must be > 0", file=sys.stderr)
         return 2
-    if args.network_format == "syk5" and args.output_buckets != 8:
+    if args.output_buckets != 8:
         print("SYKNNUE5 currently supports exactly 8 output buckets", file=sys.stderr)
         return 2
     if args.save_rate <= 0 or args.threads <= 0:
@@ -229,8 +229,8 @@ def main() -> int:
             "bucket_layout_64": bucket_layout_64(args.bucket_layout),
             "ft_hidden": args.hidden,
             "hidden_activation": "screlu",
-            "head": "material_count_output_buckets" if args.network_format == "syk5" else "shared_linear",
-            "output_bucket_count": args.output_buckets if args.network_format == "syk5" else 1,
+            "head": "material_count_output_buckets",
+            "output_bucket_count": args.output_buckets,
         },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],

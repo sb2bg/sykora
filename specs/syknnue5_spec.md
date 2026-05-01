@@ -1,6 +1,6 @@
 # SYKNNUE5 Design Spec
 
-`SYKNNUE5` extends the stable `SYKNNUE4` king-bucketed SCReLU baseline with
+`SYKNNUE5` is Sykora's current king-bucketed SCReLU training target with
 material-count output buckets.
 
 ## Architecture
@@ -67,7 +67,7 @@ The first `H` weights apply to `A_us`; the second `H` apply to `A_them`.
 
 ## Quantization
 
-The baseline constants match `SYKNNUE4`:
+The baseline constants are:
 
 ```text
 Q0 = 255

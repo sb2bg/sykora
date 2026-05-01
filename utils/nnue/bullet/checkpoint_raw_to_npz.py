@@ -14,8 +14,8 @@ if str(UTILS_NNUE_DIR) not in sys.path:
 
 from common import (  # noqa: E402
     SCALE,
-    V4_Q0,
-    V4_Q,
+    NNUE_Q0,
+    NNUE_Q,
     SYKORA16_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
 )
@@ -23,7 +23,7 @@ from common import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert a SYKNNUE4 Bullet raw checkpoint into NPZ tensors."
+        description="Convert a SYKNNUE5 Bullet raw checkpoint into NPZ tensors."
     )
     parser.add_argument(
         "--input",
@@ -79,25 +79,16 @@ def expected_raw_sizes(
     *, bucket_count: int, ft_hidden: int, network_format: str, output_bucket_count: int
 ) -> dict[str, int]:
     input_size = 768 * bucket_count
-    if network_format == "syk5":
-        return {
-            "syk5_output_buckets": (
-                input_size * ft_hidden
-                + ft_hidden
-                + (output_bucket_count * 2 * ft_hidden)
-                + output_bucket_count
-            ),
-        }
-    if network_format == "syk4":
-        return {
-            "spec_merged_ft": (
-                input_size * ft_hidden
-                + ft_hidden
-                + (2 * ft_hidden)
-                + 1
-            ),
-        }
-    raise ValueError(f"unsupported network format: {network_format}")
+    if network_format != "syk5":
+        raise ValueError(f"unsupported network format: {network_format}")
+    return {
+        "syk5_output_buckets": (
+            input_size * ft_hidden
+            + ft_hidden
+            + (output_bucket_count * 2 * ft_hidden)
+            + output_bucket_count
+        ),
+    }
 
 
 def detect_layout(
@@ -122,10 +113,10 @@ def parse_network_config(run_meta: dict) -> dict:
     network = dict(run_meta.get("network", {}))
     env = run_meta.get("env", {})
 
-    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk4"
-    if network_format not in ("syk4", "syk5"):
+    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk5"
+    if network_format != "syk5":
         raise ValueError(
-            f"run_meta.json does not describe a supported Sykora NNUE run: {network_format!r}"
+            f"run_meta.json does not describe a SYKNNUE5 run: {network_format!r}"
         )
 
     if "bucket_layout_64" in network:
@@ -146,7 +137,7 @@ def parse_network_config(run_meta: dict) -> dict:
         "output_bucket_count": int(
             network.get("output_bucket_count")
             or env.get("SYK_OUTPUT_BUCKETS")
-            or (8 if network_format == "syk5" else 1)
+            or 8
         ),
     }
 
@@ -182,8 +173,8 @@ def main() -> int:
 
     l0w, offset = take_f32(raw, offset, input_size * ft_hidden)
     l0b, offset = take_f32(raw, offset, ft_hidden)
-    outw_len = (2 * ft_hidden) if network_format == "syk4" else (output_bucket_count * 2 * ft_hidden)
-    outb_len = 1 if network_format == "syk4" else output_bucket_count
+    outw_len = output_bucket_count * 2 * ft_hidden
+    outb_len = output_bucket_count
     outw, offset = take_f32(raw, offset, outw_len)
     outb, offset = take_f32(raw, offset, outb_len)
 
@@ -194,12 +185,8 @@ def main() -> int:
 
     ft_weights = l0w.reshape(input_size, ft_hidden)
     ft_bias = l0b.reshape(ft_hidden)
-    if network_format == "syk4":
-        out_weights = outw.reshape(2 * ft_hidden)
-        out_bias = outb.reshape(1)
-    else:
-        out_weights = outw.reshape(output_bucket_count, 2 * ft_hidden)
-        out_bias = outb.reshape(output_bucket_count)
+    out_weights = outw.reshape(output_bucket_count, 2 * ft_hidden)
+    out_bias = outb.reshape(output_bucket_count)
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,8 +201,8 @@ def main() -> int:
         input_bucket_count=np.asarray([bucket_count], dtype=np.uint8),
         output_bucket_count=np.asarray([output_bucket_count], dtype=np.uint8),
         activation_type=np.asarray([1], dtype=np.uint8),
-        q0=np.asarray([V4_Q0], dtype=np.uint16),
-        q=np.asarray([V4_Q], dtype=np.uint16),
+        q0=np.asarray([NNUE_Q0], dtype=np.uint16),
+        q=np.asarray([NNUE_Q], dtype=np.uint16),
         scale=np.asarray([SCALE], dtype=np.uint16),
     )
 
@@ -225,11 +212,8 @@ def main() -> int:
     print(f"Detected raw layout: {layout}")
     print(f"Bucket count: {bucket_count}")
     print(f"FT hidden: {ft_hidden}")
-    if network_format == "syk5":
-        print(f"Output buckets: {output_bucket_count}")
-        print(f"Dense head: bucketed linear {2 * ft_hidden} -> 1")
-    else:
-        print(f"Dense head: linear {2 * ft_hidden} -> 1")
+    print(f"Output buckets: {output_bucket_count}")
+    print(f"Dense head: bucketed linear {2 * ft_hidden} -> 1")
     print(f"Wrote: {out_path}")
     return 0
 
