@@ -92,7 +92,7 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 <summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `SYKNNUE3` and `SYKNNUE4` network loading
+  - `SYKNNUE3`, `SYKNNUE4`, and `SYKNNUE5` network loading
   - Legacy `768 -> Nx2 -> 1` and mirrored king-bucketed sparse-input nets
   - SCReLU activation with incremental accumulators during search
   - Trained on high-depth self-play data via the Bullet trainer
@@ -260,7 +260,7 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed nets with dual-perspective accumulator updates and SCReLU activation. The engine can load both `SYKNNUE3` and `SYKNNUE4` files.
+Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed nets with dual-perspective accumulator updates and SCReLU activation. The engine can load `SYKNNUE3`, `SYKNNUE4`, and `SYKNNUE5` files. `SYKNNUE5` adds material-count output buckets on top of the `SYKNNUE4` sparse transformer.
 
 ### Runtime
 
@@ -270,7 +270,7 @@ Sykora supports both legacy `768 -> Nx2 -> 1` nets and mirrored king-bucketed ne
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For exact file-format details, see [specs/syknnue4_spec.md](specs/syknnue4_spec.md) and `src/nnue.zig`.
+For exact file-format details, see [specs/syknnue4_spec.md](specs/syknnue4_spec.md), [specs/syknnue5_spec.md](specs/syknnue5_spec.md), and `src/nnue.zig`.
 
 ### Training Pipeline
 
@@ -332,6 +332,18 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --end-superbatch 320 --threads 8
 ```
 
+**Training a `SYKNNUE5` material-output-bucket net:**
+
+```bash
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset data/training.binpack \
+  --data-format binpack \
+  --network-format syk5 \
+  --bucket-layout sykora16 \
+  --hidden 512 \
+  --end-superbatch 320 --threads 8
+```
+
 ### Self-Play Data Generation
 
 Sykora can generate its own training data via the `gensfen` command:
@@ -352,6 +364,18 @@ python utils/nnue/bullet/checkpoint_raw_to_npz.py \
 
 python utils/nnue/bullet/export_npz_to_syk4.py \
   --input checkpoint_syk4.npz \
+  --output-net output.sknnue
+```
+
+Export a `SYKNNUE5` checkpoint:
+
+```bash
+python utils/nnue/bullet/checkpoint_raw_to_npz.py \
+  --input nnue/models/bullet/<run_id>/checkpoints/<checkpoint> \
+  --output checkpoint_syk5.npz
+
+python utils/nnue/bullet/export_npz_to_syk5.py \
+  --input checkpoint_syk5.npz \
   --output-net output.sknnue
 ```
 
@@ -379,7 +403,7 @@ python utils/nnue/bullet/gate_checkpoints.py \
 
 This gate now evaluates recent checkpoints by selfplay only. STS is intentionally not part of the checkpoint promotion path.
 
-SYKNNUE4 design spec: `specs/syknnue4_spec.md`.
+SYKNNUE4 design spec: `specs/syknnue4_spec.md`. SYKNNUE5 design spec: `specs/syknnue5_spec.md`.
 
 ## Contributing
 

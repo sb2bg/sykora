@@ -20,6 +20,8 @@ MAGIC_V3 = b"SYKNNUE3"
 FORMAT_VERSION_V3 = 3
 MAGIC_V4 = b"SYKNNUE4"
 FORMAT_VERSION_V4 = 4
+MAGIC_V5 = b"SYKNNUE5"
+FORMAT_VERSION_V5 = 5
 
 FEATURE_SET_LEGACY = 0
 FEATURE_SET_KING_BUCKETS_MIRRORED = 1
@@ -284,4 +286,63 @@ def write_syk_nnue_v4(
         handle.write(struct.pack("<i", int(out_bias_i32)))
         handle.write(_pack_i16(ft_biases_i16))
         handle.write(_pack_i16(ft_weights_i16))
+        handle.write(_pack_i16(out_weights_i16))
+
+
+def write_syk_nnue_v5(
+    path: Path,
+    *,
+    ft_hidden_size: int,
+    ft_biases_i16: List[int],
+    ft_weights_i16: List[int],
+    out_biases_i32: List[int],
+    out_weights_i16: List[int],
+    activation_type: int = ACTIVATION_SCRELU,
+    feature_set: int = FEATURE_SET_KING_BUCKETS_MIRRORED,
+    bucket_layout_64: List[int] | None = None,
+    output_bucket_count: int = 8,
+    q0: int = V4_Q0,
+    q: int = V4_Q,
+    scale: int = SCALE,
+) -> None:
+    if feature_set != FEATURE_SET_KING_BUCKETS_MIRRORED:
+        raise ValueError("SYKNNUE5 currently requires king_buckets_mirrored inputs")
+    if bucket_layout_64 is None or len(bucket_layout_64) != 64:
+        raise ValueError("bucket_layout_64 must contain exactly 64 entries")
+    if ft_hidden_size <= 0:
+        raise ValueError("ft_hidden_size must be > 0")
+    if output_bucket_count <= 0 or output_bucket_count > 255:
+        raise ValueError("output_bucket_count must be in 1..255")
+    if activation_type not in (ACTIVATION_RELU, ACTIVATION_SCRELU):
+        raise ValueError("unsupported activation_type")
+
+    input_size = input_size_for_feature_set(feature_set, bucket_layout_64)
+    input_bucket_count = num_buckets(bucket_layout_64)
+    h = ft_hidden_size
+
+    if len(ft_biases_i16) != h:
+        raise ValueError("ft_biases length mismatch")
+    if len(ft_weights_i16) != input_size * h:
+        raise ValueError("ft_weights length mismatch")
+    if len(out_biases_i32) != output_bucket_count:
+        raise ValueError("out_biases length mismatch")
+    if len(out_weights_i16) != output_bucket_count * 2 * h:
+        raise ValueError("out_weights length mismatch")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.write(MAGIC_V5)
+        handle.write(struct.pack("<H", FORMAT_VERSION_V5))
+        handle.write(struct.pack("<B", feature_set))
+        handle.write(struct.pack("<H", h))
+        handle.write(struct.pack("<B", activation_type))
+        handle.write(struct.pack("<B", input_bucket_count))
+        handle.write(struct.pack("<B", output_bucket_count))
+        handle.write(struct.pack("<H", q0))
+        handle.write(struct.pack("<H", q))
+        handle.write(struct.pack("<H", scale))
+        handle.write(bytes(int(v) for v in bucket_layout_64))
+        handle.write(_pack_i16(ft_biases_i16))
+        handle.write(_pack_i16(ft_weights_i16))
+        handle.write(_pack_i32(out_biases_i32))
         handle.write(_pack_i16(out_weights_i16))
