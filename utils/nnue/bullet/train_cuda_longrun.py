@@ -65,8 +65,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk4"],
-        default="syk4",
+        choices=["syk5"],
+        default="syk5",
         help="Training network format",
     )
     parser.add_argument(
@@ -96,6 +96,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--threads", type=int, default=8, help="Bullet training/data threads"
+    )
+    parser.add_argument(
+        "--output-buckets",
+        type=int,
+        default=8,
+        help="SYKNNUE5 material-count output buckets (currently fixed at 8)",
     )
 
     # Data format
@@ -163,6 +169,9 @@ def main() -> int:
     if args.lr_start <= 0:
         print("--lr-start must be > 0", file=sys.stderr)
         return 2
+    if args.output_buckets != 8:
+        print("SYKNNUE5 currently supports exactly 8 output buckets", file=sys.stderr)
+        return 2
     if args.save_rate <= 0 or args.threads <= 0:
         print("--save-rate and --threads must be > 0", file=sys.stderr)
         return 2
@@ -191,6 +200,7 @@ def main() -> int:
             "SYK_WDL": str(args.wdl),
             "SYK_SAVE_RATE": str(args.save_rate),
             "SYK_THREADS": str(args.threads),
+            "SYK_OUTPUT_BUCKETS": str(args.output_buckets),
             "SYK_OUTPUT_DIR": str(ckpt_dir.resolve()),
             "SYK_NET_ID": run_id,
             "SYK_DATA_FORMAT": data_format,
@@ -219,7 +229,8 @@ def main() -> int:
             "bucket_layout_64": bucket_layout_64(args.bucket_layout),
             "ft_hidden": args.hidden,
             "hidden_activation": "screlu",
-            "head": "shared_linear",
+            "head": "material_count_output_buckets",
+            "output_bucket_count": args.output_buckets,
         },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],
@@ -233,6 +244,7 @@ def main() -> int:
             "SYK_WDL": env["SYK_WDL"],
             "SYK_SAVE_RATE": env["SYK_SAVE_RATE"],
             "SYK_THREADS": env["SYK_THREADS"],
+            "SYK_OUTPUT_BUCKETS": env["SYK_OUTPUT_BUCKETS"],
             "SYK_OUTPUT_DIR": env["SYK_OUTPUT_DIR"],
             "SYK_NET_ID": env["SYK_NET_ID"],
             "SYK_DATA_FORMAT": env["SYK_DATA_FORMAT"],

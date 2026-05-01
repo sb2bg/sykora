@@ -1,18 +1,16 @@
 use bullet_lib::{
     game::{
         formats::sfbinpack::TrainingDataEntry,
-        inputs::{get_num_buckets, ChessBucketsMirrored},
+        inputs::{ChessBucketsMirrored, get_num_buckets},
+        outputs::MaterialCount,
     },
-    nn::{
-        optimiser::{AdamW, AdamWParams},
-        InitSettings, Shape,
-    },
+    nn::optimiser::{AdamW, AdamWParams},
     trainer::{
         save::SavedFormat,
-        schedule::{lr, wdl, TrainingSchedule, TrainingSteps},
+        schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
         settings::LocalSettings,
     },
-    value::{loader::DirectSequentialDataLoader, ValueTrainerBuilder},
+    value::{ValueTrainerBuilder, loader::DirectSequentialDataLoader},
 };
 use std::env;
 
@@ -27,7 +25,7 @@ const BUCKET_LAYOUT_SYKORA16: [usize; 32] = [
     12, 12, 13, 13,
     14, 14, 15, 15,
 ];
-
+const SYK5_OUTPUT_BUCKETS: usize = 8;
 
 fn env_usize(name: &str, default: usize) -> usize {
     env::var(name)
@@ -61,7 +59,7 @@ fn binpack_filter(entry: &TrainingDataEntry) -> bool {
         && entry.score.unsigned_abs() <= 10000
 }
 
-fn run_syk4(
+fn run_syk5(
     bucket_layout: [usize; 32],
     num_input_buckets: usize,
     dataset_paths: &[&str],
@@ -82,38 +80,25 @@ fn run_syk4(
         .dual_perspective()
         .optimiser(AdamW)
         .inputs(ChessBucketsMirrored::new(bucket_layout))
+        .output_buckets(MaterialCount::<SYK5_OUTPUT_BUCKETS>)
         .use_threads(threads)
         .save_format(&[
-            SavedFormat::id("l0w")
-                .transform(move |store, weights| {
-                    let factoriser = store.get("l0f").values.repeat(num_input_buckets);
-                    weights
-                        .into_iter()
-                        .zip(factoriser)
-                        .map(|(a, b)| a + b)
-                        .collect()
-                })
-                .round()
-                .quantise::<i16>(255),
+            SavedFormat::id("l0w").round().quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
             SavedFormat::id("outw").round().quantise::<i16>(64),
             SavedFormat::id("outb").round().quantise::<i32>(255 * 64),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
-        .build(|builder, stm_inputs, ntm_inputs| {
-            let l0f = builder.new_weights("l0f", Shape::new(hl_size, 768), InitSettings::Zeroed);
-            let expanded_factoriser = l0f.repeat(num_input_buckets);
-
-            let mut l0 = builder.new_affine("l0", 768 * num_input_buckets, hl_size);
+        .build(|builder, stm_inputs, ntm_inputs, output_buckets| {
+            let l0 = builder.new_affine("l0", 768 * num_input_buckets, hl_size);
             l0.init_with_effective_input_size(32);
-            l0.weights = l0.weights + expanded_factoriser;
 
-            let out = builder.new_affine("out", 2 * hl_size, 1);
+            let out = builder.new_affine("out", 2 * hl_size, SYK5_OUTPUT_BUCKETS);
 
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
             let hidden = stm_hidden.concat(ntm_hidden);
-            out.forward(hidden)
+            out.forward(hidden).select(output_buckets)
         });
 
     let stricter_clipping = AdamWParams {
@@ -124,9 +109,6 @@ fn run_syk4(
     trainer
         .optimiser
         .set_params_for_weight("l0w", stricter_clipping);
-    trainer
-        .optimiser
-        .set_params_for_weight("l0f", stricter_clipping);
 
     let schedule = TrainingSchedule {
         net_id,
@@ -173,11 +155,11 @@ fn run_syk4(
                 binpack_buffer_mb, binpack_threads
             );
             println!(
-                "Input layout: mirrored king buckets ({} buckets), shared head",
-                num_input_buckets
+                "Input layout: mirrored king buckets ({} buckets), material output buckets ({})",
+                num_input_buckets, SYK5_OUTPUT_BUCKETS
             );
             println!("FT width: {} per perspective", hl_size);
-            println!("Dense head: linear {} -> 1", 2 * hl_size);
+            println!("Dense head: bucketed linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -195,11 +177,11 @@ fn run_syk4(
         _ => {
             println!("Using DirectSequentialDataLoader (bullet format)");
             println!(
-                "Input layout: mirrored king buckets ({} buckets), shared head",
-                num_input_buckets
+                "Input layout: mirrored king buckets ({} buckets), material output buckets ({})",
+                num_input_buckets, SYK5_OUTPUT_BUCKETS
             );
             println!("FT width: {} per perspective", hl_size);
-            println!("Dense head: linear {} -> 1", 2 * hl_size);
+            println!("Dense head: bucketed linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -223,8 +205,8 @@ fn main() {
     let net_id = env_string("SYK_NET_ID", "sykora_bucketed");
     let resume_from = env::var("SYK_RESUME").ok();
     let data_format = env_string("SYK_DATA_FORMAT", "bullet");
-    let network_format = env_string("SYK_NETWORK_FORMAT", "syk4");
-    let hl_size = env_usize("SYK_HIDDEN", 768);
+    let network_format = env_string("SYK_NETWORK_FORMAT", "syk5");
+    let hl_size = env_usize("SYK_HIDDEN", 512);
     let bucket_layout_name = env_string("SYK_BUCKET_LAYOUT", "sykora16");
 
     let bucket_layout = selected_bucket_layout(&bucket_layout_name);
@@ -235,11 +217,11 @@ fn main() {
     println!("Network format: {}", network_format);
     println!("Bucket layout: {}", bucket_layout_name);
 
-    if network_format != "syk4" {
+    if network_format != "syk5" {
         panic!("unsupported network format: {network_format}");
     }
 
-    run_syk4(
+    run_syk5(
         bucket_layout,
         num_input_buckets,
         &dataset_paths,

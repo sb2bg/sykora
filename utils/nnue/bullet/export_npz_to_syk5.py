@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a float-domain NPZ checkpoint into Sykora SYKNNUE4 format."""
+"""Convert a float-domain NPZ checkpoint into Sykora SYKNNUE5 format."""
 
 from __future__ import annotations
 
@@ -16,18 +16,18 @@ from common import (  # noqa: E402
     ACTIVATION_SCRELU,
     FEATURE_SET_KING_BUCKETS_MIRRORED,
     SCALE,
-    V4_Q,
-    V4_Q0,
+    NNUE_Q,
+    NNUE_Q0,
     SYKORA16_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
     input_size_for_feature_set,
-    write_syk_nnue_v4,
+    write_syk_nnue_v5,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export NPZ checkpoint to SYKNNUE4 net."
+        description="Export NPZ checkpoint to SYKNNUE5 net."
     )
     parser.add_argument("--input", required=True, help="Input .npz checkpoint")
     parser.add_argument("--output-net", required=True, help="Output .sknnue path")
@@ -73,7 +73,7 @@ def main() -> int:
     with np.load(in_path) as ckpt:
         ft_weights = np.asarray(expect_array(ckpt, "ft_weights"), dtype=np.float32)
         ft_bias = np.asarray(expect_array(ckpt, "ft_bias"), dtype=np.float32).reshape(-1)
-        out_weights = np.asarray(expect_array(ckpt, "out_weights"), dtype=np.float32).reshape(-1)
+        out_weights = np.asarray(expect_array(ckpt, "out_weights"), dtype=np.float32)
         out_bias = np.asarray(expect_array(ckpt, "out_bias"), dtype=np.float32).reshape(-1)
 
         if "bucket_layout_64" in ckpt:
@@ -92,8 +92,8 @@ def main() -> int:
         else:
             activation_type = ACTIVATION_SCRELU
 
-        q0 = int(np.asarray(ckpt["q0"]).reshape(-1)[0]) if "q0" in ckpt else V4_Q0
-        q = int(np.asarray(ckpt["q"]).reshape(-1)[0]) if "q" in ckpt else V4_Q
+        q0 = int(np.asarray(ckpt["q0"]).reshape(-1)[0]) if "q0" in ckpt else NNUE_Q0
+        q = int(np.asarray(ckpt["q"]).reshape(-1)[0]) if "q" in ckpt else NNUE_Q
         scale = int(np.asarray(ckpt["scale"]).reshape(-1)[0]) if "scale" in ckpt else SCALE
 
     if args.q0 is not None:
@@ -104,7 +104,7 @@ def main() -> int:
         scale = args.scale
 
     if feature_set != FEATURE_SET_KING_BUCKETS_MIRRORED:
-        raise ValueError("SYKNNUE4 only supports king_buckets_mirrored inputs")
+        raise ValueError("SYKNNUE5 only supports king_buckets_mirrored inputs")
     if len(bucket_layout) != 64:
         raise ValueError(f"bucket_layout_64 must have 64 entries, got {len(bucket_layout)}")
 
@@ -120,22 +120,35 @@ def main() -> int:
         raise ValueError(
             f"ft_bias length mismatch: expected {ft_hidden_size}, got {ft_bias.shape[0]}"
         )
-    if out_weights.shape[0] != 2 * ft_hidden_size:
+
+    out_weights = np.asarray(out_weights, dtype=np.float32)
+    if out_weights.ndim == 1:
+        if out_bias.shape[0] <= 0:
+            raise ValueError("out_bias must contain at least one output bucket")
+        output_bucket_count = out_bias.shape[0]
+        out_weights = out_weights.reshape(output_bucket_count, 2 * ft_hidden_size)
+    elif out_weights.ndim == 2:
+        output_bucket_count = out_weights.shape[0]
+    else:
+        raise ValueError(f"out_weights must be rank-1 or rank-2, got shape {out_weights.shape}")
+
+    if output_bucket_count <= 1:
+        raise ValueError("SYKNNUE5 requires more than one output bucket")
+    if out_weights.shape != (output_bucket_count, 2 * ft_hidden_size):
         raise ValueError(
-            f"out_weights shape mismatch: expected {(2 * ft_hidden_size,)}, got {out_weights.shape}"
+            f"out_weights shape mismatch: expected {(output_bucket_count, 2 * ft_hidden_size)}, got {out_weights.shape}"
         )
-    if out_bias.shape[0] != 1:
+    if out_bias.shape[0] != output_bucket_count:
         raise ValueError(
-            f"out_bias length mismatch: expected 1, got {out_bias.shape[0]}"
+            f"out_bias length mismatch: expected {output_bucket_count}, got {out_bias.shape[0]}"
         )
 
     ft_bias_i16 = quantize_clipped(ft_bias, q0, -32768, 32767, np.int16)
     ft_weights_i16 = quantize_clipped(
         ft_weights.reshape(-1), q0, -32768, 32767, np.int16
     )
-
     out_bias_i32 = quantize_clipped(
-        out_bias,
+        out_bias.reshape(-1),
         q0 * q,
         -2147483648,
         2147483647,
@@ -146,26 +159,28 @@ def main() -> int:
     )
 
     out_path = Path(args.output_net)
-    write_syk_nnue_v4(
+    write_syk_nnue_v5(
         out_path,
         ft_hidden_size=ft_hidden_size,
         ft_biases_i16=ft_bias_i16.tolist(),
         ft_weights_i16=ft_weights_i16.tolist(),
-        out_bias_i32=int(out_bias_i32[0]),
+        out_biases_i32=out_bias_i32.tolist(),
         out_weights_i16=out_weights_i16.tolist(),
         activation_type=activation_type,
         feature_set=feature_set,
         bucket_layout_64=bucket_layout,
+        output_bucket_count=output_bucket_count,
         q0=q0,
         q=q,
         scale=scale,
     )
 
     print(f"Input: {in_path}")
-    print("Output format: SYKNNUE4")
-    print(f"Bucket count: {max(bucket_layout) + 1}")
+    print("Output format: SYKNNUE5")
+    print(f"Input bucket count: {max(bucket_layout) + 1}")
+    print(f"Output bucket count: {output_bucket_count}")
     print(f"FT hidden: {ft_hidden_size}")
-    print(f"Dense head: linear {2 * ft_hidden_size} -> 1")
+    print(f"Dense head: bucketed linear {2 * ft_hidden_size} -> 1")
     print(f"Wrote: {out_path}")
     return 0
 
