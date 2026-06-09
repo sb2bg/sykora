@@ -271,44 +271,6 @@ Sykora's network format is `SYKNNUE6`: mirrored king-bucketed sparse inputs with
 
 For exact file-format details (header, payload order, integer inference contract, loader validation), see `src/nnue.zig`.
 
-### Validation Ladder
-
-`SYKNNUE6` is designed so a failed run can be localized. Each stage changes exactly one variable and must gate (SPRT, fast TC) before the next:
-
-- **Stage 0 — Repack**: convert the embedded v3 net into a `SYKNNUE6` container (`O=1`, `scheme=single`) with no training. Validates the loader + eval path.
-- **Stage 1 — Parity**: retrain the v3 architecture (10 buckets, `H=512`, `O=1`) through the v6 trainer/exporter; must reach v3 parity.
-- **Stage 2 — Buckets**: `O=8` material output buckets, everything else unchanged.
-- **Stage 3 — Width**: `H` 512 → 768 (then optionally 1024), `O=8`.
-- **Stage 4 — Layout**: optionally test `sykora16` vs the 10-bucket layout as an isolated change.
-
-Per-stage bit-exactness: before any SPRT, the engine must reproduce the numpy reference evals exactly over a fixed FEN suite (see Parity below).
-
-### Stage 0: Repack the v3 net
-
-Convert a legacy `SYKNNUE3` net into a v6 container (lossless byte reshuffle):
-
-```bash
-python utils/nnue/bullet/repack_v3_to_v6.py \
-  --input src/net.sknnue.v3.bak \
-  --output src/net.sknnue
-zig build -Doptimize=ReleaseFast
-```
-
-### Parity (bit-exactness gate)
-
-The engine exposes a `nnuecheck` subcommand that emits reference evals for a FEN suite through the non-incremental `evaluate` path:
-
-```bash
-./zig-out/bin/sykora nnuecheck --net src/net.sknnue --fens utils/nnue/parity.fens
-```
-
-`check_net_parity.py` recomputes every eval in numpy (reproducing the integer contract) and asserts exact equality against the engine. The suite covers all 8 material buckets, both mirror states, and both sides to move:
-
-```bash
-python utils/nnue/bullet/check_net_parity.py \
-  --net src/net.sknnue --fens utils/nnue/parity.fens
-```
-
 ### Training Pipeline
 
 Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`. The baseline layout is the proven v3 10-bucket layout (`--bucket-layout v3_10`); output buckets are `1` (Stage-1 parity, `single` scheme) or `8` (Stage-2+ material scheme).
