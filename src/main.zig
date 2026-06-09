@@ -4,12 +4,14 @@ const Uci = uci.Uci;
 const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
 const gensfen = @import("gensfen.zig");
+const nnue_check = @import("nnue_check.zig");
 
 pub fn main() void {
     tryMain() catch |err| {
         std.log.err("Encountered an unrecoverable error while running Sykora.\n", .{});
         switch (err) {
             error.GensfenError => {},
+            error.NnueCheckError => std.process.exit(1),
             else => {
                 std.log.err("\t|> {s}\n", .{uciErr.getErrorDescriptor(@errorCast(err))});
             },
@@ -17,7 +19,7 @@ pub fn main() void {
     };
 }
 
-const MainError = UciError || error{GensfenError};
+const MainError = UciError || error{GensfenError} || nnue_check.NnueCheckError;
 
 fn tryMain() MainError!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -32,6 +34,9 @@ fn tryMain() MainError!void {
     if (args.len > 1) {
         if (std.mem.eql(u8, args[1], "gensfen")) {
             return runGensfenFromSlice(args[2..], allocator);
+        }
+        if (std.mem.eql(u8, args[1], "nnuecheck")) {
+            return runNnueCheckFromSlice(args[2..], allocator);
         }
         // "uci" or unrecognized → fall through to UCI mode
     }
@@ -62,4 +67,14 @@ fn runGensfenFromSlice(args: []const [:0]u8, allocator: std.mem.Allocator) MainE
     gensfen.run(opts, allocator) catch {
         return error.GensfenError;
     };
+}
+
+fn runNnueCheckFromSlice(args: []const [:0]u8, allocator: std.mem.Allocator) MainError!void {
+    var arg_slices = std.ArrayList([]const u8).empty;
+    defer arg_slices.deinit(allocator);
+    for (args) |arg| {
+        arg_slices.append(allocator, arg) catch return error.NnueCheckError;
+    }
+
+    return nnue_check.run(arg_slices.items, allocator);
 }
