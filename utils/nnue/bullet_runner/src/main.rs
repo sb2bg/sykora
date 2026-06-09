@@ -14,6 +14,19 @@ use bullet_lib::{
 };
 use std::env;
 
+// Proven v3 10-bucket layout (mirrored 32-entry half) — the SYKNNUE6 baseline.
+#[rustfmt::skip]
+const BUCKET_LAYOUT_V3_10: [usize; 32] = [
+    0, 1, 2, 3,
+    4, 4, 5, 5,
+    6, 6, 6, 6,
+    7, 7, 7, 7,
+    8, 8, 8, 8,
+    8, 8, 8, 8,
+    9, 9, 9, 9,
+    9, 9, 9, 9,
+];
+
 #[rustfmt::skip]
 const BUCKET_LAYOUT_SYKORA16: [usize; 32] = [
     0, 0, 1, 1,
@@ -25,7 +38,6 @@ const BUCKET_LAYOUT_SYKORA16: [usize; 32] = [
     12, 12, 13, 13,
     14, 14, 15, 15,
 ];
-const SYK5_OUTPUT_BUCKETS: usize = 8;
 
 fn env_usize(name: &str, default: usize) -> usize {
     env::var(name)
@@ -45,12 +57,18 @@ fn env_string(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn selected_bucket_layout(_: &str) -> [usize; 32] {
-    BUCKET_LAYOUT_SYKORA16
+fn selected_bucket_layout(name: &str) -> [usize; 32] {
+    match name {
+        "sykora16" => BUCKET_LAYOUT_SYKORA16,
+        _ => BUCKET_LAYOUT_V3_10,
+    }
 }
 
-fn selected_bucket_layout_name(_: &str) -> &'static str {
-    "sykora16"
+fn selected_bucket_layout_name(name: &str) -> &'static str {
+    match name {
+        "sykora16" => "sykora16",
+        _ => "v3_10",
+    }
 }
 
 fn binpack_filter(entry: &TrainingDataEntry) -> bool {
@@ -59,7 +77,13 @@ fn binpack_filter(entry: &TrainingDataEntry) -> bool {
         && entry.score.unsigned_abs() <= 10000
 }
 
-fn run_syk5(
+/// Train a SYKNNUE6 net with `O` material-count output buckets.
+///
+/// `O = 1` (with `MaterialCount::<1>`, which always selects bucket 0) is the
+/// Stage-1 parity architecture; it is exported with the `single` output-bucket
+/// scheme. `O = 8` is the Stage-2+ material-count head.
+#[allow(clippy::too_many_arguments)]
+fn run_syk6<const O: usize>(
     bucket_layout: [usize; 32],
     num_input_buckets: usize,
     dataset_paths: &[&str],
@@ -80,7 +104,7 @@ fn run_syk5(
         .dual_perspective()
         .optimiser(AdamW)
         .inputs(ChessBucketsMirrored::new(bucket_layout))
-        .output_buckets(MaterialCount::<SYK5_OUTPUT_BUCKETS>)
+        .output_buckets(MaterialCount::<O>)
         .use_threads(threads)
         .save_format(&[
             SavedFormat::id("l0w").round().quantise::<i16>(255),
@@ -93,7 +117,7 @@ fn run_syk5(
             let l0 = builder.new_affine("l0", 768 * num_input_buckets, hl_size);
             l0.init_with_effective_input_size(32);
 
-            let out = builder.new_affine("out", 2 * hl_size, SYK5_OUTPUT_BUCKETS);
+            let out = builder.new_affine("out", 2 * hl_size, O);
 
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
@@ -156,10 +180,10 @@ fn run_syk5(
             );
             println!(
                 "Input layout: mirrored king buckets ({} buckets), material output buckets ({})",
-                num_input_buckets, SYK5_OUTPUT_BUCKETS
+                num_input_buckets, O
             );
             println!("FT width: {} per perspective", hl_size);
-            println!("Dense head: bucketed linear {} -> 1", 2 * hl_size);
+            println!("Head: bucketed linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -178,10 +202,10 @@ fn run_syk5(
             println!("Using DirectSequentialDataLoader (bullet format)");
             println!(
                 "Input layout: mirrored king buckets ({} buckets), material output buckets ({})",
-                num_input_buckets, SYK5_OUTPUT_BUCKETS
+                num_input_buckets, O
             );
             println!("FT width: {} per perspective", hl_size);
-            println!("Dense head: bucketed linear {} -> 1", 2 * hl_size);
+            println!("Head: bucketed linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
             }
@@ -202,12 +226,13 @@ fn main() {
     let save_rate = env_usize("SYK_SAVE_RATE", 1);
     let threads = env_usize("SYK_THREADS", 4);
     let output_dir = env_string("SYK_OUTPUT_DIR", "checkpoints");
-    let net_id = env_string("SYK_NET_ID", "sykora_bucketed");
+    let net_id = env_string("SYK_NET_ID", "sykora_v6");
     let resume_from = env::var("SYK_RESUME").ok();
     let data_format = env_string("SYK_DATA_FORMAT", "bullet");
-    let network_format = env_string("SYK_NETWORK_FORMAT", "syk5");
+    let network_format = env_string("SYK_NETWORK_FORMAT", "syk6");
     let hl_size = env_usize("SYK_HIDDEN", 512);
-    let bucket_layout_name = env_string("SYK_BUCKET_LAYOUT", "sykora16");
+    let output_buckets = env_usize("SYK_OUTPUT_BUCKETS", 8);
+    let bucket_layout_name = env_string("SYK_BUCKET_LAYOUT", "v3_10");
 
     let bucket_layout = selected_bucket_layout(&bucket_layout_name);
     let bucket_layout_name = selected_bucket_layout_name(&bucket_layout_name);
@@ -216,26 +241,37 @@ fn main() {
 
     println!("Network format: {}", network_format);
     println!("Bucket layout: {}", bucket_layout_name);
+    println!("Output buckets: {}", output_buckets);
 
-    if network_format != "syk5" {
+    if network_format != "syk6" {
         panic!("unsupported network format: {network_format}");
     }
 
-    run_syk5(
-        bucket_layout,
-        num_input_buckets,
-        &dataset_paths,
-        &data_format,
-        hl_size,
-        initial_lr,
-        final_lr,
-        start_superbatch,
-        superbatches,
-        wdl_proportion,
-        save_rate,
-        threads,
-        &output_dir,
-        net_id,
-        resume_from.as_deref(),
-    );
+    macro_rules! dispatch {
+        ($o:literal) => {
+            run_syk6::<$o>(
+                bucket_layout,
+                num_input_buckets,
+                &dataset_paths,
+                &data_format,
+                hl_size,
+                initial_lr,
+                final_lr,
+                start_superbatch,
+                superbatches,
+                wdl_proportion,
+                save_rate,
+                threads,
+                &output_dir,
+                net_id,
+                resume_from.as_deref(),
+            )
+        };
+    }
+
+    match output_buckets {
+        1 => dispatch!(1),
+        8 => dispatch!(8),
+        other => panic!("unsupported SYK_OUTPUT_BUCKETS={other}; SYKNNUE6 ladder uses 1 or 8"),
+    }
 }

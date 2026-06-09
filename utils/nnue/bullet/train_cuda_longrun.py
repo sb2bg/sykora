@@ -30,15 +30,33 @@ SYKORA16_BUCKET_LAYOUT_32 = [
     14, 14, 15, 15,
 ]
 
+# Proven v3 10-bucket layout — the SYKNNUE6 baseline.
+V3_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 4, 5, 5,
+    6, 6, 6, 6,
+    7, 7, 7, 7,
+    8, 8, 8, 8,
+    8, 8, 8, 8,
+    9, 9, 9, 9,
+    9, 9, 9, 9,
+]
+
+BUCKET_LAYOUTS_32 = {
+    "v3_10": V3_BUCKET_LAYOUT_32,
+    "sykora16": SYKORA16_BUCKET_LAYOUT_32,
+}
+
+
 def expand_mirrored_bucket_layout(layout_32: list[int]) -> list[int]:
     mirror = [0, 1, 2, 3, 3, 2, 1, 0]
     return [int(layout_32[(idx // 8) * 4 + mirror[idx % 8]]) for idx in range(64)]
 
 
 def bucket_layout_64(name: str) -> list[int]:
-    if name != "sykora16":
+    if name not in BUCKET_LAYOUTS_32:
         raise ValueError(f"unsupported bucket layout: {name!r}")
-    return expand_mirrored_bucket_layout(SYKORA16_BUCKET_LAYOUT_32)
+    return expand_mirrored_bucket_layout(BUCKET_LAYOUTS_32[name])
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,19 +79,19 @@ def parse_args() -> argparse.Namespace:
 
     # Architecture/training knobs (defaults are intentionally long-run)
     parser.add_argument(
-        "--hidden", type=int, default=0, help="Hidden size (default: 768)"
+        "--hidden", type=int, default=0, help="Hidden size (default: 512)"
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk5"],
-        default="syk5",
+        choices=["syk6"],
+        default="syk6",
         help="Training network format",
     )
     parser.add_argument(
         "--bucket-layout",
-        choices=["sykora16"],
+        choices=["v3_10", "sykora16"],
         default="",
-        help="Mirrored king-bucket layout (default: sykora16)",
+        help="Mirrored king-bucket layout (default: v3_10)",
     )
     parser.add_argument(
         "--start-superbatch", type=int, default=1, help="Start superbatch"
@@ -101,7 +119,8 @@ def parse_args() -> argparse.Namespace:
         "--output-buckets",
         type=int,
         default=8,
-        help="SYKNNUE5 material-count output buckets (currently fixed at 8)",
+        choices=[1, 8],
+        help="SYKNNUE6 output buckets: 1 (Stage-1 parity, single scheme) or 8 (material)",
     )
 
     # Data format
@@ -139,9 +158,9 @@ def main() -> int:
     args = parse_args()
 
     if not args.bucket_layout:
-        args.bucket_layout = "sykora16"
+        args.bucket_layout = "v3_10"
     if args.hidden <= 0:
-        args.hidden = 768
+        args.hidden = 512
 
     datasets = [Path(d) for d in args.dataset]
     for dataset in datasets:
@@ -169,8 +188,8 @@ def main() -> int:
     if args.lr_start <= 0:
         print("--lr-start must be > 0", file=sys.stderr)
         return 2
-    if args.output_buckets != 8:
-        print("SYKNNUE5 currently supports exactly 8 output buckets", file=sys.stderr)
+    if args.output_buckets not in (1, 8):
+        print("SYKNNUE6 supports 1 (parity) or 8 (material) output buckets", file=sys.stderr)
         return 2
     if args.save_rate <= 0 or args.threads <= 0:
         print("--save-rate and --threads must be > 0", file=sys.stderr)
@@ -229,8 +248,9 @@ def main() -> int:
             "bucket_layout_64": bucket_layout_64(args.bucket_layout),
             "ft_hidden": args.hidden,
             "hidden_activation": "screlu",
-            "head": "material_count_output_buckets",
+            "head": "single" if args.output_buckets == 1 else "material_count_output_buckets",
             "output_bucket_count": args.output_buckets,
+            "output_bucket_scheme": "single" if args.output_buckets == 1 else "material_popcount",
         },
         "env": {
             "SYK_DATASET": env["SYK_DATASET"],

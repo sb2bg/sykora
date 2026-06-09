@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--npz-to-net",
-        default="utils/nnue/bullet/export_npz_to_syk5.py",
-        help="Path to NPZ -> SYKNNUE5 exporter",
+        default="utils/nnue/bullet/export_npz_to_syk6.py",
+        help="Path to NPZ -> SYKNNUE6 exporter",
     )
     parser.add_argument(
         "--engine", default="./zig-out/bin/sykora", help="Engine under test"

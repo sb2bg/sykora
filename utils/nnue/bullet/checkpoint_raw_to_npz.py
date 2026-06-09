@@ -16,14 +16,14 @@ from common import (  # noqa: E402
     SCALE,
     NNUE_Q0,
     NNUE_Q,
-    SYKORA16_BUCKET_LAYOUT_32,
+    V3_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert a SYKNNUE5 Bullet raw checkpoint into NPZ tensors."
+        description="Convert a SYKNNUE6 Bullet raw checkpoint into NPZ tensors."
     )
     parser.add_argument(
         "--input",
@@ -79,10 +79,10 @@ def expected_raw_sizes(
     *, bucket_count: int, ft_hidden: int, network_format: str, output_bucket_count: int
 ) -> dict[str, int]:
     input_size = 768 * bucket_count
-    if network_format != "syk5":
+    if network_format != "syk6":
         raise ValueError(f"unsupported network format: {network_format}")
     return {
-        "syk5_output_buckets": (
+        "syk6_output_buckets": (
             input_size * ft_hidden
             + ft_hidden
             + (output_bucket_count * 2 * ft_hidden)
@@ -113,22 +113,22 @@ def parse_network_config(run_meta: dict) -> dict:
     network = dict(run_meta.get("network", {}))
     env = run_meta.get("env", {})
 
-    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk5"
-    if network_format != "syk5":
+    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk6"
+    if network_format != "syk6":
         raise ValueError(
-            f"run_meta.json does not describe a SYKNNUE5 run: {network_format!r}"
+            f"run_meta.json does not describe a SYKNNUE6 run: {network_format!r}"
         )
 
     if "bucket_layout_64" in network:
         bucket_layout_64 = [int(v) for v in network["bucket_layout_64"]]
     else:
-        bucket_layout_name = env.get("SYK_BUCKET_LAYOUT", "sykora16")
-        if bucket_layout_name != "sykora16":
+        bucket_layout_name = env.get("SYK_BUCKET_LAYOUT", "v3_10")
+        if bucket_layout_name != "v3_10":
             raise ValueError(
                 f"Unsupported checkpoint bucket layout without explicit bucket_layout_64: "
                 f"{bucket_layout_name!r}"
             )
-        bucket_layout_64 = expand_mirrored_bucket_layout(SYKORA16_BUCKET_LAYOUT_32)
+        bucket_layout_64 = expand_mirrored_bucket_layout(V3_BUCKET_LAYOUT_32)
 
     return {
         "format": network_format,
