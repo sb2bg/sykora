@@ -1,4 +1,4 @@
-# Sykora NNUE V5 Training Launch Script
+# Sykora NNUE V6 Training Launch Script
 # Run from project root: .\launch_training.ps1
 #
 # Dataset: T80-2023 (jun-dec) + T80-2024 (jan-jun) .min-v2.v6 binpacks
@@ -60,9 +60,9 @@ foreach ($bp in $binpacks) {
 }
 
 # --- Training Parameters ---
-# SYKNNUE5:
+# SYKNNUE6:
 # mirrored king buckets (sykora16) -> FT 512 -> 8 material-count output heads
-$networkFormat = "syk5"
+$networkFormat = "syk6"
 $bucketLayout = "sykora16"
 $hidden = 512
 $outputBuckets = 8
@@ -73,7 +73,7 @@ $saveRate = 10
 $threads = 8
 
 Write-Host "============================================"
-Write-Host "  Sykora NNUE V5 Training (RTX 4070 Ti SUPER)"
+Write-Host "  Sykora NNUE V6 Training (RTX 4070 Ti SUPER)"
 Write-Host "============================================"
 Write-Host "Data:          T80-2023/2024 filtered set"
 Write-Host "Filtering:     .min-v2.v6 on T80 inputs"
