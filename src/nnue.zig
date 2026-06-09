@@ -12,14 +12,17 @@ pub const Q: i32 = 64;
 pub const SCALE: i32 = 400;
 const MAX_NETWORK_BYTES = 64 * 1024 * 1024;
 
-const MAGIC_V3 = "SYKNNUE3";
-const MAGIC_V5 = "SYKNNUE5";
-const FORMAT_VERSION_V3: u16 = 3;
-const FORMAT_VERSION_V5: u16 = 5;
+const MAGIC_V6 = "SYKNNUE6";
+const FORMAT_VERSION_V6: u16 = 6;
 
 pub const FeatureSet = enum(u8) {
     legacy_psqt = 0,
     king_buckets_mirrored = 1,
+};
+
+pub const OutputBucketScheme = enum(u8) {
+    single = 0,
+    material_popcount = 1,
 };
 
 pub const LoadError = error{
@@ -37,58 +40,33 @@ pub const LoadError = error{
 
 /// NNUE format used by Sykora (little-endian).
 pub const Network = struct {
-    pub const V3Head = struct {
-        activation_type: u8, // 0 = ReLU, 1 = SCReLU
-        output_weights: []i16, // [2 * H]
-        output_bias: i32,
-    };
-
-    pub const V5Head = struct {
-        activation_type: u8, // 0 = ReLU, 1 = SCReLU
-        q0: u16,
-        q: u16,
-        scale: u16,
-        output_bucket_count: u8,
-        output_weights: []i16, // [output_bucket_count * 2 * H], bucket-major
-        output_biases: []i32, // [output_bucket_count]
-    };
-
     allocator: std.mem.Allocator,
     feature_set: FeatureSet,
-    bucket_count: u8,
+    bucket_count: u8, // input king buckets
     bucket_layout: [64]u8,
     ft_hidden_size: u16,
-    ft_biases: []i16,
-    ft_weights: []i16,
-    head: union(enum) {
-        v3: V3Head,
-        v5: V5Head,
-    },
+    activation_type: u8, // 0 = ReLU, 1 = SCReLU
+    output_bucket_count: u8,
+    output_bucket_scheme: OutputBucketScheme,
+    q0: u16,
+    q: u16,
+    scale: u16,
+    ft_biases: []i16, // [H]
+    ft_weights: []i16, // [I * H]
+    output_biases: []i32, // [O]
+    output_weights: []i16, // [O * 2 * H], bucket-major
 
     pub fn deinit(self: *Network) void {
         self.allocator.free(self.ft_biases);
         self.allocator.free(self.ft_weights);
-        switch (self.head) {
-            .v3 => |v3| {
-                self.allocator.free(v3.output_weights);
-            },
-            .v5 => |v5| {
-                self.allocator.free(v5.output_weights);
-                self.allocator.free(v5.output_biases);
-            },
-        }
+        self.allocator.free(self.output_biases);
+        self.allocator.free(self.output_weights);
     }
 
     pub fn loadFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
         if (data.len < 8) return error.InvalidNetwork;
-
-        if (std.mem.eql(u8, data[0..8], MAGIC_V3)) {
-            return loadFromBytesV3(allocator, data);
-        }
-        if (std.mem.eql(u8, data[0..8], MAGIC_V5)) {
-            return loadFromBytesV5(allocator, data);
-        }
-        return error.UnsupportedVersion;
+        if (!std.mem.eql(u8, data[0..8], MAGIC_V6)) return error.UnsupportedVersion;
+        return loadFromBytesV6(allocator, data);
     }
 
     pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) LoadError!Network {
@@ -111,10 +89,7 @@ pub const Network = struct {
     }
 
     pub fn inputSize(self: *const Network) usize {
-        return switch (self.feature_set) {
-            .legacy_psqt => LEGACY_INPUT_SIZE,
-            .king_buckets_mirrored => LEGACY_INPUT_SIZE * @as(usize, self.bucket_count),
-        };
+        return LEGACY_INPUT_SIZE * @as(usize, self.bucket_count);
     }
 };
 
@@ -146,7 +121,7 @@ fn checkedAddU64(a: u64, b: u64) ?u64 {
     return std.math.add(u64, a, b) catch null;
 }
 
-fn computeV5PayloadBytes(
+fn computeV6PayloadBytes(
     input_size: usize,
     ft_hidden_size: usize,
     output_bucket_count: usize,
@@ -173,77 +148,11 @@ fn computeV5PayloadBytes(
     return total;
 }
 
-fn loadFromBytesV3(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
+fn loadFromBytesV6(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
     var pos: usize = 8;
 
     const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    if (version != FORMAT_VERSION_V3) return error.UnsupportedVersion;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const feature_set = std.meta.intToEnum(FeatureSet, data[pos]) catch return error.InvalidNetwork;
-    pos += 1;
-
-    const hidden_size_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    const hidden_size: usize = @intCast(hidden_size_u16);
-    if (hidden_size == 0 or hidden_size > MAX_HIDDEN_SIZE) return error.InvalidNetwork;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const activation_type = data[pos];
-    pos += 1;
-    if (activation_type > 1) return error.InvalidNetwork;
-
-    const bucket_count_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    if (bucket_count_u16 == 0 or bucket_count_u16 > 255) return error.InvalidNetwork;
-    if (feature_set == .legacy_psqt and bucket_count_u16 != 1) return error.InvalidNetwork;
-    const bucket_count: u8 = @intCast(bucket_count_u16);
-
-    var bucket_layout = [_]u8{0} ** 64;
-    for (&bucket_layout) |*entry| {
-        if (pos >= data.len) return error.InvalidNetwork;
-        entry.* = data[pos];
-        pos += 1;
-        if (entry.* >= bucket_count) return error.InvalidNetwork;
-    }
-
-    const output_bias = readBytesInt(i32, data, &pos) orelse return error.InvalidNetwork;
-    const ft_biases = try allocAndReadInts(i16, allocator, data, &pos, hidden_size);
-    errdefer allocator.free(ft_biases);
-
-    const input_size = switch (feature_set) {
-        .legacy_psqt => LEGACY_INPUT_SIZE,
-        .king_buckets_mirrored => LEGACY_INPUT_SIZE * @as(usize, bucket_count),
-    };
-    const ft_weights = try allocAndReadInts(i16, allocator, data, &pos, input_size * hidden_size);
-    errdefer allocator.free(ft_weights);
-
-    const output_weights = try allocAndReadInts(i16, allocator, data, &pos, 2 * hidden_size);
-    errdefer allocator.free(output_weights);
-
-    if (pos != data.len) return error.InvalidNetwork;
-
-    return Network{
-        .allocator = allocator,
-        .feature_set = feature_set,
-        .bucket_count = bucket_count,
-        .bucket_layout = bucket_layout,
-        .ft_hidden_size = hidden_size_u16,
-        .ft_biases = ft_biases,
-        .ft_weights = ft_weights,
-        .head = .{
-            .v3 = .{
-                .activation_type = activation_type,
-                .output_weights = output_weights,
-                .output_bias = output_bias,
-            },
-        },
-    };
-}
-
-fn loadFromBytesV5(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
-    var pos: usize = 8;
-
-    const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    if (version != FORMAT_VERSION_V5) return error.UnsupportedVersion;
+    if (version != FORMAT_VERSION_V6) return error.UnsupportedVersion;
 
     if (pos >= data.len) return error.InvalidNetwork;
     const feature_set = std.meta.intToEnum(FeatureSet, data[pos]) catch return error.InvalidNetwork;
@@ -252,8 +161,7 @@ fn loadFromBytesV5(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
 
     const ft_hidden_size_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const ft_hidden_size: usize = @intCast(ft_hidden_size_u16);
-    if (ft_hidden_size == 0) return error.InvalidNetwork;
-    if (ft_hidden_size > MAX_HIDDEN_SIZE) return error.NetworkTooLarge;
+    if (ft_hidden_size == 0 or ft_hidden_size > MAX_HIDDEN_SIZE) return error.InvalidNetwork;
 
     if (pos >= data.len) return error.InvalidNetwork;
     const activation_type = data[pos];
@@ -270,6 +178,14 @@ fn loadFromBytesV5(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     pos += 1;
     if (output_bucket_count == 0) return error.InvalidNetwork;
 
+    if (pos >= data.len) return error.InvalidNetwork;
+    const output_bucket_scheme = std.meta.intToEnum(OutputBucketScheme, data[pos]) catch return error.InvalidNetwork;
+    pos += 1;
+    switch (output_bucket_scheme) {
+        .single => if (output_bucket_count != 1) return error.InvalidNetwork,
+        .material_popcount => if (32 % @as(usize, output_bucket_count) != 0) return error.InvalidNetwork,
+    }
+
     const q0 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const q = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const scale = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
@@ -284,7 +200,7 @@ fn loadFromBytesV5(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     }
 
     const input_size = LEGACY_INPUT_SIZE * @as(usize, bucket_count);
-    const payload_size = computeV5PayloadBytes(
+    const payload_size = computeV6PayloadBytes(
         input_size,
         ft_hidden_size,
         output_bucket_count,
@@ -292,16 +208,17 @@ fn loadFromBytesV5(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     const expected_size = checkedAddU64(@as(u64, @intCast(pos)), payload_size) orelse return error.InvalidNetwork;
     if (expected_size != data.len) return error.InvalidNetwork;
 
+    // Payload order: output_biases, ft_biases, ft_weights, output_weights.
+    const output_biases = try allocAndReadInts(i32, allocator, data, &pos, output_bucket_count);
+    errdefer allocator.free(output_biases);
+
     const ft_biases = try allocAndReadInts(i16, allocator, data, &pos, ft_hidden_size);
     errdefer allocator.free(ft_biases);
 
     const ft_weights = try allocAndReadInts(i16, allocator, data, &pos, input_size * ft_hidden_size);
     errdefer allocator.free(ft_weights);
 
-    const output_biases = try allocAndReadInts(i32, allocator, data, &pos, output_bucket_count);
-    errdefer allocator.free(output_biases);
-
-    const output_weights = try allocAndReadInts(i16, allocator, data, &pos, output_bucket_count * 2 * ft_hidden_size);
+    const output_weights = try allocAndReadInts(i16, allocator, data, &pos, @as(usize, output_bucket_count) * 2 * ft_hidden_size);
     errdefer allocator.free(output_weights);
 
     if (pos != data.len) return error.InvalidNetwork;
@@ -312,19 +229,16 @@ fn loadFromBytesV5(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         .bucket_count = bucket_count,
         .bucket_layout = bucket_layout,
         .ft_hidden_size = ft_hidden_size_u16,
+        .activation_type = activation_type,
+        .output_bucket_count = output_bucket_count,
+        .output_bucket_scheme = output_bucket_scheme,
+        .q0 = q0,
+        .q = q,
+        .scale = scale,
         .ft_biases = ft_biases,
         .ft_weights = ft_weights,
-        .head = .{
-            .v5 = .{
-                .activation_type = activation_type,
-                .q0 = q0,
-                .q = q,
-                .scale = scale,
-                .output_bucket_count = output_bucket_count,
-                .output_weights = output_weights,
-                .output_biases = output_biases,
-            },
-        },
+        .output_biases = output_biases,
+        .output_weights = output_weights,
     };
 }
 
@@ -1062,63 +976,17 @@ pub fn updateAccumulators(
     }
 }
 
-inline fn materialCountOutputBucket(b: *Board, output_bucket_count: u8) usize {
-    const piece_count = @popCount(b.board.occupied());
-    const non_king_count = if (piece_count >= 2) piece_count - 2 else 0;
-    const divisor = (32 + @as(usize, output_bucket_count) - 1) / @as(usize, output_bucket_count);
-    const bucket = non_king_count / divisor;
-    return @min(bucket, @as(usize, output_bucket_count) - 1);
-}
-
-fn evaluateV5FromAccumulators(
-    net: *const Network,
-    head: *const Network.V5Head,
-    acc: *const AccumulatorPair,
-    b: *Board,
-    stm_is_white: bool,
-) i32 {
-    const hidden_size: usize = @intCast(net.ft_hidden_size);
-    const q0: i32 = head.q0;
-    const q: i32 = head.q;
-    const scale: i32 = head.scale;
-    const use_screlu = head.activation_type == 1;
-    const final_den: i64 = @as(i64, q0) * @as(i64, q);
-    const output_bucket = materialCountOutputBucket(b, head.output_bucket_count);
-    const weights_base = output_bucket * 2 * hidden_size;
-    const weights = head.output_weights[weights_base .. weights_base + 2 * hidden_size];
-
-    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
-    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
-
-    var sum = activatedDot(us_acc, weights[0..hidden_size], hidden_size, head.activation_type, q0) +
-        activatedDot(them_acc, weights[hidden_size .. 2 * hidden_size], hidden_size, head.activation_type, q0);
-
-    if (use_screlu) {
-        sum = divRoundNearestSigned(sum, q0);
+inline fn outputBucket(net: *const Network, b: *Board) usize {
+    switch (net.output_bucket_scheme) {
+        .single => return 0,
+        .material_popcount => {
+            const o: usize = net.output_bucket_count;
+            const n = @popCount(b.board.occupied()); // includes kings, 2..32
+            const divisor = 32 / o; // O divides 32 (validated at load)
+            const non_king = if (n >= 2) n - 2 else 0;
+            return @min(non_king / divisor, o - 1);
+        },
     }
-    sum += head.output_biases[output_bucket];
-    return @intCast(divRoundNearestSigned(sum * scale, final_den));
-}
-
-fn evaluateV3FromAccumulators(
-    net: *const Network,
-    head: *const Network.V3Head,
-    acc: *const AccumulatorPair,
-    stm_is_white: bool,
-) i32 {
-    const hidden_size: usize = @intCast(net.ft_hidden_size);
-    const use_screlu = head.activation_type == 1;
-    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
-    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
-
-    var sum = activatedDot(us_acc, head.output_weights[0..hidden_size], hidden_size, head.activation_type, Q0) +
-        activatedDot(them_acc, head.output_weights[hidden_size .. 2 * hidden_size], hidden_size, head.activation_type, Q0);
-
-    if (use_screlu) {
-        sum = @divTrunc(sum, Q0);
-    }
-    sum += head.output_bias;
-    return @intCast(@divTrunc(sum * SCALE, Q0 * Q));
 }
 
 /// Evaluate using pre-computed accumulators (activation + head only).
@@ -1129,10 +997,28 @@ pub fn evaluateFromAccumulators(
     b: *Board,
 ) i32 {
     const stm_is_white = b.board.move == .white;
-    return switch (net.head) {
-        .v3 => |*head| evaluateV3FromAccumulators(net, head, acc, stm_is_white),
-        .v5 => |*head| evaluateV5FromAccumulators(net, head, acc, b, stm_is_white),
-    };
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const q0: i32 = net.q0;
+    const q: i32 = net.q;
+    const scale: i32 = net.scale;
+    const use_screlu = net.activation_type == 1;
+    const final_den: i64 = @as(i64, q0) * @as(i64, q);
+
+    const bucket = outputBucket(net, b);
+    const weights_base = bucket * 2 * hidden_size;
+    const weights = net.output_weights[weights_base .. weights_base + 2 * hidden_size];
+
+    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
+    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
+
+    var sum = activatedDot(us_acc, weights[0..hidden_size], hidden_size, net.activation_type, q0) +
+        activatedDot(them_acc, weights[hidden_size .. 2 * hidden_size], hidden_size, net.activation_type, q0);
+
+    if (use_screlu) {
+        sum = divRoundNearestSigned(sum, q0);
+    }
+    sum += net.output_biases[bucket];
+    return @intCast(divRoundNearestSigned(sum * scale, final_den));
 }
 
 /// Returns score from the side-to-move perspective, same convention as classical eval.
