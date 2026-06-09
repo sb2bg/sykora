@@ -92,11 +92,10 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 <summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `SYKNNUE5` material-output-bucket nets, with compatibility for the current embedded net
-  - Mirrored king-bucketed sparse-input nets
+  - `SYKNNUE6` nets: mirrored king-bucketed sparse inputs + material-count output buckets
   - SCReLU activation with incremental accumulators during search
+  - Configurable FT width, input/output bucket layout, and quantization (all header-stored)
   - Trained on high-depth self-play data via the Bullet trainer
-  - King-bucket training path via `nnue/bullet_repo/examples/sykora_bucketed.rs`
   - Blendable with classical eval via `NnueBlend` (default: `100` = pure NNUE)
 - **Classical handcrafted evaluation** (fallback):
   - Material and piece-square tables
@@ -260,23 +259,61 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora's current training target is `SYKNNUE5`: mirrored king-bucketed sparse inputs with dual-perspective accumulator updates, SCReLU activation, and material-count output buckets. The engine still keeps loader compatibility for the current embedded net until `src/net.sknnue` is replaced.
+Sykora's network format is `SYKNNUE6`: mirrored king-bucketed sparse inputs with dual-perspective accumulator updates, SCReLU activation, and material-count output buckets. It stays in the proven v3 architecture family (the prior v4/v5 attempts are retired) and adds exactly one capability over v3 — material-count output buckets — while making FT width and bucket layout config, not format. Width (`ft_hidden_size`), input/output bucket counts, the output-bucket scheme, the quantization constants (`q0/q/scale`), and the 64-entry bucket layout are all stored in the file header.
 
 ### Runtime
 
 - The embedded net (`src/net.sknnue`) is compiled into the binary and loaded automatically at startup.
 - NNUE is enabled by default (`UseNNUE = true`, `NnueBlend = 100`, `NnueScale = 100`).
-- The activation function is stored in the network file header and auto-detected on load.
+- The activation function and quantization constants are stored in the header and read on load.
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For exact file-format details, see [specs/syknnue5_spec.md](specs/syknnue5_spec.md) and `src/nnue.zig`.
+For exact file-format details (header, payload order, integer inference contract, loader validation), see `src/nnue.zig`.
+
+### Validation Ladder
+
+`SYKNNUE6` is designed so a failed run can be localized. Each stage changes exactly one variable and must gate (SPRT, fast TC) before the next:
+
+- **Stage 0 — Repack**: convert the embedded v3 net into a `SYKNNUE6` container (`O=1`, `scheme=single`) with no training. Validates the loader + eval path.
+- **Stage 1 — Parity**: retrain the v3 architecture (10 buckets, `H=512`, `O=1`) through the v6 trainer/exporter; must reach v3 parity.
+- **Stage 2 — Buckets**: `O=8` material output buckets, everything else unchanged.
+- **Stage 3 — Width**: `H` 512 → 768 (then optionally 1024), `O=8`.
+- **Stage 4 — Layout**: optionally test `sykora16` vs the 10-bucket layout as an isolated change.
+
+Per-stage bit-exactness: before any SPRT, the engine must reproduce the numpy reference evals exactly over a fixed FEN suite (see Parity below).
+
+### Stage 0: Repack the v3 net
+
+Convert a legacy `SYKNNUE3` net into a v6 container (lossless byte reshuffle):
+
+```bash
+python utils/nnue/bullet/repack_v3_to_v6.py \
+  --input src/net.sknnue.v3.bak \
+  --output src/net.sknnue
+zig build -Doptimize=ReleaseFast
+```
+
+### Parity (bit-exactness gate)
+
+The engine exposes a `nnuecheck` subcommand that emits reference evals for a FEN suite through the non-incremental `evaluate` path:
+
+```bash
+./zig-out/bin/sykora nnuecheck --net src/net.sknnue --fens utils/nnue/parity.fens
+```
+
+`check_net_parity.py` recomputes every eval in numpy (reproducing the integer contract) and asserts exact equality against the engine. The suite covers all 8 material buckets, both mirror states, and both sides to move:
+
+```bash
+python utils/nnue/bullet/check_net_parity.py \
+  --net src/net.sknnue --fens utils/nnue/parity.fens
+```
 
 ### Training Pipeline
 
-Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`.
+Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`. The baseline layout is the proven v3 10-bucket layout (`--bucket-layout v3_10`); output buckets are `1` (Stage-1 parity, `single` scheme) or `8` (Stage-2+ material scheme).
 
-**Using binpack data:**
+**Stage 1 — parity net (`O=1`):**
 
 ```bash
 python utils/nnue/bullet/train_cuda_longrun.py \
@@ -284,54 +321,25 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --data-format binpack \
   --bullet-repo nnue/bullet_repo \
   --output-root nnue/models/bullet \
-  --network-format syk5 \
-  --bucket-layout sykora16 \
+  --network-format syk6 \
+  --bucket-layout v3_10 \
+  --output-buckets 1 \
   --hidden 512 --end-superbatch 320 --threads 8
 ```
 
-**Using BulletFormat .data files:**
-
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset nnue/data/bullet/train/train_main.data \
-  --bullet-repo nnue/bullet_repo \
-  --output-root nnue/models/bullet \
-  --network-format syk5 \
-  --bucket-layout sykora16 \
-  --hidden 512 --end-superbatch 320 --threads 8
-```
-
-**Multiple datasets** can be passed space-separated:
-
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset data/set1.binpack data/set2.binpack \
-  --data-format binpack \
-  ...
-```
-
-**Resuming from a checkpoint:**
-
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset data/test80.binpack \
-  --data-format binpack \
-  --resume nnue/models/bullet/<run_id>/checkpoints/<checkpoint>/raw.bin \
-  --start-superbatch 161 --end-superbatch 320 \
-  ...
-```
-
-**Training a `SYKNNUE5` material-output-bucket net:**
+**Stage 2 — material output buckets (`O=8`):**
 
 ```bash
 python utils/nnue/bullet/train_cuda_longrun.py \
   --dataset data/training.binpack \
   --data-format binpack \
-  --network-format syk5 \
-  --bucket-layout sykora16 \
-  --hidden 512 \
-  --end-superbatch 320 --threads 8
+  --network-format syk6 \
+  --bucket-layout v3_10 \
+  --output-buckets 8 \
+  --hidden 512 --end-superbatch 320 --threads 8
 ```
+
+**Multiple datasets** can be passed space-separated; **resuming** uses `--resume <checkpoint>/raw.bin` with adjusted `--start-superbatch`.
 
 ### Self-Play Data Generation
 
@@ -344,15 +352,15 @@ Sykora can generate its own training data via the `gensfen` command:
 
 ### Exporting a Trained Net
 
-Export a `SYKNNUE5` checkpoint:
+Convert a Bullet checkpoint to NPZ, then to a `SYKNNUE6` net (`--output-bucket-count` is inferred from the checkpoint; `1` → `single`, `8` → `material`):
 
 ```bash
 python utils/nnue/bullet/checkpoint_raw_to_npz.py \
   --input nnue/models/bullet/<run_id>/checkpoints/<checkpoint> \
-  --output checkpoint_syk5.npz
+  --output checkpoint.npz
 
-python utils/nnue/bullet/export_npz_to_syk5.py \
-  --input checkpoint_syk5.npz \
+python utils/nnue/bullet/export_npz_to_syk6.py \
+  --input checkpoint.npz \
   --output-net output.sknnue
 ```
 
@@ -378,9 +386,7 @@ python utils/nnue/bullet/gate_checkpoints.py \
   --promote-to nnue/syk_nnue_best.sknnue
 ```
 
-This gate now evaluates recent checkpoints by selfplay only. STS is intentionally not part of the checkpoint promotion path.
-
-SYKNNUE5 design spec: `specs/syknnue5_spec.md`.
+The 80-game / 120 ms selfplay gate has a wide Elo error bar; treat it as a smoke test and prefer SPRT at fast TC for promotion decisions.
 
 ## Contributing
 
