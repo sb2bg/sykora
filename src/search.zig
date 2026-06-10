@@ -60,6 +60,13 @@ pub const SearchResult = struct {
 };
 
 const MAX_PLY = 64;
+// Hard cap on search path length. Bounds the NNUE accumulator stack, which is
+// indexed by ply: check-extension chains plus the quiescence tail can push ply
+// well past MAX_PLY, so both alphaBeta and quiescence bail out to static eval here.
+const MAX_SEARCH_PLY = 127;
+const ACC_STACK_SIZE = MAX_SEARCH_PLY + 1;
+// How often (in nodes) the in-search time check runs.
+const TIME_CHECK_NODE_MASK: usize = 2047;
 const MAX_KILLER_MOVES = 2;
 const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
@@ -233,6 +240,9 @@ pub const SearchEngine = struct {
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
+    // In-search time management: set once per `search()` call.
+    search_start: std.time.Instant,
+    time_limit_ms: ?u64,
 
     pub fn init(
         board_ptr: *Board,
@@ -276,6 +286,8 @@ pub const SearchEngine = struct {
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
+            .search_start = std.time.Instant.now() catch unreachable,
+            .time_limit_ms = null,
         };
     }
 
@@ -305,7 +317,7 @@ pub const SearchEngine = struct {
     /// Allocate and initialize the incremental accumulator stack for NNUE.
     fn initAccumulatorStack(self: *Self) !void {
         if (self.use_nnue and self.nnue_net != null) {
-            const stack = self.allocator.alloc(nnue.AccumulatorPair, 128) catch return;
+            const stack = self.allocator.alloc(nnue.AccumulatorPair, ACC_STACK_SIZE) catch return;
             self.acc_stack = stack;
             stack[0] = nnue.initAccumulators(self.nnue_net.?, self.board);
             self.acc_ply = 0;
@@ -438,6 +450,8 @@ pub const SearchEngine = struct {
 
         // Calculate time limit
         const time_limit = self.calculateTimeLimit(options);
+        self.search_start = start_time;
+        self.time_limit_ms = time_limit;
 
         // Generate legal moves
         var legal_moves = MoveList.init();
@@ -618,7 +632,25 @@ pub const SearchEngine = struct {
 
         const time_for_move = @max(min_time, @min(time_budget, max_time));
 
-        return time_for_move;
+        // Never plan to spend more than what's actually on the clock (minus a
+        // safety margin): the 100ms floor above would otherwise guarantee a
+        // time forfeit once the clock drops below ~150ms.
+        const safety_margin_ms: u64 = 30;
+        const hard_cap = time_remaining -| safety_margin_ms;
+
+        return @min(time_for_move, hard_cap);
+    }
+
+    /// Periodic in-search time check. Sets the stop flag (visible to all helper
+    /// threads) when the soft limit is exceeded, so a single blown iteration
+    /// cannot overrun movetime/clock time.
+    inline fn timeUp(self: *Self) bool {
+        const limit = self.time_limit_ms orelse return false;
+        if (@as(u64, @intCast(@max(elapsedMs(self.search_start), 0))) >= limit) {
+            self.stop_search.store(true, .monotonic);
+            return true;
+        }
+        return false;
     }
 
     inline fn continuationContext(self: *const Self, ply: u32) struct { prev: ?u16, prev2: ?u16 } {
@@ -806,6 +838,10 @@ pub const SearchEngine = struct {
             self.history_count = old_hist_count;
             if (ply < MAX_PLY) {
                 self.continuation_keys[ply] = old_continuation_key;
+            }
+
+            if (self.stop_search.load(.monotonic)) {
+                return .{ .extension = 0, .cutoff = null };
             }
 
             if (score >= singular_beta) {
@@ -1018,6 +1054,8 @@ pub const SearchEngine = struct {
         ply: u32,
         best_move: ?Move,
     ) void {
+        // Scores computed after a stop are garbage; never let them into the TT.
+        if (self.stop_search.load(.monotonic)) return;
         const bound: TTEntryBound = if (best_score <= original_alpha)
             .upper_bound
         else if (best_score >= beta_adj)
@@ -1042,6 +1080,8 @@ pub const SearchEngine = struct {
         ply: u32,
         best_move: ?Move,
     ) void {
+        // Scores computed after a stop are garbage; never let them into the TT.
+        if (self.stop_search.load(.monotonic)) return;
         const bound: TTEntryBound = if (best_score <= original_alpha)
             .upper_bound
         else if (best_score >= beta)
@@ -1067,6 +1107,15 @@ pub const SearchEngine = struct {
 
         if (self.stop_search.load(.monotonic)) {
             return 0;
+        }
+
+        if ((self.nodes_searched & TIME_CHECK_NODE_MASK) == 0 and self.timeUp()) {
+            return 0;
+        }
+
+        // Hard ply cap: keeps the NNUE accumulator stack in bounds.
+        if (ply >= MAX_SEARCH_PLY) {
+            return self.evaluatePosition();
         }
 
         self.seldepth = @max(self.seldepth, ply);
@@ -1337,6 +1386,12 @@ pub const SearchEngine = struct {
             }
             self.history_count = old_hist_count; // Restore history count
 
+            // If the search was stopped mid-subtree, `score` is meaningless: bail
+            // out before it can contaminate the best move, heuristics, or the TT.
+            if (self.stop_search.load(.monotonic)) {
+                return 0;
+            }
+
             // Discourage speculative non-checking minor-piece sacs for pawns unless
             // search already proves concrete compensation.
             if (speculative_sac_candidate and !gives_check and !eval.isMateScore(score)) {
@@ -1499,8 +1554,17 @@ pub const SearchEngine = struct {
             return 0;
         }
 
+        if ((self.nodes_searched & TIME_CHECK_NODE_MASK) == 0 and self.timeUp()) {
+            return 0;
+        }
+
         self.nodes_searched += 1;
         self.seldepth = @max(self.seldepth, ply);
+
+        // Hard ply cap: keeps the NNUE accumulator stack in bounds.
+        if (ply >= MAX_SEARCH_PLY) {
+            return self.evaluatePosition();
+        }
 
         // Check if we're in check - if so, we must search all evasions (not just captures)
         const in_check = self.board.isInCheck(self.board.board.move);
@@ -1625,6 +1689,12 @@ pub const SearchEngine = struct {
             // Unmake move
             self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
+
+            // Stopped mid-subtree: `score` is meaningless, don't let it cut or
+            // reach the TT.
+            if (self.stop_search.load(.monotonic)) {
+                return 0;
+            }
 
             if (score >= beta) {
                 self.storeQuiescenceResult(score, original_alpha, beta, ply, move);
