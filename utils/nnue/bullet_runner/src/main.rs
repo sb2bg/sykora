@@ -4,7 +4,10 @@ use bullet_lib::{
         inputs::{ChessBucketsMirrored, get_num_buckets},
         outputs::MaterialCount,
     },
-    nn::optimiser::{AdamW, AdamWParams},
+    nn::{
+        InitSettings, Shape,
+        optimiser::{AdamW, AdamWParams},
+    },
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
@@ -14,7 +17,8 @@ use bullet_lib::{
 };
 use std::env;
 
-// Proven v3 10-bucket layout (mirrored 32-entry half) — the SYKNNUE6 baseline.
+// Proven v3 10-bucket layout (mirrored 32-entry half) — the SYKNNUE6 layout.
+// This is the only supported layout for v6. See specs/syknnue6_spec.md §3.2.
 #[rustfmt::skip]
 const BUCKET_LAYOUT_V3_10: [usize; 32] = [
     0, 1, 2, 3,
@@ -25,18 +29,6 @@ const BUCKET_LAYOUT_V3_10: [usize; 32] = [
     8, 8, 8, 8,
     9, 9, 9, 9,
     9, 9, 9, 9,
-];
-
-#[rustfmt::skip]
-const BUCKET_LAYOUT_SYKORA16: [usize; 32] = [
-    0, 0, 1, 1,
-    2, 2, 3, 3,
-    4, 4, 5, 5,
-    6, 6, 7, 7,
-    8, 8, 9, 9,
-    10, 10, 11, 11,
-    12, 12, 13, 13,
-    14, 14, 15, 15,
 ];
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -57,34 +49,25 @@ fn env_string(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn selected_bucket_layout(name: &str) -> [usize; 32] {
-    match name {
-        "sykora16" => BUCKET_LAYOUT_SYKORA16,
-        _ => BUCKET_LAYOUT_V3_10,
-    }
-}
-
-fn selected_bucket_layout_name(name: &str) -> &'static str {
-    match name {
-        "sykora16" => "sykora16",
-        _ => "v3_10",
-    }
-}
-
 fn binpack_filter(entry: &TrainingDataEntry) -> bool {
     entry.ply >= 16
         && !entry.pos.is_checked(entry.pos.side_to_move())
         && entry.score.unsigned_abs() <= 10000
 }
 
-/// Train a SYKNNUE6 net with `O` material-count output buckets.
+/// Train a SYKNNUE6 net with `O` material-count output buckets and a
+/// factorised sparse FT.
+///
+/// The factoriser (`l0f`) is a shared `768 → H` weight matrix trained across
+/// all king buckets. At save time it is merged into the per-bucket weights
+/// (`l0w`) via `.transform()`. The exported `raw.bin` contains `l0f`
+/// followed by `l0w`; `checkpoint_raw_to_npz.py` merges them into the final
+/// `ft_weights` tensor.
 ///
 /// `O = 1` (with `MaterialCount::<1>`, which always selects bucket 0) is the
-/// Stage-1 parity architecture; it is exported with the `single` output-bucket
-/// scheme. `O = 8` is the Stage-2+ material-count head.
+/// Stage-1 parity architecture. `O = 8` is the Stage-2/3 material-count head.
 #[allow(clippy::too_many_arguments)]
 fn run_syk6<const O: usize>(
-    bucket_layout: [usize; 32],
     num_input_buckets: usize,
     dataset_paths: &[&str],
     data_format: &str,
@@ -103,20 +86,41 @@ fn run_syk6<const O: usize>(
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(AdamW)
-        .inputs(ChessBucketsMirrored::new(bucket_layout))
+        .inputs(ChessBucketsMirrored::new(BUCKET_LAYOUT_V3_10))
         .output_buckets(MaterialCount::<O>)
         .use_threads(threads)
         .save_format(&[
-            SavedFormat::id("l0w").round().quantise::<i16>(255),
+            // Factoriser merge: tile l0f across all buckets and add to l0w.
+            // This produces the merged ft_weights that the runtime expects.
+            SavedFormat::id("l0w")
+                .transform(move |store, weights| {
+                    let factoriser = store.get("l0f").values.repeat(num_input_buckets);
+                    weights
+                        .into_iter()
+                        .zip(factoriser)
+                        .map(|(a, b)| a + b)
+                        .collect()
+                })
+                .round()
+                .quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
             SavedFormat::id("outw").round().quantise::<i16>(64),
             SavedFormat::id("outb").round().quantise::<i32>(255 * 64),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs, output_buckets| {
-            let l0 = builder.new_affine("l0", 768 * num_input_buckets, hl_size);
-            l0.init_with_effective_input_size(32);
+            // Factoriser: shared 768 → H weights, trained across all buckets.
+            // This is the key component that v4/v5 dropped — without it,
+            // each bucket's 768 weights are trained on only ~1/N of the data.
+            let l0f = builder.new_weights("l0f", Shape::new(hl_size, 768), InitSettings::Zeroed);
+            let expanded_factoriser = l0f.repeat(num_input_buckets);
 
+            // Per-bucket FT weights + factoriser
+            let mut l0 = builder.new_affine("l0", 768 * num_input_buckets, hl_size);
+            l0.init_with_effective_input_size(32);
+            l0.weights = l0.weights + expanded_factoriser;
+
+            // Bucketed output head
             let out = builder.new_affine("out", 2 * hl_size, O);
 
             let stm_hidden = l0.forward(stm_inputs).screlu();
@@ -125,6 +129,8 @@ fn run_syk6<const O: usize>(
             out.forward(hidden).select(output_buckets)
         });
 
+    // Factoriser weights need tighter clipping (they're shared, so magnitudes
+    // propagate across all buckets — same rationale as v3).
     let stricter_clipping = AdamWParams {
         max_weight: 0.99,
         min_weight: -0.99,
@@ -133,6 +139,9 @@ fn run_syk6<const O: usize>(
     trainer
         .optimiser
         .set_params_for_weight("l0w", stricter_clipping);
+    trainer
+        .optimiser
+        .set_params_for_weight("l0f", stricter_clipping);
 
     let schedule = TrainingSchedule {
         net_id,
@@ -179,10 +188,10 @@ fn run_syk6<const O: usize>(
                 binpack_buffer_mb, binpack_threads
             );
             println!(
-                "Input layout: mirrored king buckets ({} buckets), material output buckets ({})",
+                "Input layout: mirrored king buckets ({} buckets, v3_10), material output buckets ({})",
                 num_input_buckets, O
             );
-            println!("FT width: {} per perspective", hl_size);
+            println!("FT width: {} per perspective (factorised)", hl_size);
             println!("Head: bucketed linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
@@ -201,10 +210,10 @@ fn run_syk6<const O: usize>(
         _ => {
             println!("Using DirectSequentialDataLoader (bullet format)");
             println!(
-                "Input layout: mirrored king buckets ({} buckets), material output buckets ({})",
+                "Input layout: mirrored king buckets ({} buckets, v3_10), material output buckets ({})",
                 num_input_buckets, O
             );
-            println!("FT width: {} per perspective", hl_size);
+            println!("FT width: {} per perspective (factorised)", hl_size);
             println!("Head: bucketed linear {} -> 1", 2 * hl_size);
             for p in dataset_paths {
                 println!("  Dataset: {}", p);
@@ -219,7 +228,7 @@ fn run_syk6<const O: usize>(
 fn main() {
     let dataset_path = env_string("SYK_DATASET", "data/baseline.data");
     let initial_lr = env_f32("SYK_LR_START", 0.001);
-    let superbatches = env_usize("SYK_END_SUPERBATCH", 320);
+    let superbatches = env_usize("SYK_END_SUPERBATCH", 640);
     let start_superbatch = env_usize("SYK_START_SUPERBATCH", 1);
     let final_lr = env_f32("SYK_LR_FINAL", initial_lr * 0.3f32.powi(5));
     let wdl_proportion = env_f32("SYK_WDL", 0.75);
@@ -230,18 +239,24 @@ fn main() {
     let resume_from = env::var("SYK_RESUME").ok();
     let data_format = env_string("SYK_DATA_FORMAT", "bullet");
     let network_format = env_string("SYK_NETWORK_FORMAT", "syk6");
-    let hl_size = env_usize("SYK_HIDDEN", 512);
+    let hl_size = env_usize("SYK_HIDDEN", 768);
     let output_buckets = env_usize("SYK_OUTPUT_BUCKETS", 8);
     let bucket_layout_name = env_string("SYK_BUCKET_LAYOUT", "v3_10");
 
-    let bucket_layout = selected_bucket_layout(&bucket_layout_name);
-    let bucket_layout_name = selected_bucket_layout_name(&bucket_layout_name);
-    let num_input_buckets = get_num_buckets(&bucket_layout);
+    if bucket_layout_name != "v3_10" {
+        panic!(
+            "SYKNNUE6 only supports the v3_10 bucket layout (got {bucket_layout_name}); \
+             see specs/syknnue6_spec.md §3.2"
+        );
+    }
+
+    let num_input_buckets = get_num_buckets(&BUCKET_LAYOUT_V3_10);
     let dataset_paths: Vec<&str> = dataset_path.split(';').collect();
 
     println!("Network format: {}", network_format);
-    println!("Bucket layout: {}", bucket_layout_name);
+    println!("Bucket layout: v3_10 ({} buckets)", num_input_buckets);
     println!("Output buckets: {}", output_buckets);
+    println!("FT width: {}", hl_size);
 
     if network_format != "syk6" {
         panic!("unsupported network format: {network_format}");
@@ -250,7 +265,6 @@ fn main() {
     macro_rules! dispatch {
         ($o:literal) => {
             run_syk6::<$o>(
-                bucket_layout,
                 num_input_buckets,
                 &dataset_paths,
                 &data_format,

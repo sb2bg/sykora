@@ -19,18 +19,8 @@ from bootstrap import DEFAULT_BULLET_REPO, ensure_bullet_repo  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-SYKORA16_BUCKET_LAYOUT_32 = [
-    0, 0, 1, 1,
-    2, 2, 3, 3,
-    4, 4, 5, 5,
-    6, 6, 7, 7,
-    8, 8, 9, 9,
-    10, 10, 11, 11,
-    12, 12, 13, 13,
-    14, 14, 15, 15,
-]
-
-# Proven v3 10-bucket layout — the SYKNNUE6 baseline.
+# Proven v3 10-bucket layout — the only SYKNNUE6 layout.
+# See specs/syknnue6_spec.md §3.2.
 V3_BUCKET_LAYOUT_32 = [
     0, 1, 2, 3,
     4, 4, 5, 5,
@@ -44,7 +34,6 @@ V3_BUCKET_LAYOUT_32 = [
 
 BUCKET_LAYOUTS_32 = {
     "v3_10": V3_BUCKET_LAYOUT_32,
-    "sykora16": SYKORA16_BUCKET_LAYOUT_32,
 }
 
 
@@ -77,9 +66,9 @@ def parse_args() -> argparse.Namespace:
         "--run-id", default="", help="Run identifier (default: utc timestamp)"
     )
 
-    # Architecture/training knobs (defaults are intentionally long-run)
+    # Architecture/training knobs (defaults are the v6 Stage-3 target)
     parser.add_argument(
-        "--hidden", type=int, default=0, help="Hidden size (default: 512)"
+        "--hidden", type=int, default=768, help="FT hidden size (default: 768)"
     )
     parser.add_argument(
         "--network-format",
@@ -89,15 +78,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--bucket-layout",
-        choices=["v3_10", "sykora16"],
-        default="",
-        help="Mirrored king-bucket layout (default: v3_10)",
+        choices=["v3_10"],
+        default="v3_10",
+        help="Mirrored king-bucket layout (only v3_10 is supported)",
     )
     parser.add_argument(
         "--start-superbatch", type=int, default=1, help="Start superbatch"
     )
     parser.add_argument(
-        "--end-superbatch", type=int, default=320, help="End superbatch"
+        "--end-superbatch", type=int, default=640, help="End superbatch"
     )
     parser.add_argument("--lr-start", type=float, default=0.0010, help="Initial LR")
     parser.add_argument(
@@ -120,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8,
         choices=[1, 8],
-        help="SYKNNUE6 output buckets: 1 (Stage-1 parity, single scheme) or 8 (material)",
+        help="SYKNNUE6 output buckets: 1 (Stage-1 parity, single scheme) or 8 (Stage-2/3 material)",
     )
 
     # Data format
@@ -157,10 +146,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    if not args.bucket_layout:
-        args.bucket_layout = "v3_10"
     if args.hidden <= 0:
-        args.hidden = 512
+        args.hidden = 768
 
     datasets = [Path(d) for d in args.dataset]
     for dataset in datasets:

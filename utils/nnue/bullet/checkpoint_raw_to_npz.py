@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Convert a Sykora Bullet checkpoint raw.bin into explicit NPZ tensors."""
+"""Convert a Sykora Bullet checkpoint raw.bin into explicit NPZ tensors.
+
+Supports two raw.bin layouts:
+  * ``syk6_factorised`` — includes the ``l0f`` factoriser tensor before
+    ``l0w``. The factoriser is merged into ``l0w`` to produce the final
+    ``ft_weights``. This is the layout produced by the v6 trainer.
+  * ``syk6_no_factoriser`` — no factoriser (legacy/broken v6 checkpoints).
+    ``l0w`` is read directly as ``ft_weights``. Kept for backward
+    compatibility; new runs should always use the factorised trainer.
+"""
 
 from __future__ import annotations
 
@@ -81,13 +90,16 @@ def expected_raw_sizes(
     input_size = 768 * bucket_count
     if network_format != "syk6":
         raise ValueError(f"unsupported network format: {network_format}")
+
+    factoriser = 768 * ft_hidden
+    ft_weights = input_size * ft_hidden
+    ft_biases = ft_hidden
+    out_weights = output_bucket_count * 2 * ft_hidden
+    out_biases = output_bucket_count
+
     return {
-        "syk6_output_buckets": (
-            input_size * ft_hidden
-            + ft_hidden
-            + (output_bucket_count * 2 * ft_hidden)
-            + output_bucket_count
-        ),
+        "syk6_factorised": factoriser + ft_weights + ft_biases + out_weights + out_biases,
+        "syk6_no_factoriser": ft_weights + ft_biases + out_weights + out_biases,
     }
 
 
@@ -171,7 +183,24 @@ def main() -> int:
     )
     offset = 0
 
-    l0w, offset = take_f32(raw, offset, input_size * ft_hidden)
+    if layout == "syk6_factorised":
+        # Factoriser: [H, 768] in graph order (row-major), stored as 768*H floats.
+        # Read it first, then the per-bucket l0w, and merge.
+        l0f, offset = take_f32(raw, offset, 768 * ft_hidden)
+        l0w, offset = take_f32(raw, offset, input_size * ft_hidden)
+
+        # Merge: tile factoriser across all buckets and add to l0w.
+        # l0f is [H, 768] in Bullet's Shape::new(hl_size, 768) convention,
+        # which is row-major (output, input) = (H, 768). Flatten to [768, H]
+        # for merging (feature-major, matching ft_weights layout).
+        l0f_reshaped = l0f.reshape(ft_hidden, 768).T  # [768, H]
+        factoriser_tiled = np.tile(l0f_reshaped, (bucket_count, 1))  # [input_size, H]
+        ft_weights = l0w.reshape(input_size, ft_hidden) + factoriser_tiled
+    else:
+        # No factoriser (legacy checkpoint): read l0w directly.
+        l0w, offset = take_f32(raw, offset, input_size * ft_hidden)
+        ft_weights = l0w.reshape(input_size, ft_hidden)
+
     l0b, offset = take_f32(raw, offset, ft_hidden)
     outw_len = output_bucket_count * 2 * ft_hidden
     outb_len = output_bucket_count
@@ -183,7 +212,6 @@ def main() -> int:
             f"raw.bin length mismatch: expected {offset} floats from metadata, found {raw.shape[0]}"
         )
 
-    ft_weights = l0w.reshape(input_size, ft_hidden)
     ft_bias = l0b.reshape(ft_hidden)
     out_weights = outw.reshape(output_bucket_count, 2 * ft_hidden)
     out_bias = outb.reshape(output_bucket_count)
@@ -214,6 +242,8 @@ def main() -> int:
     print(f"FT hidden: {ft_hidden}")
     print(f"Output buckets: {output_bucket_count}")
     print(f"Dense head: bucketed linear {2 * ft_hidden} -> 1")
+    if layout == "syk6_factorised":
+        print("Factoriser: merged l0f into l0w")
     print(f"Wrote: {out_path}")
     return 0
 

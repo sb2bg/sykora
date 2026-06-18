@@ -92,10 +92,10 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 <summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `SYKNNUE6` nets: mirrored king-bucketed sparse inputs + material-count output buckets
+  - `SYKNNUE6` nets: factorised mirrored king-bucketed sparse inputs (10 buckets) + material-count output buckets
   - SCReLU activation with incremental accumulators during search
-  - Configurable FT width, input/output bucket layout, and quantization (all header-stored)
-  - Trained on high-depth self-play data via the Bullet trainer
+  - Factorised training: shared `768 → H` factoriser merged into per-bucket weights at export
+  - Trained on Stockfish binpack data via the Bullet trainer
   - Blendable with classical eval via `NnueBlend` (default: `100` = pure NNUE)
 - **Classical handcrafted evaluation** (fallback):
   - Material and piece-square tables
@@ -259,7 +259,9 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora's network format is `SYKNNUE6`: mirrored king-bucketed sparse inputs with dual-perspective accumulator updates, SCReLU activation, and material-count output buckets. It stays in the proven v3 architecture family (the prior v4/v5 attempts are retired) and adds exactly one capability over v3 — material-count output buckets — while making FT width and bucket layout config, not format. Width (`ft_hidden_size`), input/output bucket counts, the output-bucket scheme, the quantization constants (`q0/q/scale`), and the 64-entry bucket layout are all stored in the file header.
+Sykora's network format is `SYKNNUE6`: factorised mirrored king-bucketed sparse inputs (10 buckets, v3_10 layout) with dual-perspective accumulator updates, SCReLU activation, and material-count output buckets. It is the direct successor to v3 — the last successfully trained net — and makes two changes over v3: wider FT (512 → 768) and material-count output buckets (1 → 8). The v4/v5 attempts are retired; see `specs/syknnue6_spec.md` for the postmortem and full design spec.
+
+The key training requirement is **factorisation**: a shared `768 → H` factoriser matrix is trained across all king buckets and merged into the per-bucket weights at export time. v4 and v5 both dropped factorisation, which is the root cause of their failure — each bucket's weights were trained on only ~1/N of the data with no shared base.
 
 ### Runtime
 
@@ -269,13 +271,13 @@ Sykora's network format is `SYKNNUE6`: mirrored king-bucketed sparse inputs with
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For exact file-format details (header, payload order, integer inference contract, loader validation), see `src/nnue.zig`.
+For exact file-format details (header, payload order, integer inference contract, loader validation), see `specs/syknnue6_spec.md`.
 
 ### Training Pipeline
 
-Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`. The baseline layout is the proven v3 10-bucket layout (`--bucket-layout v3_10`); output buckets are `1` (Stage-1 parity, `single` scheme) or `8` (Stage-2+ material scheme).
+Training uses the [Bullet](https://github.com/jw1912/bullet) trainer with **factorised** king-bucketed inputs. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`. The only supported layout is v3_10 (10 buckets); output buckets are `1` (Stage-1 parity, `single` scheme) or `8` (Stage-2/3 material scheme). See `specs/syknnue6_spec.md` for the full staging plan.
 
-**Stage 1 — parity net (`O=1`):**
+**Stage 1 — parity net (`H=512, O=1`):**
 
 ```bash
 python utils/nnue/bullet/train_cuda_longrun.py \
@@ -289,7 +291,7 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --hidden 512 --end-superbatch 320 --threads 8
 ```
 
-**Stage 2 — material output buckets (`O=8`):**
+**Stage 2 — material output buckets (`H=512, O=8`):**
 
 ```bash
 python utils/nnue/bullet/train_cuda_longrun.py \
@@ -298,7 +300,19 @@ python utils/nnue/bullet/train_cuda_longrun.py \
   --network-format syk6 \
   --bucket-layout v3_10 \
   --output-buckets 8 \
-  --hidden 512 --end-superbatch 320 --threads 8
+  --hidden 512 --end-superbatch 640 --threads 8
+```
+
+**Stage 3 — wider FT (`H=768, O=8`, the v6 strength target):**
+
+```bash
+python utils/nnue/bullet/train_cuda_longrun.py \
+  --dataset data/training.binpack \
+  --data-format binpack \
+  --network-format syk6 \
+  --bucket-layout v3_10 \
+  --output-buckets 8 \
+  --hidden 768 --end-superbatch 640 --threads 8
 ```
 
 **Multiple datasets** can be passed space-separated; **resuming** uses `--resume <checkpoint>/raw.bin` with adjusted `--start-superbatch`.
