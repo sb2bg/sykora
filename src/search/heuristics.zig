@@ -3,7 +3,7 @@ const Move = board.Move;
 const piece = @import("../piece.zig");
 const std = @import("std");
 
-pub const MAX_PLY = 64;
+pub const MAX_PLY = 128;
 pub const MAX_KILLER_MOVES = 2;
 pub const CONTINUATION_KEY_COUNT = 2 * 6 * 64;
 pub const INVALID_CONTINUATION_KEY = std.math.maxInt(u16);
@@ -66,6 +66,16 @@ pub const CounterMoveTable = struct {
     }
 };
 
+/// Signed history gravity. Opposite-signed updates must pull saturated
+/// entries back toward zero instead of freezing them at either bound.
+pub fn gravityAdjusted(current: i32, delta_in: i32) i32 {
+    const limit: i32 = 16384;
+    const bounded_current = std.math.clamp(current, -limit, limit);
+    const delta = std.math.clamp(delta_in, -limit, limit);
+    const next = bounded_current + delta - @divTrunc(bounded_current * @as(i32, @intCast(@abs(delta))), limit);
+    return std.math.clamp(next, -limit, limit);
+}
+
 pub const HistoryTable = struct {
     scores: [2][64][64]i32,
 
@@ -78,21 +88,15 @@ pub const HistoryTable = struct {
     pub fn update(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
         const bonus = @as(i32, @intCast(@min(depth * depth, 400)));
-        const current = self.scores[c][move.from()][move.to()];
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        self.scores[c][move.from()][move.to()] += adjusted_bonus;
-        self.scores[c][move.from()][move.to()] = @max(-16384, @min(16384, self.scores[c][move.from()][move.to()]));
+        const cell = &self.scores[c][move.from()][move.to()];
+        cell.* = gravityAdjusted(cell.*, bonus);
     }
 
     pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
         const penalty = @as(i32, @intCast(@min(depth * depth, 400)));
-        const current = self.scores[c][move.from()][move.to()];
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        self.scores[c][move.from()][move.to()] -= adjusted_penalty;
-        self.scores[c][move.from()][move.to()] = @max(-16384, @min(16384, self.scores[c][move.from()][move.to()]));
+        const cell = &self.scores[c][move.from()][move.to()];
+        cell.* = gravityAdjusted(cell.*, -penalty);
     }
 
     pub fn get(self: *const HistoryTable, move: Move) i32 {
@@ -186,16 +190,17 @@ pub const ContinuationHistoryTable = struct {
     }
 
     fn updateCell(cell: *i16, bonus: i32) void {
-        const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current + adjusted_bonus)));
+        cell.* = @intCast(gravityAdjusted(cell.*, bonus));
     }
 
     fn penalizeCell(cell: *i16, penalty: i32) void {
-        const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current - adjusted_penalty)));
+        cell.* = @intCast(gravityAdjusted(cell.*, -penalty));
     }
 };
+
+test "signed history gravity recovers from both saturation bounds" {
+    try std.testing.expect(gravityAdjusted(16384, -400) < 16384);
+    try std.testing.expect(gravityAdjusted(-16384, 400) > -16384);
+    try std.testing.expectEqual(@as(i32, 16384), gravityAdjusted(16384, 400));
+    try std.testing.expectEqual(@as(i32, -16384), gravityAdjusted(-16384, -400));
+}

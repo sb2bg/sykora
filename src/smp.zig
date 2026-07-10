@@ -43,7 +43,7 @@ pub fn terminateSearch(self: *Uci) !void {
     }
 }
 
-pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
+pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.Instant) UciError!void {
     try self.writeInfoString("search thread started", .{});
 
     const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
@@ -53,7 +53,14 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
 
     self.tt.nextAge();
 
-    const num_helpers = self.num_threads - 1;
+    // Avoid helper allocation and startup for terminal or forced positions.
+    const forced_reply = blk: {
+        var probe_board = self.board;
+        var root_moves = board.MoveList.init();
+        probe_board.generateLegalMoves(&root_moves) catch break :blk false;
+        break :blk root_moves.count <= 1;
+    };
+    const num_helpers = if (forced_reply) 0 else self.num_threads - 1;
     for (0..num_helpers) |i| {
         self.helper_threads[i] = null;
         self.helper_results[i] = EMPTY_HELPER_RESULT;
@@ -67,6 +74,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
             net_ptr,
             use_nnue_for_search,
             prior_count,
+            start_time,
         }) catch {
             self.helper_threads[i] = null;
             self.helper_results[i] = EMPTY_HELPER_RESULT;
@@ -101,7 +109,10 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
         .btime = go_opts.btime,
         .winc = go_opts.winc,
         .binc = go_opts.binc,
+        .moves_to_go = go_opts.moves_to_go,
         .depth = go_opts.depth,
+        .start_time = start_time,
+        .move_overhead = self.move_overhead_ms,
     };
 
     const result = search_engine.search(search_opts) catch {
@@ -135,6 +146,7 @@ fn helperSearch(
     net_ptr: ?*const nnue.Network,
     use_nnue_for_search: bool,
     prior_count: usize,
+    start_time: std.time.Instant,
 ) void {
     var helper_board = self.board;
     var search_engine = SearchEngine.init(
@@ -163,9 +175,18 @@ fn helperSearch(
     const start_depth: u32 = @min(maxDepthStagger(idx), max_depth);
 
     const search_opts = SearchOptions{
-        .infinite = true,
+        .infinite = go_opts.infinite orelse false,
+        .move_time = go_opts.move_time,
+        .wtime = go_opts.wtime,
+        .btime = go_opts.btime,
+        .winc = go_opts.winc,
+        .binc = go_opts.binc,
+        .moves_to_go = go_opts.moves_to_go,
         .depth = go_opts.depth,
         .start_depth = start_depth,
+        .start_time = start_time,
+        .move_overhead = self.move_overhead_ms,
+        .enforce_soft_limit = false,
     };
 
     const result = search_engine.search(search_opts) catch {
