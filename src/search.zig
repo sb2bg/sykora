@@ -1108,6 +1108,13 @@ pub const SearchEngine = struct {
         }
         const tt_move = tt_probe.tt_move;
 
+        // Internal iterative reduction: a node this deep with no TT move is
+        // cheap to reach again, so search it one ply shallower now and let
+        // the TT entry from this visit order the eventual deeper visit.
+        if (tt_move == null and !in_check and search_depth >= 4) {
+            search_depth -= 1;
+        }
+
         const singular = try self.trySingularExtension(
             tt_probe,
             search_depth,
