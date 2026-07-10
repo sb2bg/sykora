@@ -48,6 +48,7 @@ pub const LoadError = error{
     InvalidNetwork,
     UnsupportedVersion,
     NetworkTooLarge,
+    AccumulatorBoundsExceeded,
 };
 
 /// NNUE format used by Sykora (little-endian).
@@ -177,6 +178,59 @@ fn computeV6PayloadBytes(
     return total;
 }
 
+/// Production accumulators are i16. Prove at load time that no reachable
+/// accumulator value can leave i16 range: for every hidden unit and king
+/// bucket, |bias| plus the sum of the `ACC_BOUND_FEATURES` largest absolute
+/// weights among the bucket's rows must fit in i16. A position activates at
+/// most 32 features per perspective, all from one bucket; the fused add/sub
+/// update kernels evaluate adds before subs, so intermediates can transiently
+/// hold up to 2 extra rows — hence 34. Nets that fail are rejected rather
+/// than silently evaluated with wrapped or saturated sums.
+const ACC_BOUND_FEATURES: usize = 34;
+
+fn validateI16AccumulatorBounds(
+    allocator: std.mem.Allocator,
+    ft_biases: []const i16,
+    ft_weights: []const i16,
+    hidden_size: usize,
+    bucket_count: usize,
+) LoadError!void {
+    const tops = allocator.alloc(u16, hidden_size * ACC_BOUND_FEATURES) catch return error.OutOfMemory;
+    defer allocator.free(tops);
+    const mins = allocator.alloc(u16, hidden_size) catch return error.OutOfMemory;
+    defer allocator.free(mins);
+
+    for (0..bucket_count) |bucket| {
+        @memset(tops, 0);
+        @memset(mins, 0);
+        const bucket_base = bucket * LEGACY_INPUT_SIZE * hidden_size;
+        for (0..LEGACY_INPUT_SIZE) |feature| {
+            const row = ft_weights[bucket_base + feature * hidden_size ..][0..hidden_size];
+            for (row, mins, 0..) |weight, current_min, h| {
+                const magnitude: u16 = @abs(weight);
+                if (magnitude <= current_min) continue;
+                const unit_tops = tops[h * ACC_BOUND_FEATURES ..][0..ACC_BOUND_FEATURES];
+                for (unit_tops) |*slot| {
+                    if (slot.* == current_min) {
+                        slot.* = magnitude;
+                        break;
+                    }
+                }
+                var new_min: u16 = std.math.maxInt(u16);
+                for (unit_tops) |slot| new_min = @min(new_min, slot);
+                mins[h] = new_min;
+            }
+        }
+        for (0..hidden_size) |h| {
+            var bound: i64 = @abs(ft_biases[h]);
+            for (tops[h * ACC_BOUND_FEATURES ..][0..ACC_BOUND_FEATURES]) |magnitude| {
+                bound += magnitude;
+            }
+            if (bound > std.math.maxInt(i16)) return error.AccumulatorBoundsExceeded;
+        }
+    }
+}
+
 fn loadFromBytesV6(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
     var pos: usize = 8;
 
@@ -251,6 +305,8 @@ fn loadFromBytesV6(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     errdefer allocator.free(output_weights);
 
     if (pos != data.len) return error.InvalidNetwork;
+
+    try validateI16AccumulatorBounds(allocator, ft_biases, ft_weights, ft_hidden_size, bucket_count);
 
     return Network{
         .allocator = allocator,
@@ -542,6 +598,8 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         }
     }
 
+    try validateI16AccumulatorBounds(allocator, ft_biases, ft_weights, hidden_size, bucket_count);
+
     return .{
         .allocator = allocator,
         .architecture = architecture,
@@ -643,15 +701,44 @@ inline fn divRoundNearestSigned(x: i64, d: i64) i64 {
 
 // ─── Incremental Accumulator Infrastructure ───
 
-pub const AccumulatorPair = struct {
-    white: [MAX_HIDDEN_SIZE]i32,
-    black: [MAX_HIDDEN_SIZE]i32,
-};
+/// Production accumulators are i16 (`AccumulatorPair`); the loader proves
+/// per-hidden-unit bounds so no reachable position can overflow them.
+/// `AccumulatorPairWide` is the i32 reference backend kept for the parity
+/// gate: with in-range weights the two must stay bit-identical.
+pub fn AccumulatorPairT(comptime T: type) type {
+    return struct {
+        pub const Elem = T;
 
-const SimdWeightVec = @Vector(8, i16);
-const SimdAccVec = @Vector(8, i32);
-const SimdSumVec = @Vector(8, i64);
-const SIMD_LANES = @typeInfo(SimdAccVec).vector.len;
+        white: [MAX_HIDDEN_SIZE]T,
+        black: [MAX_HIDDEN_SIZE]T,
+
+        pub inline fn slice(self: *@This(), perspective: piece.Color, hidden_size: usize) []T {
+            return switch (perspective) {
+                .white => self.white[0..hidden_size],
+                .black => self.black[0..hidden_size],
+            };
+        }
+
+        pub inline fn sliceConst(self: *const @This(), perspective: piece.Color, hidden_size: usize) []const T {
+            return switch (perspective) {
+                .white => self.white[0..hidden_size],
+                .black => self.black[0..hidden_size],
+            };
+        }
+    };
+}
+
+pub const AccumulatorPair = AccumulatorPairT(i16);
+pub const AccumulatorPairWide = AccumulatorPairT(i32);
+
+const SIMD_LANES = std.simd.suggestVectorLength(i16) orelse 8;
+const WeightVec = @Vector(SIMD_LANES, i16);
+const I32Vec = @Vector(SIMD_LANES, i32);
+const I64Vec = @Vector(SIMD_LANES, i64);
+
+inline fn AccVecOf(comptime Slice: type) type {
+    return @Vector(SIMD_LANES, std.meta.Elem(Slice));
+}
 
 inline fn perspectiveMirrored(king_sq: u8) bool {
     return (king_sq % 8) > 3;
@@ -674,11 +761,12 @@ inline fn perspectiveLayoutChanged(
         perspectiveMirrored(old_perspective_king_sq) != perspectiveMirrored(new_perspective_king_sq);
 }
 
-inline fn initAccumulatorBiases(dest: []i32, biases: []const i16) void {
+inline fn initAccumulatorBiases(dest: anytype, biases: []const i16) void {
+    const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const bias_ptr: *align(1) const SimdWeightVec = @ptrCast(&biases[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
+        const bias_ptr: *align(1) const WeightVec = @ptrCast(&biases[h]);
+        const dest_ptr: *align(1) AccVec = @ptrCast(&dest[h]);
         dest_ptr.* = @intCast(bias_ptr.*);
     }
 
@@ -687,12 +775,13 @@ inline fn initAccumulatorBiases(dest: []i32, biases: []const i16) void {
     }
 }
 
-inline fn applyFeatureSlice(comptime add: bool, dest: []i32, weights: []const i16) void {
+inline fn applyFeatureSlice(comptime add: bool, dest: anytype, weights: []const i16) void {
+    const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const weight_ptr: *align(1) const SimdWeightVec = @ptrCast(&weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        const weight_vec: SimdAccVec = @intCast(weight_ptr.*);
+        const weight_ptr: *align(1) const WeightVec = @ptrCast(&weights[h]);
+        const dest_ptr: *align(1) AccVec = @ptrCast(&dest[h]);
+        const weight_vec: AccVec = @intCast(weight_ptr.*);
         dest_ptr.* = if (add) dest_ptr.* + weight_vec else dest_ptr.* - weight_vec;
     }
 
@@ -705,81 +794,20 @@ inline fn applyFeatureSlice(comptime add: bool, dest: []i32, weights: []const i1
     }
 }
 
-inline fn applyFeatureSlicesAddSub(dest: []i32, add_weights: []const i16, sub_weights: []const i16) void {
-    var h: usize = 0;
-    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
-        const sub_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        dest_ptr.* = dest_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_ptr.*));
-    }
-
-    while (h < dest.len) : (h += 1) {
-        dest[h] += add_weights[h];
-        dest[h] -= sub_weights[h];
-    }
-}
-
-inline fn applyFeatureSlicesAddSubSub(
-    dest: []i32,
-    add_weights: []const i16,
-    sub_a_weights: []const i16,
-    sub_b_weights: []const i16,
-) void {
-    var h: usize = 0;
-    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
-        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
-        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        dest_ptr.* = dest_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
-    }
-
-    while (h < dest.len) : (h += 1) {
-        dest[h] += add_weights[h];
-        dest[h] -= sub_a_weights[h];
-        dest[h] -= sub_b_weights[h];
-    }
-}
-
-inline fn applyFeatureSlicesAddAddSubSub(
-    dest: []i32,
-    add_a_weights: []const i16,
-    add_b_weights: []const i16,
-    sub_a_weights: []const i16,
-    sub_b_weights: []const i16,
-) void {
-    var h: usize = 0;
-    while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const add_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_a_weights[h]);
-        const add_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_b_weights[h]);
-        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
-        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        dest_ptr.* = dest_ptr.* + @as(SimdAccVec, @intCast(add_a_ptr.*)) + @as(SimdAccVec, @intCast(add_b_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
-    }
-
-    while (h < dest.len) : (h += 1) {
-        dest[h] += add_a_weights[h];
-        dest[h] += add_b_weights[h];
-        dest[h] -= sub_a_weights[h];
-        dest[h] -= sub_b_weights[h];
-    }
-}
-
 inline fn applyFeatureSlicesFromPrevAddSub(
-    dest: []i32,
-    prev: []const i32,
+    dest: anytype,
+    prev: anytype,
     add_weights: []const i16,
     sub_weights: []const i16,
 ) void {
+    const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const prev_ptr: *align(1) const SimdAccVec = @ptrCast(&prev[h]);
-        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
-        const sub_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        dest_ptr.* = prev_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_ptr.*));
+        const prev_ptr: *align(1) const AccVec = @ptrCast(&prev[h]);
+        const add_ptr: *align(1) const WeightVec = @ptrCast(&add_weights[h]);
+        const sub_ptr: *align(1) const WeightVec = @ptrCast(&sub_weights[h]);
+        const dest_ptr: *align(1) AccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = prev_ptr.* + @as(AccVec, @intCast(add_ptr.*)) - @as(AccVec, @intCast(sub_ptr.*));
     }
 
     while (h < dest.len) : (h += 1) {
@@ -788,20 +816,21 @@ inline fn applyFeatureSlicesFromPrevAddSub(
 }
 
 inline fn applyFeatureSlicesFromPrevAddSubSub(
-    dest: []i32,
-    prev: []const i32,
+    dest: anytype,
+    prev: anytype,
     add_weights: []const i16,
     sub_a_weights: []const i16,
     sub_b_weights: []const i16,
 ) void {
+    const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const prev_ptr: *align(1) const SimdAccVec = @ptrCast(&prev[h]);
-        const add_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_weights[h]);
-        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
-        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        dest_ptr.* = prev_ptr.* + @as(SimdAccVec, @intCast(add_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
+        const prev_ptr: *align(1) const AccVec = @ptrCast(&prev[h]);
+        const add_ptr: *align(1) const WeightVec = @ptrCast(&add_weights[h]);
+        const sub_a_ptr: *align(1) const WeightVec = @ptrCast(&sub_a_weights[h]);
+        const sub_b_ptr: *align(1) const WeightVec = @ptrCast(&sub_b_weights[h]);
+        const dest_ptr: *align(1) AccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = prev_ptr.* + @as(AccVec, @intCast(add_ptr.*)) - @as(AccVec, @intCast(sub_a_ptr.*)) - @as(AccVec, @intCast(sub_b_ptr.*));
     }
 
     while (h < dest.len) : (h += 1) {
@@ -810,22 +839,23 @@ inline fn applyFeatureSlicesFromPrevAddSubSub(
 }
 
 inline fn applyFeatureSlicesFromPrevAddAddSubSub(
-    dest: []i32,
-    prev: []const i32,
+    dest: anytype,
+    prev: anytype,
     add_a_weights: []const i16,
     add_b_weights: []const i16,
     sub_a_weights: []const i16,
     sub_b_weights: []const i16,
 ) void {
+    const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
-        const prev_ptr: *align(1) const SimdAccVec = @ptrCast(&prev[h]);
-        const add_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_a_weights[h]);
-        const add_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&add_b_weights[h]);
-        const sub_a_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_a_weights[h]);
-        const sub_b_ptr: *align(1) const SimdWeightVec = @ptrCast(&sub_b_weights[h]);
-        const dest_ptr: *align(1) SimdAccVec = @ptrCast(&dest[h]);
-        dest_ptr.* = prev_ptr.* + @as(SimdAccVec, @intCast(add_a_ptr.*)) + @as(SimdAccVec, @intCast(add_b_ptr.*)) - @as(SimdAccVec, @intCast(sub_a_ptr.*)) - @as(SimdAccVec, @intCast(sub_b_ptr.*));
+        const prev_ptr: *align(1) const AccVec = @ptrCast(&prev[h]);
+        const add_a_ptr: *align(1) const WeightVec = @ptrCast(&add_a_weights[h]);
+        const add_b_ptr: *align(1) const WeightVec = @ptrCast(&add_b_weights[h]);
+        const sub_a_ptr: *align(1) const WeightVec = @ptrCast(&sub_a_weights[h]);
+        const sub_b_ptr: *align(1) const WeightVec = @ptrCast(&sub_b_weights[h]);
+        const dest_ptr: *align(1) AccVec = @ptrCast(&dest[h]);
+        dest_ptr.* = prev_ptr.* + @as(AccVec, @intCast(add_a_ptr.*)) + @as(AccVec, @intCast(add_b_ptr.*)) - @as(AccVec, @intCast(sub_a_ptr.*)) - @as(AccVec, @intCast(sub_b_ptr.*));
     }
 
     while (h < dest.len) : (h += 1) {
@@ -833,32 +863,33 @@ inline fn applyFeatureSlicesFromPrevAddAddSubSub(
     }
 }
 
-inline fn clampVecToActivationRange(values: SimdAccVec, max_value: i32) SimdAccVec {
-    const zero: SimdAccVec = @splat(0);
-    const max_vec: SimdAccVec = @splat(max_value);
+inline fn clampVecToActivationRange(values: I32Vec, max_value: i32) I32Vec {
+    const zero: I32Vec = @splat(0);
+    const max_vec: I32Vec = @splat(max_value);
     return @min(@max(values, zero), max_vec);
 }
 
-inline fn reduceProductToI64(values: SimdAccVec, weights: SimdAccVec) i64 {
+inline fn reduceProductToI64(values: I32Vec, weights: I32Vec) i64 {
     const product = values * weights;
-    return @reduce(.Add, @as(SimdSumVec, @intCast(product)));
+    return @reduce(.Add, @as(I64Vec, @intCast(product)));
 }
 
 inline fn activatedDot(
-    acc_values: []const i32,
+    acc_values: anytype,
     weights: []const i16,
     hidden_size: usize,
     activation_type: u8,
     q0: i32,
 ) i64 {
+    const AccVec = AccVecOf(@TypeOf(acc_values));
     const use_screlu = activation_type == 1;
     var sum: i64 = 0;
     var h: usize = 0;
 
     while (h + SIMD_LANES <= hidden_size) : (h += SIMD_LANES) {
-        const acc_ptr: *align(1) const SimdAccVec = @ptrCast(&acc_values[h]);
-        const weight_ptr: *align(1) const SimdWeightVec = @ptrCast(&weights[h]);
-        const clamped = clampVecToActivationRange(acc_ptr.*, q0);
+        const acc_ptr: *align(1) const AccVec = @ptrCast(&acc_values[h]);
+        const weight_ptr: *align(1) const WeightVec = @ptrCast(&weights[h]);
+        const clamped = clampVecToActivationRange(@intCast(acc_ptr.*), q0);
         const activated = if (use_screlu) clamped * clamped else clamped;
         sum += reduceProductToI64(activated, @intCast(weight_ptr.*));
     }
@@ -879,7 +910,7 @@ fn initPerspectiveAccumulator(
     net: *const Network,
     b: *Board,
     perspective: piece.Color,
-    dest: []i32,
+    dest: anytype,
 ) void {
     const state = b.board;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
@@ -907,11 +938,10 @@ fn initPerspectiveAccumulator(
     }
 }
 
-/// Full recompute of accumulators from board state (used at search root).
-pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
-    var acc = AccumulatorPair{
-        .white = [_]i32{0} ** MAX_HIDDEN_SIZE,
-        .black = [_]i32{0} ** MAX_HIDDEN_SIZE,
+fn initAccumulatorsT(comptime T: type, net: *const Network, b: *Board) AccumulatorPairT(T) {
+    var acc = AccumulatorPairT(T){
+        .white = [_]T{0} ** MAX_HIDDEN_SIZE,
+        .black = [_]T{0} ** MAX_HIDDEN_SIZE,
     };
 
     initPerspectiveAccumulator(net, b, .white, acc.white[0..@intCast(net.ft_hidden_size)]);
@@ -920,52 +950,14 @@ pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
     return acc;
 }
 
-/// Apply a single feature delta (add or subtract) to an accumulator pair.
-inline fn applyDelta(
-    net: *const Network,
-    acc: *AccumulatorPair,
-    sq: u8,
-    pt: piece.Type,
-    color: piece.Color,
-    white_king_sq: u8,
-    black_king_sq: u8,
-    add: bool,
-) void {
-    const hidden_size: usize = @intCast(net.ft_hidden_size);
-    const white_feature = featureIndex(net, .white, sq, pt, color, white_king_sq);
-    const black_feature = featureIndex(net, .black, sq, pt, color, black_king_sq);
-    const white_base = white_feature * hidden_size;
-    const black_base = black_feature * hidden_size;
-
-    if (add) {
-        applyFeatureSlice(true, acc.white[0..hidden_size], net.ft_weights[white_base .. white_base + hidden_size]);
-        applyFeatureSlice(true, acc.black[0..hidden_size], net.ft_weights[black_base .. black_base + hidden_size]);
-    } else {
-        applyFeatureSlice(false, acc.white[0..hidden_size], net.ft_weights[white_base .. white_base + hidden_size]);
-        applyFeatureSlice(false, acc.black[0..hidden_size], net.ft_weights[black_base .. black_base + hidden_size]);
-    }
+/// Full recompute of accumulators from board state (used at search root).
+pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
+    return initAccumulatorsT(i16, net, b);
 }
 
-inline fn perspectiveAccumulatorSlice(
-    acc: *AccumulatorPair,
-    perspective: piece.Color,
-    hidden_size: usize,
-) []i32 {
-    return switch (perspective) {
-        .white => acc.white[0..hidden_size],
-        .black => acc.black[0..hidden_size],
-    };
-}
-
-inline fn perspectiveAccumulatorSliceConst(
-    acc: *const AccumulatorPair,
-    perspective: piece.Color,
-    hidden_size: usize,
-) []const i32 {
-    return switch (perspective) {
-        .white => acc.white[0..hidden_size],
-        .black => acc.black[0..hidden_size],
-    };
+/// Full recompute into the i32 reference backend (parity checking only).
+pub fn initAccumulatorsWide(net: *const Network, b: *Board) AccumulatorPairWide {
+    return initAccumulatorsT(i32, net, b);
 }
 
 inline fn perspectiveFeatureWeights(
@@ -982,79 +974,10 @@ inline fn perspectiveFeatureWeights(
     return net.ft_weights[base .. base + hidden_size];
 }
 
-inline fn applyPerspectiveAddSub(
-    net: *const Network,
-    acc: *AccumulatorPair,
-    perspective: piece.Color,
-    king_sq: u8,
-    add_sq: u8,
-    add_pt: piece.Type,
-    add_color: piece.Color,
-    sub_sq: u8,
-    sub_pt: piece.Type,
-    sub_color: piece.Color,
-    hidden_size: usize,
-) void {
-    const dest = perspectiveAccumulatorSlice(acc, perspective, hidden_size);
-    const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
-    const sub_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_sq, sub_pt, sub_color, hidden_size);
-    applyFeatureSlicesAddSub(dest, add_weights, sub_weights);
-}
-
-inline fn applyPerspectiveAddSubSub(
-    net: *const Network,
-    acc: *AccumulatorPair,
-    perspective: piece.Color,
-    king_sq: u8,
-    add_sq: u8,
-    add_pt: piece.Type,
-    add_color: piece.Color,
-    sub_a_sq: u8,
-    sub_a_pt: piece.Type,
-    sub_a_color: piece.Color,
-    sub_b_sq: u8,
-    sub_b_pt: piece.Type,
-    sub_b_color: piece.Color,
-    hidden_size: usize,
-) void {
-    const dest = perspectiveAccumulatorSlice(acc, perspective, hidden_size);
-    const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
-    const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
-    const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
-    applyFeatureSlicesAddSubSub(dest, add_weights, sub_a_weights, sub_b_weights);
-}
-
-inline fn applyPerspectiveAddAddSubSub(
-    net: *const Network,
-    acc: *AccumulatorPair,
-    perspective: piece.Color,
-    king_sq: u8,
-    add_a_sq: u8,
-    add_a_pt: piece.Type,
-    add_a_color: piece.Color,
-    add_b_sq: u8,
-    add_b_pt: piece.Type,
-    add_b_color: piece.Color,
-    sub_a_sq: u8,
-    sub_a_pt: piece.Type,
-    sub_a_color: piece.Color,
-    sub_b_sq: u8,
-    sub_b_pt: piece.Type,
-    sub_b_color: piece.Color,
-    hidden_size: usize,
-) void {
-    const dest = perspectiveAccumulatorSlice(acc, perspective, hidden_size);
-    const add_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_a_sq, add_a_pt, add_a_color, hidden_size);
-    const add_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_b_sq, add_b_pt, add_b_color, hidden_size);
-    const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
-    const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
-    applyFeatureSlicesAddAddSubSub(dest, add_a_weights, add_b_weights, sub_a_weights, sub_b_weights);
-}
-
 inline fn applyPerspectiveFromPrevAddSub(
     net: *const Network,
-    prev: *const AccumulatorPair,
-    result: *AccumulatorPair,
+    prev: anytype,
+    result: anytype,
     perspective: piece.Color,
     king_sq: u8,
     add_sq: u8,
@@ -1065,8 +988,8 @@ inline fn applyPerspectiveFromPrevAddSub(
     sub_color: piece.Color,
     hidden_size: usize,
 ) void {
-    const dest = perspectiveAccumulatorSlice(result, perspective, hidden_size);
-    const prev_slice = perspectiveAccumulatorSliceConst(prev, perspective, hidden_size);
+    const dest = result.slice(perspective, hidden_size);
+    const prev_slice = prev.sliceConst(perspective, hidden_size);
     const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
     const sub_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_sq, sub_pt, sub_color, hidden_size);
     applyFeatureSlicesFromPrevAddSub(dest, prev_slice, add_weights, sub_weights);
@@ -1074,8 +997,8 @@ inline fn applyPerspectiveFromPrevAddSub(
 
 inline fn applyPerspectiveFromPrevAddSubSub(
     net: *const Network,
-    prev: *const AccumulatorPair,
-    result: *AccumulatorPair,
+    prev: anytype,
+    result: anytype,
     perspective: piece.Color,
     king_sq: u8,
     add_sq: u8,
@@ -1089,8 +1012,8 @@ inline fn applyPerspectiveFromPrevAddSubSub(
     sub_b_color: piece.Color,
     hidden_size: usize,
 ) void {
-    const dest = perspectiveAccumulatorSlice(result, perspective, hidden_size);
-    const prev_slice = perspectiveAccumulatorSliceConst(prev, perspective, hidden_size);
+    const dest = result.slice(perspective, hidden_size);
+    const prev_slice = prev.sliceConst(perspective, hidden_size);
     const add_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_sq, add_pt, add_color, hidden_size);
     const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
     const sub_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_b_sq, sub_b_pt, sub_b_color, hidden_size);
@@ -1099,8 +1022,8 @@ inline fn applyPerspectiveFromPrevAddSubSub(
 
 inline fn applyPerspectiveFromPrevAddAddSubSub(
     net: *const Network,
-    prev: *const AccumulatorPair,
-    result: *AccumulatorPair,
+    prev: anytype,
+    result: anytype,
     perspective: piece.Color,
     king_sq: u8,
     add_a_sq: u8,
@@ -1117,8 +1040,8 @@ inline fn applyPerspectiveFromPrevAddAddSubSub(
     sub_b_color: piece.Color,
     hidden_size: usize,
 ) void {
-    const dest = perspectiveAccumulatorSlice(result, perspective, hidden_size);
-    const prev_slice = perspectiveAccumulatorSliceConst(prev, perspective, hidden_size);
+    const dest = result.slice(perspective, hidden_size);
+    const prev_slice = prev.sliceConst(perspective, hidden_size);
     const add_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_a_sq, add_a_pt, add_a_color, hidden_size);
     const add_b_weights = perspectiveFeatureWeights(net, perspective, king_sq, add_b_sq, add_b_pt, add_b_color, hidden_size);
     const sub_a_weights = perspectiveFeatureWeights(net, perspective, king_sq, sub_a_sq, sub_a_pt, sub_a_color, hidden_size);
@@ -1128,11 +1051,13 @@ inline fn applyPerspectiveFromPrevAddAddSubSub(
 
 /// Incremental accumulator update after a move.
 /// Writes `result = prev + feature deltas` for each unchanged perspective.
+/// `prev`/`result` may point at `AccumulatorPair` (production, i16) or
+/// `AccumulatorPairWide` (i32 reference backend).
 pub fn updateAccumulators(
     net: *const Network,
     b: *Board,
-    prev: *const AccumulatorPair,
-    result: *AccumulatorPair,
+    prev: anytype,
+    result: anytype,
     from_sq: u8,
     to_sq: u8,
     moved_piece: piece.Type,
@@ -1162,8 +1087,8 @@ pub fn updateAccumulators(
     const applyPerspective = struct {
         inline fn run(
             net_: *const Network,
-            prev_: *const AccumulatorPair,
-            result_: *AccumulatorPair,
+            prev_: anytype,
+            result_: anytype,
             perspective: piece.Color,
             king_sq: u8,
             hidden_size_: usize,
@@ -1320,7 +1245,7 @@ inline fn outputBucket(net: *const Network, b: *Board) usize {
 
 fn evaluateLinearFromAccumulators(
     net: *const Network,
-    acc: *const AccumulatorPair,
+    acc: anytype,
     b: *Board,
 ) i32 {
     const stm_is_white = b.board.move == .white;
@@ -1411,7 +1336,7 @@ fn evaluatePairwiseMlpTail16x32(
 
 fn evaluatePairwiseMlpFromAccumulators(
     net: *const Network,
-    acc: *const AccumulatorPair,
+    acc: anytype,
     b: *Board,
 ) i32 {
     const stm_is_white = b.board.move == .white;
@@ -1425,20 +1350,21 @@ fn evaluatePairwiseMlpFromAccumulators(
 
     const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
     const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
+    const AccVec = AccVecOf(@TypeOf(us_acc));
     var pooled: [MAX_HIDDEN_SIZE]i32 = undefined;
     var index: usize = 0;
-    const pool_divisor: SimdAccVec = @splat(512);
+    const pool_divisor: I32Vec = @splat(512);
     while (index + SIMD_LANES <= half) : (index += SIMD_LANES) {
-        const us_a_ptr: *align(1) const SimdAccVec = @ptrCast(&us_acc[index]);
-        const us_b_ptr: *align(1) const SimdAccVec = @ptrCast(&us_acc[index + half]);
-        const them_a_ptr: *align(1) const SimdAccVec = @ptrCast(&them_acc[index]);
-        const them_b_ptr: *align(1) const SimdAccVec = @ptrCast(&them_acc[index + half]);
-        const us_output_ptr: *align(1) SimdAccVec = @ptrCast(&pooled[index]);
-        const them_output_ptr: *align(1) SimdAccVec = @ptrCast(&pooled[index + half]);
-        const us_a = clampVecToActivationRange(us_a_ptr.*, net.q0);
-        const us_b = clampVecToActivationRange(us_b_ptr.*, net.q0);
-        const them_a = clampVecToActivationRange(them_a_ptr.*, net.q0);
-        const them_b = clampVecToActivationRange(them_b_ptr.*, net.q0);
+        const us_a_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index]);
+        const us_b_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index + half]);
+        const them_a_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index]);
+        const them_b_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index + half]);
+        const us_output_ptr: *align(1) I32Vec = @ptrCast(&pooled[index]);
+        const them_output_ptr: *align(1) I32Vec = @ptrCast(&pooled[index + half]);
+        const us_a = clampVecToActivationRange(@intCast(us_a_ptr.*), net.q0);
+        const us_b = clampVecToActivationRange(@intCast(us_b_ptr.*), net.q0);
+        const them_a = clampVecToActivationRange(@intCast(them_a_ptr.*), net.q0);
+        const them_b = clampVecToActivationRange(@intCast(them_b_ptr.*), net.q0);
         us_output_ptr.* = @divTrunc(us_a * us_b, pool_divisor);
         them_output_ptr.* = @divTrunc(them_a * them_b, pool_divisor);
     }
@@ -1495,10 +1421,12 @@ fn evaluatePairwiseMlpFromAccumulators(
 }
 
 /// Evaluate using pre-computed accumulators (activation + head only).
-/// Returns score from the side-to-move perspective.
+/// Returns score from the side-to-move perspective. `acc` may point at
+/// `AccumulatorPair` or `AccumulatorPairWide`; results are bit-identical
+/// for any net that passes the load-time accumulator bound check.
 pub fn evaluateFromAccumulators(
     net: *const Network,
-    acc: *const AccumulatorPair,
+    acc: anytype,
     b: *Board,
 ) i32 {
     return switch (net.architecture) {

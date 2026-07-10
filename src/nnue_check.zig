@@ -43,15 +43,36 @@ fn parseArgs(args: []const []const u8) !Options {
     return opts;
 }
 
+fn accumulatorsMatchWide(
+    narrow: *const nnue.AccumulatorPair,
+    wide: *const nnue.AccumulatorPairWide,
+    hidden_size: usize,
+) bool {
+    for (narrow.white[0..hidden_size], wide.white[0..hidden_size]) |n, w| {
+        if (@as(i32, n) != w) return false;
+    }
+    for (narrow.black[0..hidden_size], wide.black[0..hidden_size]) |n, w| {
+        if (@as(i32, n) != w) return false;
+    }
+    return true;
+}
+
+/// Verify, for every legal move from `b`, that the incremental i16 update
+/// matches a full i16 recompute AND stays bit-identical to the i32 reference
+/// backend (both accumulator contents and final evals).
 fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
     const root_acc = nnue.initAccumulators(net, b);
+    const root_wide = nnue.initAccumulatorsWide(net, b);
     var moves = @import("bitboard.zig").MoveList.init();
     b.generateLegalMoves(&moves) catch return false;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
 
+    if (!accumulatorsMatchWide(&root_acc, &root_wide, hidden_size)) return false;
+
     for (moves.slice()) |move| {
         const undo = b.makeMoveWithUndoUnchecked(move);
         var incremental: nnue.AccumulatorPair = undefined;
+        var incremental_wide: nnue.AccumulatorPairWide = undefined;
         nnue.updateAccumulators(
             net,
             b,
@@ -68,10 +89,28 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
             undo.castle_rook_from,
             undo.castle_rook_to,
         );
+        nnue.updateAccumulators(
+            net,
+            b,
+            &root_wide,
+            &incremental_wide,
+            move.from(),
+            move.to(),
+            undo.moved_piece,
+            undo.mover_color,
+            undo.captured_piece,
+            undo.captured_square,
+            move.promotion(),
+            undo.castle_rook_from != null,
+            undo.castle_rook_from,
+            undo.castle_rook_to,
+        );
         const full = nnue.initAccumulators(net, b);
-        const matches = std.mem.eql(i32, incremental.white[0..hidden_size], full.white[0..hidden_size]) and
-            std.mem.eql(i32, incremental.black[0..hidden_size], full.black[0..hidden_size]) and
-            nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &full, b);
+        const matches = std.mem.eql(i16, incremental.white[0..hidden_size], full.white[0..hidden_size]) and
+            std.mem.eql(i16, incremental.black[0..hidden_size], full.black[0..hidden_size]) and
+            accumulatorsMatchWide(&incremental, &incremental_wide, hidden_size) and
+            nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &full, b) and
+            nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &incremental_wide, b);
         b.unmakeMoveUnchecked(move, undo);
         if (!matches) return false;
     }

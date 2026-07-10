@@ -110,6 +110,7 @@ pub fn handleEvalFileChange(self: *Uci, value: []const u8) UciError!void {
             nnue.LoadError.InvalidNetwork,
             nnue.LoadError.UnsupportedVersion,
             nnue.LoadError.NetworkTooLarge,
+            nnue.LoadError.AccumulatorBoundsExceeded,
             => UciError.InvalidArgument,
             else => UciError.IOError,
         };
