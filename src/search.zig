@@ -60,6 +60,11 @@ pub const SearchResult = struct {
 };
 
 const MAX_PLY = 64;
+// Absolute ply ceiling for any node (main search or quiescence). Must stay
+// comfortably below the 128-entry NNUE accumulator stack: nodes at
+// MAX_SEARCH_PLY return immediately, so acc_ply never exceeds
+// MAX_SEARCH_PLY + 1.
+const MAX_SEARCH_PLY: u32 = 120;
 const MAX_KILLER_MOVES = 2;
 const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
@@ -320,8 +325,12 @@ pub const SearchEngine = struct {
     }
 
     /// Update accumulators incrementally after a move.
+    /// Capacity invariant: every node returns at ply >= MAX_SEARCH_PLY
+    /// before making a move, so acc_ply never exceeds MAX_SEARCH_PLY + 1,
+    /// which stays below the stack size of 128.
     inline fn pushAccumulator(self: *Self, move: Move, undo: Board.Undo) void {
         if (self.acc_stack) |stack| {
+            std.debug.assert(self.acc_ply + 1 < stack.len);
             const net = self.nnue_net.?;
             nnue.updateAccumulators(
                 net,
@@ -428,9 +437,17 @@ pub const SearchEngine = struct {
         self.previous_move = null;
         self.continuation_keys = [_]u16{INVALID_CONTINUATION_KEY} ** MAX_PLY;
         self.static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE;
-        // Initialize position history
-        self.position_history[0] = self.board.zobrist_hasher.zobrist_hash;
-        self.history_count = 1;
+        // Initialize position history. The interface already records the
+        // root position as the last game-history entry; seeding it here too
+        // would duplicate the root and shift repetition parity for every
+        // pre-root position. Only seed when the caller didn't.
+        const root_hash = self.board.zobrist_hasher.zobrist_hash;
+        if (self.game_history_count == 0 or self.game_history[self.game_history_count - 1] != root_hash) {
+            self.position_history[0] = root_hash;
+            self.history_count = 1;
+        } else {
+            self.history_count = 0;
+        }
 
         // Initialize incremental NNUE accumulators at root position
         try self.initAccumulatorStack();
@@ -1071,6 +1088,15 @@ pub const SearchEngine = struct {
 
         self.seldepth = @max(self.seldepth, ply);
 
+        // Hard ply ceiling: extensions can push past the nominal max depth,
+        // and the accumulator stack has finite headroom.
+        if (ply >= MAX_SEARCH_PLY) {
+            return if (self.board.isInCheck(self.board.board.move))
+                DRAW_SCORE
+            else
+                self.evaluatePosition();
+        }
+
         // Check for draw by repetition
         if (ply > 0 and self.isRepetition()) {
             return self.repetitionScore();
@@ -1403,67 +1429,35 @@ pub const SearchEngine = struct {
         return self.position_history[idx - self.game_history_count];
     }
 
-    inline fn repetitionMatchCount(self: *Self) u32 {
-        const current_hash = self.board.zobrist_hasher.zobrist_hash;
-        const total = self.combinedHistoryCount();
-        if (total < 3) return 0;
-
-        // 50-move clock bounds how far back a repetition can exist.
-        const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
-        if (halfmove < 4) return 0;
-        const max_back = @min(halfmove, total - 1);
-
-        var matches: u32 = 0;
-        var plies_back: usize = 2; // same side to move only
-        while (plies_back <= max_back) : (plies_back += 2) {
-            const idx = total - 1 - plies_back;
-            if (self.hashAtCombinedIndex(idx) == current_hash) {
-                matches += 1;
-            }
-        }
-
-        return matches;
-    }
-
-    /// Check if any match is from game history (positions before search started).
-    inline fn hasGameHistoryMatch(self: *Self) bool {
-        const current_hash = self.board.zobrist_hasher.zobrist_hash;
-        const total = self.combinedHistoryCount();
-        if (total < 3) return false;
-
-        const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
-        if (halfmove < 4) return false;
-        const max_back = @min(halfmove, total - 1);
-
-        var plies_back: usize = 2;
-        while (plies_back <= max_back) : (plies_back += 2) {
-            const idx = total - 1 - plies_back;
-            if (self.hashAtCombinedIndex(idx) == current_hash) {
-                // Check if this match is in game history (before search started)
-                if (idx < self.game_history_count) return true;
-            }
-        }
-        return false;
-    }
-
     /// Check for repetition draw.
-    /// Any single repetition match (twofold) is enough — if the engine has reached
-    /// the same position before (whether in game history or search tree), continuing
-    /// will just lead to threefold repetition in practice.
+    /// A repeat of a position first reached inside the current search tree
+    /// is scored as a draw immediately (the opponent can force the cycle).
+    /// A position seen only BEFORE the root needs two prior occurrences —
+    /// the current node is then the third, an actual claimable repetition.
+    /// One pre-root occurrence is not a draw: plenty of won positions pass
+    /// through a position that occurred once earlier in the game.
     fn isRepetition(self: *Self) bool {
         const current_hash = self.board.zobrist_hasher.zobrist_hash;
         const total = self.combinedHistoryCount();
         if (total < 3) return false;
 
+        // 50-move clock bounds how far back a repetition can exist.
         const halfmove = @as(usize, @intCast(self.board.board.halfmove_clock));
         if (halfmove < 4) return false;
         const max_back = @min(halfmove, total - 1);
 
-        var plies_back: usize = 2;
+        var pre_root_matches: u32 = 0;
+        var plies_back: usize = 2; // same side to move only
         while (plies_back <= max_back) : (plies_back += 2) {
             const idx = total - 1 - plies_back;
             if (self.hashAtCombinedIndex(idx) == current_hash) {
-                return true;
+                if (idx >= self.game_history_count) {
+                    return true; // repeat within the search tree
+                }
+                pre_root_matches += 1;
+                if (pre_root_matches >= 2) {
+                    return true; // third occurrence overall
+                }
             }
         }
         return false;
@@ -1504,6 +1498,23 @@ pub const SearchEngine = struct {
 
         // Check if we're in check - if so, we must search all evasions (not just captures)
         const in_check = self.board.isInCheck(self.board.board.move);
+
+        // Hard ply ceiling. Without this, mutual checking cycles can recurse
+        // indefinitely: in-check qsearch generates ALL evasions, including
+        // quiet ones, so nothing forces termination.
+        if (ply >= MAX_SEARCH_PLY) {
+            return if (in_check) DRAW_SCORE else self.evaluatePosition();
+        }
+
+        // Same draw checks as the main search. Checking/evasion cycles
+        // revisit identical positions; without a repetition test here they
+        // only terminate at the ply ceiling (or never, before it existed).
+        if (ply > 0 and self.isRepetition()) {
+            return self.repetitionScore();
+        }
+        if (self.board.board.halfmove_clock >= 100) {
+            return DRAW_SCORE;
+        }
 
         var alpha = alpha_in;
         const original_alpha = alpha_in;
@@ -1619,12 +1630,21 @@ pub const SearchEngine = struct {
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
 
+            // Record the child position so repetition detection can see
+            // cycles that form inside quiescence (checking sequences).
+            const old_hist_count = self.history_count;
+            if (self.history_count < 512) {
+                self.position_history[self.history_count] = self.board.zobrist_hasher.zobrist_hash;
+                self.history_count += 1;
+            }
+
             // Recursive search
             const score = -try self.quiescence(-beta, -alpha, ply + 1);
 
             // Unmake move
             self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
+            self.history_count = old_hist_count;
 
             if (score >= beta) {
                 self.storeQuiescenceResult(score, original_alpha, beta, ply, move);
