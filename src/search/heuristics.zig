@@ -66,6 +66,15 @@ pub const CounterMoveTable = struct {
     }
 };
 
+/// Signed history gravity: the decay term scales with the CURRENT value,
+/// not the applied delta's direction. A cell at +16384 receiving a penalty
+/// moves down immediately (old formula zeroed both bonus and penalty at
+/// saturation, freezing the cell there permanently).
+pub fn gravityAdjusted(current: i32, delta: i32) i32 {
+    const next = current + delta - @divTrunc(current * @as(i32, @intCast(@abs(delta))), 16384);
+    return @max(-16384, @min(16384, next));
+}
+
 pub const HistoryTable = struct {
     scores: [2][64][64]i32,
 
@@ -78,21 +87,15 @@ pub const HistoryTable = struct {
     pub fn update(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
         const bonus = @as(i32, @intCast(@min(depth * depth, 400)));
-        const current = self.scores[c][move.from()][move.to()];
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        self.scores[c][move.from()][move.to()] += adjusted_bonus;
-        self.scores[c][move.from()][move.to()] = @max(-16384, @min(16384, self.scores[c][move.from()][move.to()]));
+        const cell = &self.scores[c][move.from()][move.to()];
+        cell.* = gravityAdjusted(cell.*, bonus);
     }
 
     pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
         const penalty = @as(i32, @intCast(@min(depth * depth, 400)));
-        const current = self.scores[c][move.from()][move.to()];
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        self.scores[c][move.from()][move.to()] -= adjusted_penalty;
-        self.scores[c][move.from()][move.to()] = @max(-16384, @min(16384, self.scores[c][move.from()][move.to()]));
+        const cell = &self.scores[c][move.from()][move.to()];
+        cell.* = gravityAdjusted(cell.*, -penalty);
     }
 
     pub fn get(self: *const HistoryTable, move: Move) i32 {
@@ -186,16 +189,10 @@ pub const ContinuationHistoryTable = struct {
     }
 
     fn updateCell(cell: *i16, bonus: i32) void {
-        const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current + adjusted_bonus)));
+        cell.* = @intCast(gravityAdjusted(cell.*, bonus));
     }
 
     fn penalizeCell(cell: *i16, penalty: i32) void {
-        const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current - adjusted_penalty)));
+        cell.* = @intCast(gravityAdjusted(cell.*, -penalty));
     }
 };
