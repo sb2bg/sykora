@@ -64,6 +64,15 @@ pub fn registerOptions(uci: *Uci) !void {
         .on_changed = handleHashChange,
         .context = uci,
     });
+    try uci.options.items.append(uci.allocator, Option{
+        .name = "Move Overhead",
+        .type = .spin,
+        .default_value = "30",
+        .min_value = 0,
+        .max_value = 5000,
+        .on_changed = handleMoveOverheadChange,
+        .context = uci,
+    });
 }
 
 pub fn handleLogFileChange(self: *Uci, value: []const u8) UciError!void {
@@ -154,6 +163,14 @@ pub fn handleThreadsChange(self: *Uci, value: []const u8) UciError!void {
         return UciError.InvalidArgument;
     }
     self.num_threads = parsed;
+}
+
+pub fn handleMoveOverheadChange(self: *Uci, value: []const u8) UciError!void {
+    const parsed = std.fmt.parseInt(u64, value, 10) catch return UciError.InvalidArgument;
+    if (parsed > 5000) {
+        return UciError.InvalidArgument;
+    }
+    self.move_overhead_ms = parsed;
 }
 
 pub fn handleHashChange(self: *Uci, value: []const u8) UciError!void {

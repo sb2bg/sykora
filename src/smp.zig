@@ -43,7 +43,7 @@ pub fn terminateSearch(self: *Uci) !void {
     }
 }
 
-pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
+pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.Instant) UciError!void {
     try self.writeInfoString("search thread started", .{});
 
     const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
@@ -53,7 +53,16 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
 
     self.tt.nextAge();
 
-    const num_helpers = self.num_threads - 1;
+    // With zero or one legal move the main engine returns immediately;
+    // don't pay helper spawn/teardown for a forced reply.
+    const forced_reply = blk: {
+        var probe_board = self.board;
+        var root_moves = board.MoveList.init();
+        probe_board.generateLegalMoves(&root_moves) catch break :blk false;
+        break :blk root_moves.count <= 1;
+    };
+
+    const num_helpers = if (forced_reply) 0 else self.num_threads - 1;
     for (0..num_helpers) |i| {
         self.helper_threads[i] = null;
         self.helper_results[i] = EMPTY_HELPER_RESULT;
@@ -101,7 +110,10 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions) UciError!void {
         .btime = go_opts.btime,
         .winc = go_opts.winc,
         .binc = go_opts.binc,
+        .moves_to_go = go_opts.moves_to_go,
         .depth = go_opts.depth,
+        .start_time = start_time,
+        .move_overhead = self.move_overhead_ms,
     };
 
     const result = search_engine.search(search_opts) catch {

@@ -47,8 +47,22 @@ pub const SearchOptions = struct {
     btime: ?u64 = null,
     winc: ?u64 = null,
     binc: ?u64 = null,
+    moves_to_go: ?u64 = null,
     depth: ?u64 = null,
     start_depth: u32 = 1,
+    /// When the `go` command was received. The tournament clock runs during
+    /// thread spawn and engine setup, so the budget must be measured from
+    /// here, not from when the search loop finally starts.
+    start_time: ?std.time.Instant = null,
+    /// Milliseconds reserved per move for protocol/GUI/OS latency.
+    move_overhead: u64 = 30,
+};
+
+/// Soft limit ends iterative deepening between iterations; hard limit is
+/// polled inside the tree and aborts mid-iteration.
+const TimeBudget = struct {
+    soft_ms: u64,
+    hard_ms: u64,
 };
 
 pub const SearchResult = struct {
@@ -69,6 +83,8 @@ const SEE_CAPTURE_SCALE: i32 = 128;
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
+// How many nodes between wall-clock checks of the hard deadline.
+const STOP_CHECK_INTERVAL: u32 = 1024;
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
@@ -233,6 +249,11 @@ pub const SearchEngine = struct {
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
+    // Hard-deadline state: wall clock is checked every STOP_CHECK_INTERVAL
+    // nodes; on expiry the shared stop flag is raised so helpers halt too.
+    search_start: std.time.Instant,
+    hard_deadline_ns: ?u64,
+    stop_check_countdown: u32,
 
     pub fn init(
         board_ptr: *Board,
@@ -276,6 +297,9 @@ pub const SearchEngine = struct {
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
+            .search_start = std.time.Instant.now() catch unreachable,
+            .hard_deadline_ns = null,
+            .stop_check_countdown = 0,
         };
     }
 
@@ -414,9 +438,32 @@ pub const SearchEngine = struct {
         }
     }
 
+    /// Poll the shared stop flag every node, and the hard wall-clock
+    /// deadline every STOP_CHECK_INTERVAL nodes. Raising the shared flag on
+    /// deadline expiry stops helper threads as well.
+    inline fn checkShouldStop(self: *Self) bool {
+        if (self.stop_check_countdown > 0) {
+            self.stop_check_countdown -= 1;
+            return self.stop_search.load(.monotonic);
+        }
+        self.stop_check_countdown = STOP_CHECK_INTERVAL - 1;
+
+        if (self.stop_search.load(.monotonic)) return true;
+
+        if (self.hard_deadline_ns) |deadline_ns| {
+            const now = std.time.Instant.now() catch return false;
+            if (now.since(self.search_start) >= deadline_ns) {
+                self.stop_search.store(true, .monotonic);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// Run a search and return the best move
     pub fn search(self: *Self, options: SearchOptions) anyerror!SearchResult {
-        const start_time = std.time.Instant.now() catch unreachable;
+        const start_time = options.start_time orelse (std.time.Instant.now() catch unreachable);
 
         // Reset search state
         self.nodes_searched = 0;
@@ -436,8 +483,11 @@ pub const SearchEngine = struct {
         try self.initAccumulatorStack();
         defer self.deinitAccumulatorStack();
 
-        // Calculate time limit
-        const time_limit = self.calculateTimeLimit(options);
+        // Calculate time budget and arm the in-tree hard deadline
+        const time_budget = self.calculateTimeBudget(options);
+        self.search_start = start_time;
+        self.hard_deadline_ns = if (time_budget) |budget| budget.hard_ms * std.time.ns_per_ms else null;
+        self.stop_check_countdown = 0;
 
         // Generate legal moves
         var legal_moves = MoveList.init();
@@ -491,7 +541,12 @@ pub const SearchEngine = struct {
 
             // Aspiration window loop - re-search with wider window on fail
             while (true) {
-                score = try self.alphaBeta(asp_alpha, asp_beta, depth, 0, true);
+                score = self.alphaBeta(asp_alpha, asp_beta, depth, 0, true) catch |err| switch (err) {
+                    // Hard deadline or external stop: the stop flag is set,
+                    // so the checks below discard this incomplete iteration.
+                    error.SearchStopped => break,
+                    else => return err,
+                };
 
                 if (self.stop_search.load(.monotonic)) break;
 
@@ -532,12 +587,13 @@ pub const SearchEngine = struct {
                 });
             }
 
-            // Check time limit
-            if (time_limit) |limit| {
+            // Soft limit: stop between iterations if we've used most of our
+            // budget or the next iteration is unlikely to finish. The hard
+            // limit is enforced separately inside the tree.
+            if (time_budget) |budget| {
                 const total_time_ms: u64 = @intCast(@max(total_time, 0));
                 const iter_time_ms: u64 = @intCast(@max(iter_time, 0));
-                // Stop if we've used most of our time or if next iteration unlikely to finish
-                if (total_time_ms >= limit or total_time_ms + (iter_time_ms * 2) >= limit) {
+                if (total_time_ms >= budget.soft_ms or total_time_ms + (iter_time_ms * 2) >= budget.soft_ms) {
                     break;
                 }
             }
@@ -569,11 +625,12 @@ pub const SearchEngine = struct {
         };
     }
 
-    fn calculateTimeLimit(self: *Self, options: SearchOptions) ?u64 {
+    fn calculateTimeBudget(self: *Self, options: SearchOptions) ?TimeBudget {
         if (options.infinite) {
             return null;
         } else if (options.move_time) |move_time| {
-            return move_time;
+            const usable = @max(move_time -| options.move_overhead, 1);
+            return .{ .soft_ms = usable, .hard_ms = usable };
         }
 
         // Determine which color we are and get our time/increment
@@ -591,34 +648,49 @@ pub const SearchEngine = struct {
             return null;
         }
 
-        const time_remaining = our_time.?;
+        // Reserve protocol/OS latency off the top; never plan to spend more
+        // than this regardless of any floor below.
+        const usable = our_time.? -| options.move_overhead;
 
-        // Calculate moves played and estimate moves remaining
-        const moves_played = self.board.board.fullmove_number;
-        const estimated_moves_remaining = @max(20, 40 - @min(moves_played, 40));
+        // Horizon: explicit movestogo when the GUI supplies one (cyclic time
+        // controls), otherwise the phase-based estimate.
+        const estimated_moves_remaining: u64 = if (options.moves_to_go) |mtg|
+            @max(1, @min(mtg, 50))
+        else
+            @max(20, 40 - @min(self.board.board.fullmove_number, 40));
 
         // Base time allocation: divide remaining time by estimated moves
         // Use a slightly larger divisor for safety margin
         const divisor = estimated_moves_remaining + 5;
-        const base_time = time_remaining / divisor;
+        const base_time = usable / divisor;
 
         // Add most of the increment since we get it back after the move
-        const time_budget = base_time + (our_increment * 9 / 10);
+        var soft = base_time + (our_increment * 9 / 10);
 
-        // Apply min/max bounds
-        const min_time: u64 = 100; // Minimum 100ms
-        var max_time = @min(time_remaining / 5, 30000); // Max 20% of remaining or 30s
+        var max_time = @min(usable / 5, 30000); // Max 20% of remaining or 30s
 
         // If low on time, be more conservative
-        if (time_remaining < 5000) {
-            max_time = @min(time_remaining / 10, max_time);
-        } else if (time_remaining < 10000) {
-            max_time = @min(time_remaining * 15 / 100, max_time);
+        if (usable < 5000) {
+            max_time = @min(usable / 10, max_time);
+        } else if (usable < 10000) {
+            max_time = @min(usable * 15 / 100, max_time);
         }
 
-        const time_for_move = @max(min_time, @min(time_budget, max_time));
+        // Minimum think time is applied BEFORE the clock caps: with less
+        // than ~100ms usable, the caps win and we spend a fraction of what
+        // is actually left instead of flagging.
+        soft = @max(soft, 100);
+        soft = @min(soft, max_time);
+        soft = @max(@min(soft, usable), 1);
 
-        return time_for_move;
+        // Hard limit: room for one surprising iteration or aspiration
+        // re-search beyond the soft target, but never more than half the
+        // usable clock and never more than the clock itself.
+        var hard = @min(usable, soft * 4);
+        hard = @min(hard, @max(usable / 2, soft));
+        hard = @max(hard, soft);
+
+        return .{ .soft_ms = soft, .hard_ms = hard };
     }
 
     inline fn continuationContext(self: *const Self, ply: u32) struct { prev: ?u16, prev2: ?u16 } {
@@ -798,15 +870,18 @@ pub const SearchEngine = struct {
                 self.history_count += 1;
             }
 
-            const score = -try self.alphaBeta(-singular_beta, -singular_beta + 1, reduced_depth, ply + 1, true);
-
-            self.popAccumulator();
-            self.board.unmakeMoveUnchecked(move, undo);
-            self.previous_move = old_previous;
-            self.history_count = old_hist_count;
-            if (ply < MAX_PLY) {
-                self.continuation_keys[ply] = old_continuation_key;
-            }
+            const score = blk: {
+                defer {
+                    self.popAccumulator();
+                    self.board.unmakeMoveUnchecked(move, undo);
+                    self.previous_move = old_previous;
+                    self.history_count = old_hist_count;
+                    if (ply < MAX_PLY) {
+                        self.continuation_keys[ply] = old_continuation_key;
+                    }
+                }
+                break :blk -(try self.alphaBeta(-singular_beta, -singular_beta + 1, reduced_depth, ply + 1, true));
+            };
 
             if (score >= singular_beta) {
                 beaters += 1;
@@ -948,13 +1023,16 @@ pub const SearchEngine = struct {
         if (static_eval - beta_adj > 200) reduction += 1;
         reduction = @min(reduction, search_depth - 1);
 
-        const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false);
-
-        self.board.board = old_board;
-        self.board.zobrist_hasher.zobrist_hash = old_hash;
-        if (ply < MAX_PLY) {
-            self.continuation_keys[ply] = old_continuation_key;
-        }
+        const null_score = blk: {
+            defer {
+                self.board.board = old_board;
+                self.board.zobrist_hasher.zobrist_hash = old_hash;
+                if (ply < MAX_PLY) {
+                    self.continuation_keys[ply] = old_continuation_key;
+                }
+            }
+            break :blk -(try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false));
+        };
 
         if (null_score < beta_adj) return null;
         if (eval.isMateScore(null_score)) return beta_adj;
@@ -1065,8 +1143,10 @@ pub const SearchEngine = struct {
             return self.quiescence(alpha_in, beta, ply);
         }
 
-        if (self.stop_search.load(.monotonic)) {
-            return 0;
+        // Abort with an error rather than a fake score so no parent can
+        // update histories or the TT with results from an aborted subtree.
+        if (self.checkShouldStop()) {
+            return error.SearchStopped;
         }
 
         self.seldepth = @max(self.seldepth, ply);
@@ -1264,78 +1344,83 @@ pub const SearchEngine = struct {
 
             var score: i32 = undefined;
 
-            // Late Move Reductions (LMR) — logarithmic formula with history modulation
-            if (moves_searched >= LMR_FULL_DEPTH_MOVES and
-                search_depth >= LMR_MIN_DEPTH and
-                !in_check and
-                !is_capture and
-                !is_promotion and
-                !gives_check)
             {
-                // Base reduction from pre-computed log table
-                const move_number = moves_searched + 1;
-                const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
-                const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
-                var reduction: i32 = lmr_table[d_idx][m_idx];
-
-                // History modulation: good history reduces less, bad history reduces more
-                const hist_score = self.quietHeuristicScore(move, color, ply);
-                reduction -= @divTrunc(hist_score, 8192);
-
-                // Killer and counter moves get reduced less
-                const is_killer = self.killer_moves.isKiller(move, ply);
-                var is_counter_move = false;
-                if (counter_move) |cm| {
-                    is_counter_move = cm.from() == move.from() and cm.to() == move.to();
-                }
-                if (is_killer) {
-                    reduction -= 1;
-                }
-                if (is_counter_move) {
-                    reduction -= 1;
-                }
-                if (improving) {
-                    reduction -= 1;
+                // Unmake via defer so board/accumulator/history state is
+                // restored even when a child search aborts with an error.
+                defer {
+                    self.popAccumulator();
+                    self.board.unmakeMoveUnchecked(move, undo);
+                    self.previous_move = old_previous;
+                    if (ply < MAX_PLY) {
+                        self.continuation_keys[ply] = old_continuation_key;
+                    }
+                    self.history_count = old_hist_count;
                 }
 
-                // PV nodes get reduced less
-                if (is_pv_node) {
-                    reduction -= 1;
-                }
+                // Late Move Reductions (LMR) — logarithmic formula with history modulation
+                if (moves_searched >= LMR_FULL_DEPTH_MOVES and
+                    search_depth >= LMR_MIN_DEPTH and
+                    !in_check and
+                    !is_capture and
+                    !is_promotion and
+                    !gives_check)
+                {
+                    // Base reduction from pre-computed log table
+                    const move_number = moves_searched + 1;
+                    const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
+                    const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
+                    var reduction: i32 = lmr_table[d_idx][m_idx];
 
-                // Clamp reduction: at least 1, at most depth-2 (leave at least 1 ply)
-                const r: u32 = @intCast(@max(1, @min(reduction, @as(i32, @intCast(next_depth)) - 1)));
+                    // History modulation: good history reduces less, bad history reduces more
+                    const hist_score = self.quietHeuristicScore(move, color, ply);
+                    reduction -= @divTrunc(hist_score, 8192);
 
-                // Search with reduced depth
-                score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - r, ply + 1, true);
+                    // Killer and counter moves get reduced less
+                    const is_killer = self.killer_moves.isKiller(move, ply);
+                    var is_counter_move = false;
+                    if (counter_move) |cm| {
+                        is_counter_move = cm.from() == move.from() and cm.to() == move.to();
+                    }
+                    if (is_killer) {
+                        reduction -= 1;
+                    }
+                    if (is_counter_move) {
+                        reduction -= 1;
+                    }
+                    if (improving) {
+                        reduction -= 1;
+                    }
 
-                // If LMR found something good, re-search at full depth
-                if (score > alpha) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
-                }
-            } else {
-                // PVS - search with null window first if not first move
-                if (moves_searched > 0) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
+                    // PV nodes get reduced less
+                    if (is_pv_node) {
+                        reduction -= 1;
+                    }
+
+                    // Clamp reduction: at least 1, at most depth-2 (leave at least 1 ply)
+                    const r: u32 = @intCast(@max(1, @min(reduction, @as(i32, @intCast(next_depth)) - 1)));
+
+                    // Search with reduced depth
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - r, ply + 1, true);
+
+                    // If LMR found something good, re-search at full depth
+                    if (score > alpha) {
+                        score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
+                    }
                 } else {
-                    // First move always searched with full window
-                    score = alpha + 1; // Force full search
+                    // PVS - search with null window first if not first move
+                    if (moves_searched > 0) {
+                        score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
+                    } else {
+                        // First move always searched with full window
+                        score = alpha + 1; // Force full search
+                    }
+                }
+
+                // Full window search if PVS failed high or first move
+                if (score > alpha) {
+                    score = -try self.alphaBeta(-beta, -alpha, next_depth, ply + 1, true);
                 }
             }
-
-            // Full window search if PVS failed high or first move
-            if (score > alpha) {
-                score = -try self.alphaBeta(-beta, -alpha, next_depth, ply + 1, true);
-            }
-
-            // Unmake move
-            self.popAccumulator();
-            self.board.unmakeMoveUnchecked(move, undo);
-            self.previous_move = old_previous;
-            if (ply < MAX_PLY) {
-                self.continuation_keys[ply] = old_continuation_key;
-            }
-            self.history_count = old_hist_count; // Restore history count
 
             // Discourage speculative non-checking minor-piece sacs for pawns unless
             // search already proves concrete compensation.
@@ -1495,8 +1580,8 @@ pub const SearchEngine = struct {
 
     /// Quiescence search - search only tactical moves to avoid horizon effect
     fn quiescence(self: *Self, alpha_in: i32, beta: i32, ply: u32) anyerror!i32 {
-        if (self.stop_search.load(.monotonic)) {
-            return 0;
+        if (self.checkShouldStop()) {
+            return error.SearchStopped;
         }
 
         self.nodes_searched += 1;
@@ -1619,12 +1704,14 @@ pub const SearchEngine = struct {
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
 
-            // Recursive search
-            const score = -try self.quiescence(-beta, -alpha, ply + 1);
-
-            // Unmake move
-            self.popAccumulator();
-            self.board.unmakeMoveUnchecked(move, undo);
+            // Recursive search; unmake via defer so state is restored on abort
+            const score = blk: {
+                defer {
+                    self.popAccumulator();
+                    self.board.unmakeMoveUnchecked(move, undo);
+                }
+                break :blk -(try self.quiescence(-beta, -alpha, ply + 1));
+            };
 
             if (score >= beta) {
                 self.storeQuiescenceResult(score, original_alpha, beta, ply, move);
