@@ -1,0 +1,13 @@
+{
+  "run_id": "v7_20260710T055911Z",
+  "network": {
+    "format": "syk7",
+    "architecture": "pairwise-mlp",
+    "bucket_layout_name": "v3_10",
+    "ft_hidden": 1024,
+    "dense1": 16,
+    "dense2": 32,
+    "output_bucket_count": 8,
+    "factorised": true
+  }
+}
