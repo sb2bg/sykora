@@ -116,17 +116,6 @@ inline fn addLmpQuietMoveBonus(limit: u32, bonus: u32) u32 {
     return std.math.add(u32, limit, bonus) catch std.math.maxInt(u32);
 }
 
-inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
-    const loss = -see_score;
-    if (loss < eval.PAWN_VALUE) return 0;
-
-    // Root-only bias against dubious minor-piece-for-pawn sacs.
-    // The HCE overvalues king safety destruction from open files/missing shield pawns,
-    // making these sacs look better than they are.
-    const capped_depth: i32 = @intCast(@min(depth, 12));
-    return 60 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 4;
-}
-
 // Late Move Reduction parameters
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_FULL_DEPTH_MOVES: u32 = 4;
@@ -1174,23 +1163,6 @@ pub const SearchEngine = struct {
             const is_capture = self.board.board.getPieceAt(move.to(), opponent_color) != null or is_en_passant;
             const is_promotion = move.promotion() != null;
             const moving_piece = self.board.board.getPieceAt(move.from(), move_color);
-            const captured_piece: ?piece.Type = if (is_en_passant)
-                .pawn
-            else
-                self.board.board.getPieceAt(move.to(), opponent_color);
-
-            var speculative_sac_candidate = false;
-            var speculative_sac_see: i32 = 0;
-            if (ply == 0 and !in_check and is_capture and !is_promotion and moving_piece != null and captured_piece != null) {
-                const attacker = moving_piece.?;
-                const victim = captured_piece.?;
-                const to_file = move.to() % 8;
-                const non_central = to_file <= 2 or to_file >= 5;
-                if ((attacker == .bishop or attacker == .knight) and victim == .pawn and non_central) {
-                    speculative_sac_see = staticExchangeEvalPosition(self.board.board, move);
-                    speculative_sac_candidate = speculative_sac_see <= -eval.PAWN_VALUE;
-                }
-            }
 
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
@@ -1336,12 +1308,6 @@ pub const SearchEngine = struct {
                 self.continuation_keys[ply] = old_continuation_key;
             }
             self.history_count = old_hist_count; // Restore history count
-
-            // Discourage speculative non-checking minor-piece sacs for pawns unless
-            // search already proves concrete compensation.
-            if (speculative_sac_candidate and !gives_check and !eval.isMateScore(score)) {
-                score -= speculativeSacPenalty(speculative_sac_see, search_depth);
-            }
 
             moves_searched += 1;
 
