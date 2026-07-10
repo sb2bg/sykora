@@ -346,9 +346,6 @@ pub const MovePicker = struct {
     }
 
     fn scoreQuiets(self: *Self) void {
-        const occupied = self.board_ptr.board.occupied();
-        const friendly = self.board_ptr.board.getColorBitboard(self.board_ptr.board.move);
-
         for (self.quiets.slice(), 0..) |move, i| {
             var score = self.history.getForColor(move, self.board_ptr.board.move);
 
@@ -365,33 +362,6 @@ pub const MovePicker = struct {
                     self.prev2_continuation_key,
                     current_key,
                 );
-
-                var mobility_bonus: i32 = 0;
-                const to_sq: u8 = move.to();
-                const from_mask = @as(u64, 1) << @intCast(move.from());
-                const to_mask = @as(u64, 1) << @intCast(move.to());
-                const occupied_after = (occupied & ~from_mask) | to_mask;
-
-                switch (piece_type) {
-                    .knight => {
-                        const attacks = board.getKnightAttacks(@intCast(to_sq)) & ~friendly;
-                        mobility_bonus = @as(i32, @intCast(@popCount(attacks))) * 3;
-                    },
-                    .bishop => {
-                        const attacks = board.getBishopAttacks(@intCast(to_sq), occupied_after) & ~friendly;
-                        mobility_bonus = @as(i32, @intCast(@popCount(attacks))) * 2;
-                    },
-                    .rook => {
-                        const attacks = board.getRookAttacks(@intCast(to_sq), occupied_after) & ~friendly;
-                        mobility_bonus = @as(i32, @intCast(@popCount(attacks))) * 2;
-                    },
-                    .queen => {
-                        const attacks = (board.getBishopAttacks(@intCast(to_sq), occupied_after) | board.getRookAttacks(@intCast(to_sq), occupied_after)) & ~friendly;
-                        mobility_bonus = @as(i32, @intCast(@popCount(attacks)));
-                    },
-                    else => {},
-                }
-                score += mobility_bonus;
             }
 
             self.quiet_scores[i] = score;
