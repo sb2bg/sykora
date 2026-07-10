@@ -869,11 +869,6 @@ inline fn clampVecToActivationRange(values: I32Vec, max_value: i32) I32Vec {
     return @min(@max(values, zero), max_vec);
 }
 
-inline fn reduceProductToI64(values: I32Vec, weights: I32Vec) i64 {
-    const product = values * weights;
-    return @reduce(.Add, @as(I64Vec, @intCast(product)));
-}
-
 inline fn activatedDot(
     acc_values: anytype,
     weights: []const i16,
@@ -883,16 +878,22 @@ inline fn activatedDot(
 ) i64 {
     const AccVec = AccVecOf(@TypeOf(acc_values));
     const use_screlu = activation_type == 1;
-    var sum: i64 = 0;
     var h: usize = 0;
 
+    // Accumulate in i64 lanes and reduce once at the end instead of a
+    // horizontal reduce per chunk. Lane sums cannot overflow: each product
+    // is at most q0^2 * 32767 (~2.13e9) and a lane sees at most
+    // MAX_HIDDEN_SIZE / SIMD_LANES of them.
+    var sum_vec: I64Vec = @splat(0);
     while (h + SIMD_LANES <= hidden_size) : (h += SIMD_LANES) {
         const acc_ptr: *align(1) const AccVec = @ptrCast(&acc_values[h]);
         const weight_ptr: *align(1) const WeightVec = @ptrCast(&weights[h]);
         const clamped = clampVecToActivationRange(@intCast(acc_ptr.*), q0);
         const activated = if (use_screlu) clamped * clamped else clamped;
-        sum += reduceProductToI64(activated, @intCast(weight_ptr.*));
+        const product = activated * @as(I32Vec, @intCast(weight_ptr.*));
+        sum_vec += @as(I64Vec, @intCast(product));
     }
+    var sum: i64 = @reduce(.Add, sum_vec);
 
     while (h < hidden_size) : (h += 1) {
         const v = clampToActivationRange(acc_values[h], q0);
