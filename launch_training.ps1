@@ -1,16 +1,21 @@
-# Sykora NNUE V6 Training Launch Script
-# Run from project root: .\launch_training.ps1
+# Train, export, and verify Sykora's pairwise-MLP SYKNNUE7 network.
 #
-# Dataset: T80-2023 (jun-dec) + T80-2024 (jan-jun) .min-v2.v6 binpacks
-# Source:  linrock/test80-2023 + linrock/test80-2024 on HuggingFace
+# First run:
+#   .\launch_training.ps1 -Smoke
 #
-# Decompress first:
-#   cd nnue\data\binpack
-#   Get-ChildItem *.zst | ForEach-Object { zstd -d $_.FullName }
+# Full run:
+#   .\launch_training.ps1
+
+param(
+    [switch]$Smoke,
+    [switch]$DryRun,
+    [string]$Resume = "",
+    [int]$StartSuperbatch = 0
+)
 
 $ErrorActionPreference = "Stop"
 
-# --- Environment Setup ---
+# --- Windows CUDA toolchain ---
 $msvcVer = "14.44.35207"
 $sdkVer = "10.0.26100.0"
 $cudaVer = "12.6"
@@ -25,90 +30,146 @@ $env:INCLUDE = "$msvcRoot\include;$sdkRoot\Include\$sdkVer\ucrt;$sdkRoot\Include
 $env:CUDA_PATH = $cudaRoot
 $env:CUDARC_CUDA_VERSION = $cudaDigits
 
-# Activate venv
-& "$PSScriptRoot\nnue\.venv\Scripts\Activate.ps1"
+$venvActivate = @(
+    "$PSScriptRoot\.venv\Scripts\Activate.ps1",
+    "$PSScriptRoot\nnue\.venv\Scripts\Activate.ps1"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $venvActivate) {
+    Write-Error "Could not find a Python virtualenv under .venv or nnue\.venv"
+    exit 1
+}
+& $venvActivate
 
-# --- Dataset Setup ---
+# --- Stockfish pretraining data ---
 $dataDir = "$PSScriptRoot\nnue\data\binpack"
-
-# T80-2023 jun-dec + T80-2024 jan-jun, all .min-v2.v6 filtered.
-$binpacks = @(
-    # 2023
+$trainBinpacks = @(
     "test80-2023-06-jun-2tb7p.min-v2.v6.binpack",
     "test80-2023-07-jul-2tb7p.min-v2.v6.binpack",
     "test80-2023-09-sep-2tb7p.min-v2.v6.binpack",
     "test80-2023-10-oct-2tb7p.min-v2.v6.binpack",
     "test80-2023-11-nov-2tb7p.min-v2.v6.binpack",
     "test80-2023-12-dec-2tb7p.min-v2.v6.binpack",
-    # 2024
     "test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
     "test80-2024-02-feb-2tb7p.min-v2.v6.binpack",
     "test80-2024-03-mar-2tb7p.min-v2.v6.binpack",
     "test80-2024-04-apr-2tb7p.min-v2.v6.binpack",
-    "test80-2024-05-may-2tb7p.min-v2.v6.binpack",
+    "test80-2024-05-may-2tb7p.min-v2.v6.binpack"
+)
+$validationBinpacks = @(
     "test80-2024-06-jun-2tb7p.min-v2.v6.binpack"
 )
 
-$datasets = @()
-foreach ($bp in $binpacks) {
-    $file = Join-Path $dataDir $bp
-    if (-not (Test-Path $file)) {
-        Write-Error "Missing: $file`nDecompress with: zstd -d `"$file.zst`""
-        exit 1
+function Resolve-Binpacks([string[]]$Names) {
+    $resolved = @()
+    foreach ($name in $Names) {
+        $path = Join-Path $dataDir $name
+        if (-not (Test-Path $path)) {
+            Write-Error "Missing: $path`nDecompress with: zstd -d `"$path.zst`""
+            exit 1
+        }
+        $resolved += (Resolve-Path $path).Path
     }
-    $datasets += (Resolve-Path $file).Path
+    return $resolved
 }
 
-# --- Training Parameters ---
-# SYKNNUE6:
-# mirrored king buckets (sykora16) -> FT 512 -> 8 material-count output heads
-$networkFormat = "syk6"
-$bucketLayout = "sykora16"
-$hidden = 512
+$trainingDatasets = Resolve-Binpacks $trainBinpacks
+$validationDatasets = Resolve-Binpacks $validationBinpacks
+
+# --- Registered SYKNNUE7 profile ---
+$hidden = 1024
+$dense1 = 16
+$dense2 = 32
 $outputBuckets = 8
-$endSuperbatch = 600
-$lrStart = 0.001
-$wdl = 0.25
-$saveRate = 10
-$threads = 8
-
-Write-Host "============================================"
-Write-Host "  Sykora NNUE V6 Training (RTX 4070 Ti SUPER)"
-Write-Host "============================================"
-Write-Host "Data:          T80-2023/2024 filtered set"
-Write-Host "Filtering:     .min-v2.v6 on T80 inputs"
-Write-Host "Binpacks:      $($binpacks.Count) files"
-Write-Host "Format:        binpack (sfbinpack)"
-Write-Host "Net format:    $networkFormat"
-Write-Host "Bucket layout: $bucketLayout"
-Write-Host "FT hidden:     $hidden"
-Write-Host "Output heads:  $outputBuckets material-count buckets"
-Write-Host "Dense head:    bucketed linear $($hidden * 2) -> 1"
-Write-Host "Superbatches:  1 -> $endSuperbatch"
-Write-Host "Save rate:     every $saveRate superbatches"
-Write-Host "Threads:       $threads"
-Write-Host "WDL blend:     $wdl"
-Write-Host "LR:            $lrStart -> cosine decay"
-Write-Host "============================================"
-Write-Host ""
-foreach ($bp in $binpacks) {
-    Write-Host "  $bp"
+$endSuperbatch = 800
+$batchSize = 16384
+$batchesPerSuperbatch = 6104
+$saveRate = 25
+$validationPositions = 262144
+if ($Smoke) {
+    $endSuperbatch = 2
+    $batchSize = 4096
+    $batchesPerSuperbatch = 16
+    $saveRate = 1
+    $validationPositions = 16384
 }
-Write-Host ""
 
-python "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py" `
-    --dataset $datasets `
-    --bullet-repo "$PSScriptRoot\nnue\bullet_repo" `
-    --output-root "$PSScriptRoot\nnue\models\bullet" `
-    --data-format binpack `
-    --binpack-buffer-mb 12288 `
-    --binpack-threads 6 `
-    --network-format $networkFormat `
-    --bucket-layout $bucketLayout `
-    --hidden $hidden `
-    --output-buckets $outputBuckets `
-    --end-superbatch $endSuperbatch `
-    --save-rate $saveRate `
-    --threads $threads `
-    --wdl $wdl `
-    --lr-start $lrStart
+$validationCache = Join-Path $dataDir "validation\t80_2024_06_v3filter_$validationPositions.data"
+if ($StartSuperbatch -le 0) {
+    $StartSuperbatch = 1
+    if ($Resume) {
+        $resumeName = Split-Path ($Resume -replace '[\\/]+$', '') -Leaf
+        if ($resumeName -match '-(\d+)$') {
+            $StartSuperbatch = [int]$Matches[1] + 1
+        }
+    }
+}
+if ($StartSuperbatch -gt $endSuperbatch) {
+    Write-Error "Start superbatch $StartSuperbatch exceeds end $endSuperbatch"
+    exit 2
+}
+
+$timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+$runPrefix = if ($Smoke) { "smoke_v7" } else { "v7" }
+$runId = "${runPrefix}_${timestamp}"
+
+Write-Host "============================================"
+Write-Host "  Sykora SYKNNUE7 training"
+Write-Host "============================================"
+Write-Host "Run ID:        $runId"
+Write-Host "Architecture:  factorised pairwise-MLP"
+Write-Host "Shape:         H=$hidden, $hidden -> $dense1 -> $($dense1 * 2) -> $dense2 -> 1"
+Write-Host "Output heads:  $outputBuckets material buckets"
+Write-Host "Superbatches:  $StartSuperbatch -> $endSuperbatch"
+Write-Host "Batch shape:   $batchSize x $batchesPerSuperbatch"
+Write-Host "Train shards:  $($trainingDatasets.Count)"
+Write-Host "Held out:      $($validationDatasets.Count) shard, $validationPositions positions"
+Write-Host "============================================"
+
+$arguments = @(
+    "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py",
+    "--dataset"
+) + $trainingDatasets + @(
+    "--validation-dataset"
+) + $validationDatasets + @(
+    "--validation-cache", $validationCache,
+    "--validation-positions", $validationPositions,
+    "--bullet-repo", "$PSScriptRoot\nnue\bullet_repo",
+    "--output-root", "$PSScriptRoot\nnue\models\bullet",
+    "--run-id", $runId,
+    "--data-format", "binpack",
+    "--binpack-buffer-mb", 12288,
+    "--binpack-threads", 6,
+    "--validation-buffer-mb", 512,
+    "--network-format", "syk7",
+    "--architecture", "pairwise-mlp",
+    "--bucket-layout", "v3_10",
+    "--hidden", $hidden,
+    "--dense1", $dense1,
+    "--dense2", $dense2,
+    "--output-buckets", $outputBuckets,
+    "--start-superbatch", $StartSuperbatch,
+    "--end-superbatch", $endSuperbatch,
+    "--batch-size", $batchSize,
+    "--batches-per-superbatch", $batchesPerSuperbatch,
+    "--save-rate", $saveRate,
+    "--threads", 8,
+    "--wdl", 0.75,
+    "--lr-start", 0.001,
+    "--export-after"
+)
+if ($Resume) {
+    $arguments += @("--resume", $Resume)
+}
+if ($DryRun) {
+    $arguments += "--dry-run"
+} else {
+    zig build -Doptimize=ReleaseFast
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    $engine = "$PSScriptRoot\zig-out\bin\sykora.exe"
+    $arguments += @("--parity-engine", $engine)
+}
+
+python @arguments
+exit $LASTEXITCODE

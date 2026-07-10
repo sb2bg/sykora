@@ -162,8 +162,8 @@ The activation function (ReLU or SCReLU) is auto-detected from the network file 
 For Python tooling, install dependencies as needed:
 
 ```bash
-# Core analysis/benchmark utilities
-python -m pip install chess
+# Core analysis, benchmark, and NNUE validation/export utilities
+python -m pip install chess numpy
 ```
 
 For NNUE training on a fresh machine, bootstrap the Bullet dependency once:
@@ -259,9 +259,9 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora's network format is `SYKNNUE6`: factorised mirrored king-bucketed sparse inputs (10 buckets, v3_10 layout) with dual-perspective accumulator updates, SCReLU activation, and material-count output buckets. It is the direct successor to v3 — the last successfully trained net — and makes two changes over v3: wider FT (512 → 768) and material-count output buckets (1 → 8). The v4/v5 attempts are retired; see `specs/syknnue6_spec.md` for the postmortem and full design spec.
+Sykora can load the new `SYKNNUE7` pairwise-MLP format as an external `EvalFile`. The embedded fallback remains the proven v3 weights in their older SYKNNUE6 container until a trained v7 network is ready to replace it.
 
-The key training requirement is **factorisation**: a shared `768 → H` factoriser matrix is trained across all king buckets and merged into the per-bucket weights at export time. v4 and v5 both dropped factorisation, which is the root cause of their failure — each bucket's weights were trained on only ~1/N of the data with no shared base.
+The key training requirement is **factorisation**: a shared `768 → H` matrix is trained across all king buckets and merged into each bucket's residual weights at export time. V7 keeps that proven sample-sharing mechanism while changing the activation and dense architecture.
 
 ### Runtime
 
@@ -271,51 +271,21 @@ The key training requirement is **factorisation**: a shared `768 → H` factoris
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For exact file-format details (header, payload order, integer inference contract, loader validation), see `specs/syknnue6_spec.md`.
+For the v7 architecture, file format, research, and integer inference contract, see `specs/syknnue7_spec.md`. The v6 specification remains only for the embedded fallback.
 
 ### Training Pipeline
 
-Training uses the [Bullet](https://github.com/jw1912/bullet) trainer with **factorised** king-bucketed inputs. Helper scripts for bootstrap, training, gating, and export live under `utils/nnue/bullet/`. The only supported layout is v3_10 (10 buckets); output buckets are `1` (Stage-1 parity, `single` scheme) or `8` (Stage-2/3 material scheme). See `specs/syknnue6_spec.md` for the full staging plan.
+Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. The registered v7 profile is a factorised H=1024 feature transformer, pairwise product pooling, eight material heads, and a selected `1024 -> 16 -> 32 -> 32 -> 1` nonlinear tail. The launcher holds out one SF shard for a final loss check, then automatically converts, exports, and bit-exactness-checks the trained net.
 
-**Stage 1 — parity net (`H=512, O=1`):**
+```powershell
+# Compile and exercise the full CUDA -> checkpoint -> SYKNNUE7 -> engine path.
+.\launch_training.ps1 -Smoke
 
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset data/training.binpack \
-  --data-format binpack \
-  --bullet-repo nnue/bullet_repo \
-  --output-root nnue/models/bullet \
-  --network-format syk6 \
-  --bucket-layout v3_10 \
-  --output-buckets 1 \
-  --hidden 512 --end-superbatch 320 --threads 8
+# Launch the full v7 run.
+.\launch_training.ps1
 ```
 
-**Stage 2 — material output buckets (`H=512, O=8`):**
-
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset data/training.binpack \
-  --data-format binpack \
-  --network-format syk6 \
-  --bucket-layout v3_10 \
-  --output-buckets 8 \
-  --hidden 512 --end-superbatch 640 --threads 8
-```
-
-**Stage 3 — wider FT (`H=768, O=8`, the v6 strength target):**
-
-```bash
-python utils/nnue/bullet/train_cuda_longrun.py \
-  --dataset data/training.binpack \
-  --data-format binpack \
-  --network-format syk6 \
-  --bucket-layout v3_10 \
-  --output-buckets 8 \
-  --hidden 768 --end-superbatch 640 --threads 8
-```
-
-**Multiple datasets** can be passed space-separated; **resuming** uses `--resume <checkpoint>/raw.bin` with adjusted `--start-superbatch`.
+The ready-to-load `.sknnue` path is printed when training finishes. Resume an interrupted run with `-Resume <checkpoint-directory>`; the launcher derives the next superbatch from the checkpoint name.
 
 ### Self-Play Data Generation
 
@@ -328,14 +298,14 @@ Sykora can generate its own training data via the `gensfen` command:
 
 ### Exporting a Trained Net
 
-Convert a Bullet checkpoint to NPZ, then to a `SYKNNUE6` net (`--output-bucket-count` is inferred from the checkpoint; `1` → `single`, `8` → `material`):
+The launcher exports automatically. To repeat it manually, convert the final Bullet checkpoint to NPZ and then to SYKNNUE7:
 
 ```bash
 python utils/nnue/bullet/checkpoint_raw_to_npz.py \
   --input nnue/models/bullet/<run_id>/checkpoints/<checkpoint> \
   --output checkpoint.npz
 
-python utils/nnue/bullet/export_npz_to_syk6.py \
+python utils/nnue/bullet/export_npz_to_syk7.py \
   --input checkpoint.npz \
   --output-net output.sknnue
 ```
@@ -348,21 +318,6 @@ To update the embedded net in the binary:
 cp output.sknnue src/net.sknnue
 zig build -Doptimize=ReleaseFast
 ```
-
-### Gating Checkpoints
-
-```bash
-python utils/nnue/bullet/gate_checkpoints.py \
-  --checkpoints-dir nnue/models/bullet/<run_id>/checkpoints \
-  --engine ./zig-out/bin/sykora \
-  --blend 100 --nnue-scale 100 \
-  --selfplay-games 80 --selfplay-movetime-ms 120 --selfplay-top-k 3 \
-  --threads 1 --hash-mb 64 \
-  --min-elo 0 --max-p-value 0.25 \
-  --promote-to nnue/syk_nnue_best.sknnue
-```
-
-The 80-game / 120 ms selfplay gate has a wide Elo error bar; treat it as a smoke test and prefer SPRT at fast TC for promotion decisions.
 
 ## Contributing
 

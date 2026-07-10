@@ -7,6 +7,7 @@ pub const NnueCheckError = error{NnueCheckError};
 const Options = struct {
     net_path: ?[]const u8 = null,
     fens_path: ?[]const u8 = null,
+    verify_incremental: bool = false,
 };
 
 fn eprint(comptime fmt: []const u8, args: anytype) void {
@@ -28,6 +29,8 @@ fn parseArgs(args: []const []const u8) !Options {
             i += 1;
             if (i >= args.len) return error.NnueCheckError;
             opts.fens_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--verify-incremental")) {
+            opts.verify_incremental = true;
         } else {
             eprint("nnuecheck: unknown argument: {s}\n", .{arg});
             return error.NnueCheckError;
@@ -38,6 +41,41 @@ fn parseArgs(args: []const []const u8) !Options {
         return error.NnueCheckError;
     }
     return opts;
+}
+
+fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
+    const root_acc = nnue.initAccumulators(net, b);
+    var moves = @import("bitboard.zig").MoveList.init();
+    b.generateLegalMoves(&moves) catch return false;
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+
+    for (moves.slice()) |move| {
+        const undo = b.makeMoveWithUndoUnchecked(move);
+        var incremental: nnue.AccumulatorPair = undefined;
+        nnue.updateAccumulators(
+            net,
+            b,
+            &root_acc,
+            &incremental,
+            move.from(),
+            move.to(),
+            undo.moved_piece,
+            undo.mover_color,
+            undo.captured_piece,
+            undo.captured_square,
+            move.promotion(),
+            undo.castle_rook_from != null,
+            undo.castle_rook_from,
+            undo.castle_rook_to,
+        );
+        const full = nnue.initAccumulators(net, b);
+        const matches = std.mem.eql(i32, incremental.white[0..hidden_size], full.white[0..hidden_size]) and
+            std.mem.eql(i32, incremental.black[0..hidden_size], full.black[0..hidden_size]) and
+            nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &full, b);
+        b.unmakeMoveUnchecked(move, undo);
+        if (!matches) return false;
+    }
+    return true;
 }
 
 /// Emit reference NNUE evals for a FEN suite through the non-incremental
@@ -83,6 +121,10 @@ pub fn run(args: []const []const u8, allocator: std.mem.Allocator) NnueCheckErro
             eprint("nnuecheck: invalid FEN, skipping: {s}\n", .{line});
             continue;
         };
+        if (opts.verify_incremental and !verifyIncrementalMoves(&net, &board)) {
+            eprint("nnuecheck: incremental/full mismatch: {s}\n", .{line});
+            return error.NnueCheckError;
+        }
         const eval = nnue.evaluate(&net, &board);
         out.print("{d}\t{s}\n", .{ eval, line }) catch return error.NnueCheckError;
     }

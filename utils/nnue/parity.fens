@@ -1,4 +1,9 @@
-# SYKNNUE6 parity suite: covers all 8 material buckets + both mirror states + both stm.
+# Sykora NNUE parity suite: all 8 material buckets, mirrors, sides to move,
+# plus explicit castling, en-passant, promotion, and promotion-capture moves.
+r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1
+4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1
+4k3/P7/8/8/8/8/7p/4K3 w - - 0 1
+1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1
 rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
 8/8/6k1/6p1/1Kp4p/8/8/8 w - - 2 101
 8/8/N7/1R6/6k1/4n3/K7/8 b - - 7 90
