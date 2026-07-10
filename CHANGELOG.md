@@ -8,8 +8,8 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ### Changed
 
-- Promoted the embedded NNUE to the stronger `v3_512` checkpoint `run_20260323T063759Z-600`.
-- Switched NNUE tooling to emit `SYKNNUE3` only. `SYKNNUE2` remains readable for backward compatibility with older external nets.
+- Promoted the embedded NNUE from the mature `v3_512` checkpoint `run_20260323T063759Z-600` to the `SYKNNUE7` pairwise-MLP candidate `v7_20260710T055911Z-800`.
+- Added sectioned `SYKNNUE7` export and loading while retaining older net formats for regression tests and external-net compatibility.
 - Added transposition-table probing/storage inside quiescence search.
 - Reworked search move ordering with continuation-history heuristics for quieter move scoring and better follow-up awareness.
 - Added singular extension logic and TT-aware multicut handling to sharpen tactical search around strong transposition-table moves.

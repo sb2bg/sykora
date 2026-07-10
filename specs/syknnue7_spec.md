@@ -1,7 +1,8 @@
 # SYKNNUE7 Research and Design Spec
 
 Status: trainer, sectioned exporter, validated Zig loader, integer inference,
-and cross-language parity implemented; full CUDA training run pending
+cross-language parity, and the first full CUDA training run completed; the
+800-superbatch candidate is embedded for pre-release testing
 Research date: 2026-07-09
 
 ## 1. Decision
@@ -41,20 +42,20 @@ spec/trainer/runtime divergence.
 
 ### 2.1 Current net
 
-`src/net.sknnue` is a `SYKNNUE6` container containing the proven v3 model:
+`src/net.sknnue` is the `SYKNNUE7` candidate
+`v7_20260710T055911Z-800`:
 
 ```text
-H=512
-activation=SCReLU
-input buckets=10, v3_10 mirrored layout
-output buckets=1, single-head scheme
-Q0=255, Q=64, scale=400
+H=1024
+activation=pairwise product pooling + CReLU/CSReLU dense tail
+input buckets=10, mirrored king-bucket layout
+output buckets=8, material-head scheme
+dense tail=1024 -> 16 -> 32 -> 32 -> 1
 ```
 
-Its size and payload match `src/net.sknnue.v3.bak` after the documented v3 to
-v6 repack. It is not a separately trained v6 network. This is good as a known
-baseline, but naming it “v6” can hide that no v6 architecture has yet been
-validated end to end.
+The mature v3 model remains available as `src/net.sknnue.v3.bak`. Its lossless
+SYKNNUE6 repack remains useful as a known baseline; the v6 label described its
+container, not a separately trained architecture.
 
 ### 2.2 v3 matured much later than the existing spec says
 
@@ -729,7 +730,7 @@ can touch many features after one board move.
 
 ## 10. Acceptance Criteria
 
-V7 is ready to become the default only when all of these are true:
+V7 is ready to ship as the default only when all of these are true:
 
 - Stage R is bit-exact and statistically neutral with the promoted v3 net;
 - every v7 tensor is shape/type/hash validated by Zig, Rust export, and Python;
@@ -741,7 +742,8 @@ V7 is ready to become the default only when all of these are true:
 - fast-TC SPRT passes and LTC confirms architectures with a material NPS cost;
 - the final file includes complete provenance and zero unexpected quantisation
   clipping;
-- the old embedded v3/v6 net remains available for regression testing.
+- the old embedded v3 net remains available as `src/net.sknnue.v3.bak` for
+  regression testing.
 
 ## 11. Recommended Immediate Work Order
 
