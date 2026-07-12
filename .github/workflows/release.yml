@@ -25,15 +25,17 @@ jobs:
             target: aarch64-linux
             cpu: baseline
             artifact: sykora-linux-aarch64
-          - os: macos-latest
+          # Zig 0.15.2 cannot link its build runner on the macOS 26 image.
+          # Pin the host image until the compiler toolchain is upgraded.
+          - os: macos-15
             target: x86_64-macos
             cpu: baseline
             artifact: sykora-macos-x86_64
-          - os: macos-latest
+          - os: macos-15
             target: x86_64-macos
             cpu: x86_64_v3
             artifact: sykora-macos-x86_64-avx2
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-macos
             cpu: baseline
             artifact: sykora-macos-aarch64
