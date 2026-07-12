@@ -47,8 +47,19 @@ pub const SearchOptions = struct {
     btime: ?u64 = null,
     winc: ?u64 = null,
     binc: ?u64 = null,
+    moves_to_go: ?u64 = null,
     depth: ?u64 = null,
     start_depth: u32 = 1,
+    /// Absolute start of the GUI's `go` command, including worker setup.
+    start_time: ?std.time.Instant = null,
+    move_overhead: u64 = 30,
+    /// Helpers obey the hard deadline but only the main worker stops at soft time.
+    enforce_soft_limit: bool = true,
+};
+
+const TimeBudget = struct {
+    soft_ms: u64,
+    hard_ms: u64,
 };
 
 pub const SearchResult = struct {
@@ -69,11 +80,71 @@ const SEE_CAPTURE_SCALE: i32 = 128;
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
 const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
+const STOP_CHECK_INTERVAL: u32 = 1024;
 
 fn elapsedMs(start: std.time.Instant) i64 {
     const now = std.time.Instant.now() catch return 0;
     const ns = now.since(start);
     return @intCast(@divFloor(ns, std.time.ns_per_ms));
+}
+
+fn scaledFraction(value: u64, numerator: u64, denominator: u64) u64 {
+    std.debug.assert(denominator > 0 and numerator <= denominator);
+    return (value / denominator) * numerator +
+        ((value % denominator) * numerator) / denominator;
+}
+
+fn calculateTimeBudgetFor(options: SearchOptions, side: piece.Color, fullmove_number: u16) ?TimeBudget {
+    if (options.infinite) return null;
+
+    if (options.move_time) |move_time| {
+        // `go movetime` is already an explicit search budget. Move Overhead is
+        // reserved for clock-managed games and must not skew fixed-time tests.
+        return .{ .soft_ms = move_time, .hard_ms = move_time };
+    }
+
+    const remaining = if (side == .white) options.wtime else options.btime;
+    const increment = if (side == .white) options.winc orelse 0 else options.binc orelse 0;
+    const usable = (remaining orelse return null) -| options.move_overhead;
+    if (usable == 0) return .{ .soft_ms = 0, .hard_ms = 0 };
+
+    const explicit_moves_to_go = options.moves_to_go != null;
+    const horizon: u64 = if (options.moves_to_go) |moves_to_go|
+        std.math.clamp(moves_to_go, 1, 50)
+    else
+        @max(@as(u64, 20), 40 - @min(@as(u64, fullmove_number), 40));
+
+    const divisor = horizon + if (explicit_moves_to_go) @as(u64, 1) else 5;
+    const increment_share = scaledFraction(increment, 9, 10);
+    var soft = (usable / divisor) +| increment_share;
+
+    var max_soft: u64 = if (explicit_moves_to_go) blk: {
+        if (horizon == 1) break :blk usable - usable / 5;
+        const two_shares = (usable / (horizon + 1)) * 2 +
+            ((usable % (horizon + 1)) * 2) / (horizon + 1);
+        break :blk @min(usable / 2, two_shares);
+    } else @min(usable / 5, 30000);
+
+    if (!explicit_moves_to_go) {
+        if (usable < 5000) {
+            max_soft = @min(usable / 10, max_soft);
+        } else if (usable < 10000) {
+            max_soft = @min(scaledFraction(usable, 15, 100), max_soft);
+        }
+    }
+
+    // Apply the minimum before final caps; the remaining-clock cap always wins.
+    soft = @max(soft, 100);
+    soft = @min(soft, max_soft);
+    soft = @min(soft, usable);
+    if (soft == 0) soft = 1;
+
+    const expanded = std.math.mul(u64, soft, 4) catch std.math.maxInt(u64);
+    var hard = @min(usable, expanded);
+    hard = @min(hard, @max(usable / 2, soft));
+    hard = @max(hard, soft);
+
+    return .{ .soft_ms = soft, .hard_ms = hard };
 }
 
 // Adjust mate score for TT storage (store relative to root, not current ply)
@@ -233,6 +304,9 @@ pub const SearchEngine = struct {
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
+    search_start: std.time.Instant,
+    hard_deadline_ns: ?u64,
+    stop_check_countdown: u32,
 
     pub fn init(
         board_ptr: *Board,
@@ -276,6 +350,9 @@ pub const SearchEngine = struct {
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
+            .search_start = std.time.Instant.now() catch unreachable,
+            .hard_deadline_ns = null,
+            .stop_check_countdown = 0,
         };
     }
 
@@ -414,9 +491,31 @@ pub const SearchEngine = struct {
         }
     }
 
+    /// Poll the shared stop flag every node and the absolute hard deadline
+    /// periodically. Every worker receives the same start time and hard limit.
+    inline fn checkShouldStop(self: *Self) bool {
+        if (self.stop_search.load(.monotonic)) return true;
+
+        if (self.stop_check_countdown > 0) {
+            self.stop_check_countdown -= 1;
+            return false;
+        }
+        self.stop_check_countdown = STOP_CHECK_INTERVAL - 1;
+
+        if (self.hard_deadline_ns) |deadline_ns| {
+            const now = std.time.Instant.now() catch return false;
+            if (now.since(self.search_start) >= deadline_ns) {
+                self.stop_search.store(true, .monotonic);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// Run a search and return the best move
     pub fn search(self: *Self, options: SearchOptions) anyerror!SearchResult {
-        const start_time = std.time.Instant.now() catch unreachable;
+        const start_time = options.start_time orelse (std.time.Instant.now() catch unreachable);
 
         // Reset search state
         self.nodes_searched = 0;
@@ -436,8 +535,13 @@ pub const SearchEngine = struct {
         try self.initAccumulatorStack();
         defer self.deinitAccumulatorStack();
 
-        // Calculate time limit
-        const time_limit = self.calculateTimeLimit(options);
+        const time_budget = calculateTimeBudgetFor(options, self.board.board.move, self.board.board.fullmove_number);
+        self.search_start = start_time;
+        self.hard_deadline_ns = if (time_budget) |budget|
+            std.math.mul(u64, budget.hard_ms, std.time.ns_per_ms) catch std.math.maxInt(u64)
+        else
+            null;
+        self.stop_check_countdown = 0;
 
         // Generate legal moves
         var legal_moves = MoveList.init();
@@ -532,13 +636,14 @@ pub const SearchEngine = struct {
                 });
             }
 
-            // Check time limit
-            if (time_limit) |limit| {
-                const total_time_ms: u64 = @intCast(@max(total_time, 0));
-                const iter_time_ms: u64 = @intCast(@max(iter_time, 0));
-                // Stop if we've used most of our time or if next iteration unlikely to finish
-                if (total_time_ms >= limit or total_time_ms + (iter_time_ms * 2) >= limit) {
-                    break;
+            // Only the main worker acts on soft time. All workers enforce hard time.
+            if (options.enforce_soft_limit) {
+                if (time_budget) |budget| {
+                    const total_time_ms: u64 = @intCast(@max(total_time, 0));
+                    const iter_time_ms: u64 = @intCast(@max(iter_time, 0));
+                    if (total_time_ms >= budget.soft_ms or total_time_ms +| (iter_time_ms *| 2) >= budget.soft_ms) {
+                        break;
+                    }
                 }
             }
 
@@ -567,58 +672,6 @@ pub const SearchEngine = struct {
             .time_ms = elapsed,
             .depth = completed_depth,
         };
-    }
-
-    fn calculateTimeLimit(self: *Self, options: SearchOptions) ?u64 {
-        if (options.infinite) {
-            return null;
-        } else if (options.move_time) |move_time| {
-            return move_time;
-        }
-
-        // Determine which color we are and get our time/increment
-        const our_time: ?u64 = if (self.board.board.move == piece.Color.white)
-            options.wtime
-        else
-            options.btime;
-
-        const our_increment: u64 = if (self.board.board.move == piece.Color.white)
-            options.winc orelse 0
-        else
-            options.binc orelse 0;
-
-        if (our_time == null) {
-            return null;
-        }
-
-        const time_remaining = our_time.?;
-
-        // Calculate moves played and estimate moves remaining
-        const moves_played = self.board.board.fullmove_number;
-        const estimated_moves_remaining = @max(20, 40 - @min(moves_played, 40));
-
-        // Base time allocation: divide remaining time by estimated moves
-        // Use a slightly larger divisor for safety margin
-        const divisor = estimated_moves_remaining + 5;
-        const base_time = time_remaining / divisor;
-
-        // Add most of the increment since we get it back after the move
-        const time_budget = base_time + (our_increment * 9 / 10);
-
-        // Apply min/max bounds
-        const min_time: u64 = 100; // Minimum 100ms
-        var max_time = @min(time_remaining / 5, 30000); // Max 20% of remaining or 30s
-
-        // If low on time, be more conservative
-        if (time_remaining < 5000) {
-            max_time = @min(time_remaining / 10, max_time);
-        } else if (time_remaining < 10000) {
-            max_time = @min(time_remaining * 15 / 100, max_time);
-        }
-
-        const time_for_move = @max(min_time, @min(time_budget, max_time));
-
-        return time_for_move;
     }
 
     inline fn continuationContext(self: *const Self, ply: u32) struct { prev: ?u16, prev2: ?u16 } {
@@ -1065,7 +1118,7 @@ pub const SearchEngine = struct {
             return self.quiescence(alpha_in, beta, ply);
         }
 
-        if (self.stop_search.load(.monotonic)) {
+        if (self.checkShouldStop()) {
             return 0;
         }
 
@@ -1495,7 +1548,7 @@ pub const SearchEngine = struct {
 
     /// Quiescence search - search only tactical moves to avoid horizon effect
     fn quiescence(self: *Self, alpha_in: i32, beta: i32, ply: u32) anyerror!i32 {
-        if (self.stop_search.load(.monotonic)) {
+        if (self.checkShouldStop()) {
             return 0;
         }
 
@@ -1704,3 +1757,43 @@ pub const SearchEngine = struct {
         file.writeAll("\n") catch return;
     }
 };
+
+test "time budget stays inside usable clock and preserves fixed movetime" {
+    const fixed = calculateTimeBudgetFor(.{
+        .move_time = 80,
+        .move_overhead = 30,
+    }, .white, 1).?;
+    try std.testing.expectEqual(@as(u64, 80), fixed.soft_ms);
+    try std.testing.expectEqual(@as(u64, 80), fixed.hard_ms);
+
+    const low = calculateTimeBudgetFor(.{
+        .wtime = 50,
+        .move_overhead = 30,
+    }, .white, 1).?;
+    try std.testing.expect(low.soft_ms <= 20);
+    try std.testing.expect(low.hard_ms <= 20);
+    try std.testing.expect(low.soft_ms <= low.hard_ms);
+
+    const exhausted = calculateTimeBudgetFor(.{
+        .wtime = 20,
+        .move_overhead = 30,
+    }, .white, 1).?;
+    try std.testing.expectEqual(@as(u64, 0), exhausted.soft_ms);
+    try std.testing.expectEqual(@as(u64, 0), exhausted.hard_ms);
+
+    const last_move = calculateTimeBudgetFor(.{
+        .wtime = 10_000,
+        .moves_to_go = 1,
+        .move_overhead = 0,
+    }, .white, 20).?;
+    try std.testing.expect(last_move.soft_ms >= 4_000);
+    try std.testing.expect(last_move.soft_ms <= last_move.hard_ms);
+    try std.testing.expect(last_move.hard_ms <= 10_000);
+
+    const huge = calculateTimeBudgetFor(.{
+        .wtime = std.math.maxInt(u64),
+        .winc = std.math.maxInt(u64),
+        .move_overhead = 0,
+    }, .white, 1).?;
+    try std.testing.expect(huge.soft_ms <= huge.hard_ms);
+}

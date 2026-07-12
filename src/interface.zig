@@ -45,6 +45,7 @@ pub const Uci = struct {
     tt: TranspositionTable,
     num_threads: usize,
     hash_size_mb: usize,
+    move_overhead_ms: u64,
     helper_threads: [smp.MAX_HELPERS]?std.Thread,
     helper_results: [smp.MAX_HELPERS]smp.HelperResult,
 
@@ -76,6 +77,7 @@ pub const Uci = struct {
             .tt = tt,
             .num_threads = 1,
             .hash_size_mb = default_hash_mb,
+            .move_overhead_ms = 30,
             .helper_threads = [_]?std.Thread{null} ** smp.MAX_HELPERS,
             .helper_results = [_]smp.HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** smp.MAX_HELPERS,
         };
@@ -220,6 +222,9 @@ pub const Uci = struct {
                 try self.writeStdout("key {x}", .{self.board.zobrist_hasher.zobrist_hash});
             },
             .go => |go_opts| {
+                // The GUI clock starts with `go`, before joining an old search,
+                // spawning workers, or initializing their search state.
+                const go_received = std.time.Instant.now() catch return UciError.IOError;
                 try smp.terminateSearch(self);
                 try self.writeInfoString("{any}", .{go_opts});
                 try self.writeInfoString("starting search thread", .{});
@@ -227,7 +232,7 @@ pub const Uci = struct {
                 self.best_move = board.Move.init(0, 0, null);
 
                 // Use larger stack size (8MB) for search thread due to large SearchEngine struct
-                self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, smp.search, .{ self, go_opts }) catch return UciError.ThreadCreationFailed;
+                self.search_thread = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, smp.search, .{ self, go_opts, go_received }) catch return UciError.ThreadCreationFailed;
             },
             .stop => {
                 try smp.terminateSearch(self);

@@ -249,7 +249,14 @@ def play_single_game(
     white_time_ms = float(clock.game_time_ms) if clock is not None else 0.0
     black_time_ms = float(clock.game_time_ms) if clock is not None else 0.0
 
-    while not board.is_game_over(claim_draw=True):
+    # Do not auto-claim a draw merely because the side to move has a legal
+    # move that could create the third occurrence. Let the engine choose it,
+    # then adjudicate once the repeated position actually exists.
+    while (
+        not board.is_game_over(claim_draw=False)
+        and not board.is_repetition(3)
+        and not board.is_fifty_moves()
+    ):
         if plies_played >= max_plies:
             termination = f"Move limit ({max_plies} plies)"
             game.headers["Result"] = "1/2-1/2"
@@ -330,16 +337,24 @@ def play_single_game(
         node = node.add_variation(play_result.move)
         plies_played += 1
 
-    outcome = board.outcome(claim_draw=True)
-    result_text = board.result(claim_draw=True)
-    game.headers["Result"] = result_text
-
-    if outcome is None:
+    outcome = board.outcome(claim_draw=False)
+    if board.is_repetition(3):
+        result_text = "1/2-1/2"
+        winner = None
+        termination = "THREEFOLD_REPETITION"
+    elif board.is_fifty_moves():
+        result_text = "1/2-1/2"
+        winner = None
+        termination = "FIFTY_MOVES"
+    elif outcome is None:
+        result_text = "*"
         winner: Optional[chess.Color] = None
         termination = "Unknown"
     else:
+        result_text = board.result(claim_draw=False)
         winner = outcome.winner
         termination = str(outcome.termination).replace("Termination.", "")
+    game.headers["Result"] = result_text
     game.headers["Termination"] = termination
 
     if verbose:
