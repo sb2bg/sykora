@@ -83,7 +83,7 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
   - SEE-based pruning of clearly losing captures
 - Repetition detection.
 - 50-move-rule handling.
-- Time management for clocked play.
+- Clock-aware time management with soft iteration budgets and absolute hard deadlines.
 - Evaluation cache for expensive eval paths.
 
 </details>
@@ -150,6 +150,7 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 | `NnueScale`      | int    | `100`     | NNUE output scaling factor (10..400)                       |
 | `Threads`        | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
 | `Hash`           | int    | `128`     | Transposition table size in MB (1..4096)                   |
+| `Move Overhead`  | int    | `30`      | Clock reserve in milliseconds (0..5000)                    |
 
 The activation function (ReLU or SCReLU) is auto-detected from the network file header.
 

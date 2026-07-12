@@ -13,13 +13,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SPRT_ELO0: "-30"
-  SPRT_ELO1: "30"
+  SPRT_ELO0: "-20"
+  SPRT_ELO1: "0"
   SPRT_ALPHA: "0.10"
   SPRT_BETA: "0.10"
   SPRT_GAMES_PER_BATCH: "12"
   SPRT_MAX_GAMES: "360"
   SPRT_MOVETIME_MS: "80"
+  SPRT_GAME_TIME_MS: "10000"
+  SPRT_INC_MS: "100"
   SPRT_MAX_PLIES: "220"
   ENGINE_THREADS: "1"
   ENGINE_HASH_MB: "64"
@@ -128,6 +130,8 @@ jobs:
             --games-per-batch "${SPRT_GAMES_PER_BATCH}"
             --max-games "${SPRT_MAX_GAMES}"
             --movetime-ms "${SPRT_MOVETIME_MS}"
+            --game-time-ms "${SPRT_GAME_TIME_MS}"
+            --inc-ms "${SPRT_INC_MS}"
             --max-plies "${SPRT_MAX_PLIES}"
             --threads "${ENGINE_THREADS}"
             --hash-mb "${ENGINE_HASH_MB}"

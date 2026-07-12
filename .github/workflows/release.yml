@@ -85,5 +85,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          # The release SPRT runs in parallel on the tag. Keep artifacts private
+          # until its result has been reviewed and the draft is published.
+          draft: true
           generate_release_notes: true
           files: artifacts/**/*

@@ -6,6 +6,8 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+## [3.0] - 2026-07-12
+
 ### Changed
 
 - Promoted the embedded NNUE from the mature `v3_512` checkpoint `run_20260323T063759Z-600` to the `SYKNNUE7` pairwise-MLP candidate `v7_20260710T055911Z-800`.
@@ -18,7 +20,13 @@ This changelog was reconstructed from the tagged release history and the commits
 - Standardized experiment execution around archived `history.py` `selfplay` and `sprt` runs with mandatory summaries, metadata, and stdout/stderr logs.
 - Moved selfplay ratings and graph generation to consume archived `history.py` selfplay runs only.
 - Reworked the Bullet checkpoint gate to use selfplay-only promotion instead of STS-based ranking.
-- Fixed the release SPRT workflow and bumped the engine version string to `0.2.3`.
+- Fixed the release SPRT workflow and changed the engine version string to `3.0`.
+
+### Fixed
+
+- Added absolute search deadlines and overflow-safe clock budgeting so runaway iterations cannot consume substantially more time than requested.
+- Added a configurable `Move Overhead` reserve for clock-managed games while preserving the full budget for explicit `go movetime` searches.
+- Corrected self-play draw adjudication to stop on an actual third repetition rather than a position where a third repetition could merely be claimed on the next move.
 
 ### Removed
 
@@ -86,7 +94,8 @@ This changelog was reconstructed from the tagged release history and the commits
 - Fixed castling, en passant, capture handling, move legality edge cases, transposition-table scoring issues, and early search stability problems.
 - Fixed cleanup and shutdown behavior around search threads, bot sessions, and Zig `0.16` compatibility.
 
-[Unreleased]: https://github.com/sb2bg/sykora/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/sb2bg/sykora/compare/v3.0...HEAD
+[3.0]: https://github.com/sb2bg/sykora/compare/v0.2.2...v3.0
 [0.2.2]: https://github.com/sb2bg/sykora/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sb2bg/sykora/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/sb2bg/sykora/commits/v0.1.0
