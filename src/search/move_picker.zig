@@ -32,7 +32,7 @@ const SeeAttacker = struct {
     piece_type: piece.Type,
 };
 
-inline fn attackersToSquare(b: board.BitBoard, square: u6, occupied: u64) u64 {
+inline fn attackersToSquare(b: *const board.BitBoard, square: u6, occupied: u64) u64 {
     const white = b.getColorBitboard(.white) & occupied;
     const black = b.getColorBitboard(.black) & occupied;
     const pawns = b.getKindBitboard(.pawn) & occupied;
@@ -62,7 +62,7 @@ inline fn attackersToSquare(b: board.BitBoard, square: u6, occupied: u64) u64 {
     return attackers;
 }
 
-fn leastValuableAttacker(b: board.BitBoard, attackers: u64, color: piece.Color) ?SeeAttacker {
+fn leastValuableAttacker(b: *const board.BitBoard, attackers: u64, color: piece.Color) ?SeeAttacker {
     const own_attackers = attackers & b.getColorBitboard(color);
     if (own_attackers == 0) return null;
 
@@ -81,7 +81,7 @@ fn leastValuableAttacker(b: board.BitBoard, attackers: u64, color: piece.Color) 
 }
 
 fn staticExchangeRec(
-    b: board.BitBoard,
+    b: *const board.BitBoard,
     occupied: u64,
     square: u6,
     side_to_move: piece.Color,
@@ -103,7 +103,7 @@ fn staticExchangeRec(
     return @max(gain, 0);
 }
 
-pub fn staticExchangeEvalPosition(b: board.BitBoard, move: Move) i32 {
+pub fn staticExchangeEvalPosition(b: *const board.BitBoard, move: Move) i32 {
     const us = b.move;
     const them = oppositeColor(us);
     const from_sq = move.from();
@@ -323,7 +323,7 @@ pub const MovePicker = struct {
         const opponent_color = oppositeColor(self.board_ptr.board.move);
 
         for (self.captures.slice(), 0..) |move, i| {
-            const see_score = staticExchangeEvalPosition(self.board_ptr.board, move);
+            const see_score = staticExchangeEvalPosition(&self.board_ptr.board, move);
             var score: i32 = if (see_score >= 0) GOOD_CAPTURE_BASE else BAD_CAPTURE_SCORE;
             score += see_score * SEE_CAPTURE_SCALE;
 

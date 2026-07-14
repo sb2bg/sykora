@@ -758,6 +758,25 @@ pub fn AccumulatorPairT(comptime T: type) type {
 pub const AccumulatorPair = AccumulatorPairT(i16);
 pub const AccumulatorPairWide = AccumulatorPairT(i32);
 
+const AccumulatorRefreshCacheEntry = struct {
+    values: [MAX_HIDDEN_SIZE]i16,
+    color_sets: [2]u64,
+    kind_sets: [6]u64,
+    valid: bool,
+};
+
+pub const AccumulatorRefreshCache = struct {
+    entries: [2][64]AccumulatorRefreshCacheEntry,
+
+    pub fn initInPlace(self: *AccumulatorRefreshCache) void {
+        for (&self.entries) |*perspective_entries| {
+            for (perspective_entries) |*entry| {
+                entry.valid = false;
+            }
+        }
+    }
+};
+
 const SIMD_LANES = std.simd.suggestVectorLength(i16) orelse 8;
 const WeightVec = @Vector(SIMD_LANES, i16);
 const I32Vec = @Vector(SIMD_LANES, i32);
@@ -983,6 +1002,97 @@ pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
     return initAccumulatorsT(i16, net, b);
 }
 
+inline fn perspectiveKingSquareOnBoard(b: *Board, perspective: piece.Color) u8 {
+    const state = &b.board;
+    return switch (perspective) {
+        .white => @intCast(@ctz(state.getColorBitboard(.white) & state.getKindBitboard(.king))),
+        .black => @intCast(@ctz(state.getColorBitboard(.black) & state.getKindBitboard(.king))),
+    };
+}
+
+inline fn saveRefreshCachePosition(
+    entry: *AccumulatorRefreshCacheEntry,
+    b: *Board,
+    values: []const i16,
+) void {
+    @memcpy(entry.values[0..values.len], values);
+    entry.color_sets = b.board.color_sets;
+    entry.kind_sets = b.board.kind_sets;
+    entry.valid = true;
+}
+
+pub fn seedAccumulatorRefreshCache(
+    net: *const Network,
+    b: *Board,
+    acc: *const AccumulatorPair,
+    cache: *AccumulatorRefreshCache,
+) void {
+    if (net.feature_set != .king_buckets_mirrored) return;
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+
+    inline for ([_]piece.Color{ .white, .black }) |perspective| {
+        const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+        const entry = &cache.entries[@intFromEnum(perspective)][king_sq];
+        saveRefreshCachePosition(entry, b, acc.sliceConst(perspective, hidden_size));
+    }
+}
+
+fn refreshPerspectiveAccumulatorCached(
+    net: *const Network,
+    b: *Board,
+    perspective: piece.Color,
+    dest: []i16,
+    cache: *AccumulatorRefreshCache,
+) void {
+    const state = &b.board;
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+    const entry = &cache.entries[@intFromEnum(perspective)][king_sq];
+
+    if (!entry.valid) {
+        initPerspectiveAccumulator(net, b, perspective, dest);
+        saveRefreshCachePosition(entry, b, dest);
+        return;
+    }
+
+    @memcpy(dest, entry.values[0..hidden_size]);
+    inline for ([_]piece.Color{ .white, .black }) |color| {
+        const color_idx: usize = @intFromEnum(color);
+        const old_color_bb = entry.color_sets[color_idx];
+        const new_color_bb = state.getColorBitboard(color);
+
+        inline for ([_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen, .king }) |pt| {
+            const piece_idx: usize = @intFromEnum(pt);
+            const old_set = old_color_bb & entry.kind_sets[piece_idx];
+            const new_set = new_color_bb & state.getKindBitboard(pt);
+
+            var removed = old_set & ~new_set;
+            while (removed != 0) {
+                const sq: u8 = @intCast(@ctz(removed));
+                removed &= removed - 1;
+                applyFeatureSlice(
+                    false,
+                    dest,
+                    perspectiveFeatureWeights(net, perspective, king_sq, sq, pt, color, hidden_size),
+                );
+            }
+
+            var added = new_set & ~old_set;
+            while (added != 0) {
+                const sq: u8 = @intCast(@ctz(added));
+                added &= added - 1;
+                applyFeatureSlice(
+                    true,
+                    dest,
+                    perspectiveFeatureWeights(net, perspective, king_sq, sq, pt, color, hidden_size),
+                );
+            }
+        }
+    }
+
+    saveRefreshCachePosition(entry, b, dest);
+}
+
 /// Full recompute into the i32 reference backend (parity checking only).
 pub fn initAccumulatorsWide(net: *const Network, b: *Board) AccumulatorPairWide {
     return initAccumulatorsT(i32, net, b);
@@ -1096,6 +1206,7 @@ pub fn updateAccumulators(
     is_castling: bool,
     rook_from: ?u8,
     rook_to: ?u8,
+    refresh_cache: ?*AccumulatorRefreshCache,
 ) void {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
     const state = b.board;
@@ -1251,10 +1362,26 @@ pub fn updateAccumulators(
     }
 
     if (refresh_white) {
-        initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
+        if (comptime @TypeOf(result.*) == AccumulatorPair) {
+            if (refresh_cache) |cache| {
+                refreshPerspectiveAccumulatorCached(net, b, .white, result.white[0..hidden_size], cache);
+            } else {
+                initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
+            }
+        } else {
+            initPerspectiveAccumulator(net, b, .white, result.white[0..hidden_size]);
+        }
     }
     if (refresh_black) {
-        initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
+        if (comptime @TypeOf(result.*) == AccumulatorPair) {
+            if (refresh_cache) |cache| {
+                refreshPerspectiveAccumulatorCached(net, b, .black, result.black[0..hidden_size], cache);
+            } else {
+                initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
+            }
+        } else {
+            initPerspectiveAccumulator(net, b, .black, result.black[0..hidden_size]);
+        }
     }
 }
 

@@ -88,6 +88,7 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
             undo.castle_rook_from != null,
             undo.castle_rook_from,
             undo.castle_rook_to,
+            null,
         );
         nnue.updateAccumulators(
             net,
@@ -104,6 +105,7 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
             undo.castle_rook_from != null,
             undo.castle_rook_from,
             undo.castle_rook_to,
+            null,
         );
         const full = nnue.initAccumulators(net, b);
         const matches = std.mem.eql(i16, incremental.white[0..hidden_size], full.white[0..hidden_size]) and

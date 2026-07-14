@@ -32,7 +32,7 @@ inline fn seePieceValue(piece_type: piece.Type) i32 {
     return move_picker_mod.seePieceValue(piece_type);
 }
 
-inline fn staticExchangeEvalPosition(b: board.BitBoard, move: Move) i32 {
+inline fn staticExchangeEvalPosition(b: *const board.BitBoard, move: Move) i32 {
     return move_picker_mod.staticExchangeEvalPosition(b, move);
 }
 
@@ -272,6 +272,18 @@ pub const SearchEngine = struct {
         futile: bool,
     };
 
+    const AccumulatorUpdate = struct {
+        from_sq: u8,
+        to_sq: u8,
+        moved_piece: piece.Type,
+        moved_color: piece.Color,
+        captured_piece: ?piece.Type,
+        capture_sq: ?u8,
+        promotion: ?piece.Type,
+        rook_from: ?u8,
+        rook_to: ?u8,
+    };
+
     board: *Board,
     allocator: std.mem.Allocator,
     stop_search: *std.atomic.Value(bool),
@@ -300,7 +312,10 @@ pub const SearchEngine = struct {
     nnue_scale: i32,
     // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
     acc_stack: ?[]nnue.AccumulatorPair,
+    acc_refresh_cache: ?*nnue.AccumulatorRefreshCache,
     acc_ply: u32,
+    acc_valid: [128]bool,
+    acc_updates: [128]AccumulatorUpdate,
     eval_cache_keys: [EVAL_CACHE_SIZE]u64,
     eval_cache_values: [EVAL_CACHE_SIZE]i32,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
@@ -346,7 +361,10 @@ pub const SearchEngine = struct {
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
             .acc_stack = null,
+            .acc_refresh_cache = null,
             .acc_ply = 0,
+            .acc_valid = [_]bool{false} ** 128,
+            .acc_updates = undefined,
             .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
             .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
@@ -385,38 +403,80 @@ pub const SearchEngine = struct {
             const stack = self.allocator.alloc(nnue.AccumulatorPair, 128) catch return;
             self.acc_stack = stack;
             stack[0] = nnue.initAccumulators(self.nnue_net.?, self.board);
+            if (self.allocator.create(nnue.AccumulatorRefreshCache)) |cache| {
+                cache.initInPlace();
+                nnue.seedAccumulatorRefreshCache(self.nnue_net.?, self.board, &stack[0], cache);
+                self.acc_refresh_cache = cache;
+            } else |_| {}
             self.acc_ply = 0;
+            self.acc_valid = [_]bool{false} ** 128;
+            self.acc_valid[0] = true;
         }
     }
 
     fn deinitAccumulatorStack(self: *Self) void {
+        if (self.acc_refresh_cache) |cache| {
+            self.allocator.destroy(cache);
+            self.acc_refresh_cache = null;
+        }
         if (self.acc_stack) |stack| {
             self.allocator.free(stack);
             self.acc_stack = null;
         }
     }
 
-    /// Update accumulators incrementally after a move.
+    fn materializeCurrentAccumulator(self: *Self) void {
+        const stack = self.acc_stack orelse return;
+        if (self.acc_valid[self.acc_ply]) return;
+
+        std.debug.assert(self.acc_ply > 0);
+        std.debug.assert(self.acc_valid[self.acc_ply - 1]);
+        const update = self.acc_updates[self.acc_ply];
+        nnue.updateAccumulators(
+            self.nnue_net.?,
+            self.board,
+            &stack[self.acc_ply - 1],
+            &stack[self.acc_ply],
+            update.from_sq,
+            update.to_sq,
+            update.moved_piece,
+            update.moved_color,
+            update.captured_piece,
+            update.capture_sq,
+            update.promotion,
+            update.rook_from != null,
+            update.rook_from,
+            update.rook_to,
+            self.acc_refresh_cache,
+        );
+        self.acc_valid[self.acc_ply] = true;
+    }
+
+    /// A child accumulator depends on this position, so make it current before
+    /// mutating the board. Nodes that cut off before this point avoid the work.
+    inline fn prepareAccumulatorForMove(self: *Self) void {
+        if (self.acc_stack != null and !self.acc_valid[self.acc_ply]) {
+            self.materializeCurrentAccumulator();
+        }
+    }
+
+    /// Record an incremental update after a move and defer applying it until
+    /// evaluation or until a searched child needs this accumulator as a base.
     inline fn pushAccumulator(self: *Self, move: Move, undo: Board.Undo) void {
-        if (self.acc_stack) |stack| {
-            const net = self.nnue_net.?;
-            nnue.updateAccumulators(
-                net,
-                self.board,
-                &stack[self.acc_ply],
-                &stack[self.acc_ply + 1],
-                move.from(),
-                move.to(),
-                undo.moved_piece,
-                undo.mover_color,
-                undo.captured_piece,
-                undo.captured_square,
-                move.promotion(),
-                undo.castle_rook_from != null,
-                undo.castle_rook_from,
-                undo.castle_rook_to,
-            );
+        if (self.acc_stack != null) {
             self.acc_ply += 1;
+            self.acc_updates[self.acc_ply] = .{
+                .from_sq = move.from(),
+                .to_sq = move.to(),
+                .moved_piece = undo.moved_piece,
+                .moved_color = undo.mover_color,
+                .captured_piece = undo.captured_piece,
+                .capture_sq = undo.captured_square,
+                .promotion = move.promotion(),
+                .rook_from = undo.castle_rook_from,
+                .rook_to = undo.castle_rook_to,
+            };
+            self.acc_valid[self.acc_ply] = false;
         }
     }
 
@@ -440,14 +500,14 @@ pub const SearchEngine = struct {
         if (self.use_nnue) {
             if (self.nnue_net) |net| {
                 // Use incremental accumulators if available, otherwise full recompute
-                const nn_raw = if (self.acc_stack) |stack|
-                    nnue.evaluateFromAccumulators(
+                const nn_raw = if (self.acc_stack) |stack| blk: {
+                    self.materializeCurrentAccumulator();
+                    break :blk nnue.evaluateFromAccumulators(
                         net,
                         &stack[self.acc_ply],
                         self.board,
-                    )
-                else
-                    nnue.evaluate(net, self.board);
+                    );
+                } else nnue.evaluate(net, self.board);
                 const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
                     score = nn;
@@ -840,6 +900,7 @@ pub const SearchEngine = struct {
             const old_hist_count = self.history_count;
             const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
 
+            self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
             self.previous_move = move;
@@ -1240,7 +1301,7 @@ pub const SearchEngine = struct {
                 const to_file = move.to() % 8;
                 const non_central = to_file <= 2 or to_file >= 5;
                 if ((attacker == .bishop or attacker == .knight) and victim == .pawn and non_central) {
-                    speculative_sac_see = staticExchangeEvalPosition(self.board.board, move);
+                    speculative_sac_see = staticExchangeEvalPosition(&self.board.board, move);
                     speculative_sac_candidate = speculative_sac_see <= -eval.PAWN_VALUE;
                 }
             }
@@ -1273,7 +1334,7 @@ pub const SearchEngine = struct {
             {
                 const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
                 if (!is_tt_move) {
-                    const see_score = staticExchangeEvalPosition(self.board.board, move);
+                    const see_score = staticExchangeEvalPosition(&self.board.board, move);
                     const see_margin = MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
                     if (see_score < -see_margin and !self.moveGivesCheck(move)) {
                         continue;
@@ -1289,6 +1350,7 @@ pub const SearchEngine = struct {
             }
 
             // Make move
+            self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
             self.previous_move = move;
@@ -1660,7 +1722,7 @@ pub const SearchEngine = struct {
                 if (move.promotion() == null) {
                     const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
                     if (!is_tt_move and
-                        staticExchangeEvalPosition(self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP and
+                        staticExchangeEvalPosition(&self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP and
                         !self.moveGivesCheck(move))
                     {
                         continue;
@@ -1669,6 +1731,7 @@ pub const SearchEngine = struct {
             }
 
             // Make move
+            self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
             self.pushAccumulator(move, undo);
 
@@ -1703,7 +1766,7 @@ pub const SearchEngine = struct {
         const opponent_color = oppositeColor(move_color);
 
         for (move_slice, 0..) |move, i| {
-            var score = staticExchangeEvalPosition(self.board.board, move) * SEE_CAPTURE_SCALE;
+            var score = staticExchangeEvalPosition(&self.board.board, move) * SEE_CAPTURE_SCALE;
 
             if (self.board.board.en_passant_square == move.to() and
                 self.board.board.getPieceAt(move.from(), move_color) == .pawn and
