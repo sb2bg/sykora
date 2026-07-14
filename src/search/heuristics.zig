@@ -52,11 +52,13 @@ pub const CounterMoveTable = struct {
     }
 
     pub fn update(self: *CounterMoveTable, previous_move: Move, counter_move: Move) void {
-        self.moves[previous_move.from()][previous_move.to()] = counter_move;
+        const entry = &self.moves[previous_move.from()][previous_move.to()];
+        entry.* = counter_move;
     }
 
     pub fn get(self: *const CounterMoveTable, previous_move: Move) ?Move {
-        const move = self.moves[previous_move.from()][previous_move.to()];
+        const entry = &self.moves[previous_move.from()][previous_move.to()];
+        const move = entry.*;
         if (move.from() == 0 and move.to() == 0) return null;
         return move;
     }
@@ -69,6 +71,9 @@ pub const CounterMoveTable = struct {
 pub const HistoryTable = struct {
     scores: [2][64][64]i32,
 
+    // Keep runtime-selected cells in lvalue context. Reading through chained
+    // value indexing makes Zig 0.15 materialize the entire 16 KiB color row.
+
     pub fn init() HistoryTable {
         return HistoryTable{
             .scores = [_][64][64]i32{[_][64]i32{[_]i32{0} ** 64} ** 64} ** 2,
@@ -78,30 +83,33 @@ pub const HistoryTable = struct {
     pub fn update(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
         const bonus = @as(i32, @intCast(@min(depth * depth, 400)));
-        const current = self.scores[c][move.from()][move.to()];
+        const entry = &self.scores[c][move.from()][move.to()];
+        const current = entry.*;
         const abs_current: i32 = @intCast(@abs(current));
         const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        self.scores[c][move.from()][move.to()] += adjusted_bonus;
-        self.scores[c][move.from()][move.to()] = @max(-16384, @min(16384, self.scores[c][move.from()][move.to()]));
+        entry.* = @max(-16384, @min(16384, current + adjusted_bonus));
     }
 
     pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
         const penalty = @as(i32, @intCast(@min(depth * depth, 400)));
-        const current = self.scores[c][move.from()][move.to()];
+        const entry = &self.scores[c][move.from()][move.to()];
+        const current = entry.*;
         const abs_current: i32 = @intCast(@abs(current));
         const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        self.scores[c][move.from()][move.to()] -= adjusted_penalty;
-        self.scores[c][move.from()][move.to()] = @max(-16384, @min(16384, self.scores[c][move.from()][move.to()]));
+        entry.* = @max(-16384, @min(16384, current - adjusted_penalty));
     }
 
     pub fn get(self: *const HistoryTable, move: Move) i32 {
-        return self.scores[0][move.from()][move.to()] + self.scores[1][move.from()][move.to()];
+        const white_entry = &self.scores[0][move.from()][move.to()];
+        const black_entry = &self.scores[1][move.from()][move.to()];
+        return white_entry.* + black_entry.*;
     }
 
     pub fn getForColor(self: *const HistoryTable, move: Move, color: piece.Color) i32 {
         const c: usize = @intFromEnum(color);
-        return self.scores[c][move.from()][move.to()];
+        const entry = &self.scores[c][move.from()][move.to()];
+        return entry.*;
     }
 
     pub fn clear(self: *HistoryTable) void {
@@ -112,7 +120,8 @@ pub const HistoryTable = struct {
         for (0..2) |c| {
             for (0..64) |from| {
                 for (0..64) |to| {
-                    self.scores[c][from][to] = @divTrunc(self.scores[c][from][to], 2);
+                    const entry = &self.scores[c][from][to];
+                    entry.* = @divTrunc(entry.*, 2);
                 }
             }
         }
@@ -167,11 +176,14 @@ pub const ContinuationHistoryTable = struct {
 
     pub fn get(self: *const ContinuationHistoryTable, prev_key: ?u16, prev2_key: ?u16, current_key: u16) i32 {
         var score: i32 = 0;
+        // Explicit cell pointers likewise avoid materializing 1.5 KiB rows.
         if (prev_key) |key| {
-            score += self.prev_scores[key][current_key];
+            const entry = &self.prev_scores[key][current_key];
+            score += entry.*;
         }
         if (prev2_key) |key| {
-            score += self.prev2_scores[key][current_key];
+            const entry = &self.prev2_scores[key][current_key];
+            score += entry.*;
         }
         return score;
     }
@@ -179,8 +191,10 @@ pub const ContinuationHistoryTable = struct {
     pub fn age(self: *ContinuationHistoryTable) void {
         for (0..CONTINUATION_KEY_COUNT) |prev| {
             for (0..CONTINUATION_KEY_COUNT) |curr| {
-                self.prev_scores[prev][curr] = @intCast(@divTrunc(self.prev_scores[prev][curr], 2));
-                self.prev2_scores[prev][curr] = @intCast(@divTrunc(self.prev2_scores[prev][curr], 2));
+                const prev_entry = &self.prev_scores[prev][curr];
+                const prev2_entry = &self.prev2_scores[prev][curr];
+                prev_entry.* = @intCast(@divTrunc(prev_entry.*, 2));
+                prev2_entry.* = @intCast(@divTrunc(prev2_entry.*, 2));
             }
         }
     }
