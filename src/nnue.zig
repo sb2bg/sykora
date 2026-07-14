@@ -1,4 +1,5 @@
 const std = @import("std");
+const nnue_dot = @import("nnue_dot.zig");
 const board = @import("bitboard.zig");
 const Board = board.Board;
 const piece = @import("piece.zig");
@@ -74,6 +75,7 @@ pub const Network = struct {
     output_weights: ?[]i16, // V6: [O * 2 * H], bucket-major
     l1_biases: ?[]i32, // V7: [O, D1]
     l1_weights: ?[]i8, // V7: [O, H, D1]
+    l1_weights_grouped: ?[]i8, // V7 registered fast path: [O, H/4, D1, 4]
     l2_biases: ?[]i32, // V7: [O, D2]
     l2_weights: ?[]i8, // V7: [O, 2*D1, D2]
     v7_output_biases: ?[]i32, // V7: [O]
@@ -86,6 +88,7 @@ pub const Network = struct {
         if (self.output_weights) |values| self.allocator.free(values);
         if (self.l1_biases) |values| self.allocator.free(values);
         if (self.l1_weights) |values| self.allocator.free(values);
+        if (self.l1_weights_grouped) |values| self.allocator.free(values);
         if (self.l2_biases) |values| self.allocator.free(values);
         if (self.l2_weights) |values| self.allocator.free(values);
         if (self.v7_output_biases) |values| self.allocator.free(values);
@@ -330,6 +333,7 @@ fn loadFromBytesV6(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         .output_weights = output_weights,
         .l1_biases = null,
         .l1_weights = null,
+        .l1_weights_grouped = null,
         .l2_biases = null,
         .l2_weights = null,
         .v7_output_biases = null,
@@ -570,6 +574,8 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     errdefer allocator.free(l1_biases);
     const l1_weights = try allocV7SectionInts(i8, allocator, data, l1_weight_section);
     errdefer allocator.free(l1_weights);
+    var l1_weights_grouped: ?[]i8 = null;
+    errdefer if (l1_weights_grouped) |values| allocator.free(values);
     const l2_biases = try allocV7SectionInts(i32, allocator, data, l2_bias_section);
     errdefer allocator.free(l2_biases);
     const l2_weights = try allocV7SectionInts(i8, allocator, data, l2_weight_section);
@@ -582,6 +588,7 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     // The SIMD registered tail accumulates into i32 lanes. Reject otherwise
     // structurally valid files whose biases could overflow those lanes.
     if (dense1_size == 16 and dense2_size == 32) {
+        if (hidden_size % 4 != 0) return error.InvalidNetwork;
         const l1_margin = @as(i64, hidden_size) * 127 * 127;
         for (l1_biases) |bias| {
             const value: i64 = bias;
@@ -594,6 +601,25 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
             const value: i64 = bias;
             if (value < std.math.minInt(i32) + l2_margin or value > std.math.maxInt(i32) - l2_margin) {
                 return error.InvalidNetwork;
+            }
+        }
+
+        const grouped = allocator.alloc(i8, l1_weights.len) catch return error.OutOfMemory;
+        l1_weights_grouped = grouped;
+        const output_buckets: usize = output_bucket_count_u16;
+        const hidden: usize = hidden_size;
+        const dense1: usize = dense1_size;
+        const groups = hidden / 4;
+        for (0..output_buckets) |bucket| {
+            for (0..groups) |group| {
+                for (0..dense1) |output| {
+                    for (0..4) |lane| {
+                        const input = group * 4 + lane;
+                        const source = (bucket * hidden + input) * dense1 + output;
+                        const destination = ((bucket * groups + group) * dense1 + output) * 4 + lane;
+                        grouped[destination] = l1_weights[source];
+                    }
+                }
             }
         }
     }
@@ -622,6 +648,7 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         .output_weights = null,
         .l1_biases = l1_biases,
         .l1_weights = l1_weights,
+        .l1_weights_grouped = l1_weights_grouped,
         .l2_biases = l2_biases,
         .l2_weights = l2_weights,
         .v7_output_biases = output_biases,
@@ -1276,20 +1303,20 @@ fn evaluateLinearFromAccumulators(
 }
 
 const V7Dense1Vec = @Vector(16, i32);
-const V7Dense1WeightVec = @Vector(16, i8);
 const V7Dense2Vec = @Vector(32, i32);
 const V7Dense2WeightVec = @Vector(32, i8);
+const PoolVec = @Vector(SIMD_LANES, u8);
 
 fn evaluatePairwiseMlpTail16x32(
     net: *const Network,
-    pooled: []const i32,
+    pooled: []const u8,
     bucket: usize,
 ) i32 {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
     const q: i64 = net.q;
     const pool_quant: i64 = net.pool_quant;
     const l1_biases = net.l1_biases orelse unreachable;
-    const l1_weights = net.l1_weights orelse unreachable;
+    const l1_weights = net.l1_weights_grouped orelse unreachable;
     const l2_biases = net.l2_biases orelse unreachable;
     const l2_weights = net.l2_weights orelse unreachable;
     const output_biases = net.v7_output_biases orelse unreachable;
@@ -1297,11 +1324,16 @@ fn evaluatePairwiseMlpTail16x32(
 
     const l1_bias_ptr: *align(1) const V7Dense1Vec = @ptrCast(&l1_biases[bucket * 16]);
     var l1_sums = l1_bias_ptr.*;
-    for (0..hidden_size) |input| {
-        const weight_index = (bucket * hidden_size + input) * 16;
-        const weight_ptr: *align(1) const V7Dense1WeightVec = @ptrCast(&l1_weights[weight_index]);
-        const input_vec: V7Dense1Vec = @splat(pooled[input]);
-        l1_sums += input_vec * @as(V7Dense1Vec, @intCast(weight_ptr.*));
+    const groups = hidden_size / 4;
+    for (0..groups) |group| {
+        const inputs = nnue_dot.splatGroup(@ptrCast(&pooled[group * 4]));
+        var output: usize = 0;
+        while (output < 16) : (output += nnue_dot.output_lanes) {
+            const weight_index = ((bucket * groups + group) * 16 + output) * 4;
+            const weight_ptr: *align(1) const nnue_dot.I8Vec = @ptrCast(&l1_weights[weight_index]);
+            const sum_ptr: *align(1) nnue_dot.I32Vec = @ptrCast(&l1_sums[output]);
+            sum_ptr.* = nnue_dot.dotAdd(sum_ptr.*, inputs, weight_ptr.*);
+        }
     }
 
     var dense1_activated: [32]i32 = undefined;
@@ -1352,7 +1384,7 @@ fn evaluatePairwiseMlpFromAccumulators(
     const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
     const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
     const AccVec = AccVecOf(@TypeOf(us_acc));
-    var pooled: [MAX_HIDDEN_SIZE]i32 = undefined;
+    var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
     var index: usize = 0;
     const pool_divisor: I32Vec = @splat(512);
     while (index + SIMD_LANES <= half) : (index += SIMD_LANES) {
@@ -1360,22 +1392,22 @@ fn evaluatePairwiseMlpFromAccumulators(
         const us_b_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index + half]);
         const them_a_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index]);
         const them_b_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index + half]);
-        const us_output_ptr: *align(1) I32Vec = @ptrCast(&pooled[index]);
-        const them_output_ptr: *align(1) I32Vec = @ptrCast(&pooled[index + half]);
+        const us_output_ptr: *align(1) PoolVec = @ptrCast(&pooled[index]);
+        const them_output_ptr: *align(1) PoolVec = @ptrCast(&pooled[index + half]);
         const us_a = clampVecToActivationRange(@intCast(us_a_ptr.*), net.q0);
         const us_b = clampVecToActivationRange(@intCast(us_b_ptr.*), net.q0);
         const them_a = clampVecToActivationRange(@intCast(them_a_ptr.*), net.q0);
         const them_b = clampVecToActivationRange(@intCast(them_b_ptr.*), net.q0);
-        us_output_ptr.* = @divTrunc(us_a * us_b, pool_divisor);
-        them_output_ptr.* = @divTrunc(them_a * them_b, pool_divisor);
+        us_output_ptr.* = @intCast(@divTrunc(us_a * us_b, pool_divisor));
+        them_output_ptr.* = @intCast(@divTrunc(them_a * them_b, pool_divisor));
     }
     while (index < half) : (index += 1) {
         const us_a = clampToActivationRange(us_acc[index], net.q0);
         const us_b = clampToActivationRange(us_acc[index + half], net.q0);
         const them_a = clampToActivationRange(them_acc[index], net.q0);
         const them_b = clampToActivationRange(them_acc[index + half], net.q0);
-        pooled[index] = @divTrunc(us_a * us_b, 512);
-        pooled[index + half] = @divTrunc(them_a * them_b, 512);
+        pooled[index] = @intCast(@divTrunc(us_a * us_b, 512));
+        pooled[index + half] = @intCast(@divTrunc(them_a * them_b, 512));
     }
 
     if (dense1_size == 16 and dense2_size == 32) {
