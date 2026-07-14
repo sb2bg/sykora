@@ -72,6 +72,7 @@ pub const SearchResult = struct {
 
 const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
+const ROOT_MOVE_BUCKETS = 64 * 64;
 const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
 const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
@@ -145,6 +146,42 @@ fn calculateTimeBudgetFor(options: SearchOptions, side: piece.Color, fullmove_nu
     hard = @max(hard, soft);
 
     return .{ .soft_ms = soft, .hard_ms = hard };
+}
+
+inline fn rootMoveBucket(move: Move) usize {
+    return @as(usize, move.from()) * 64 + @as(usize, move.to());
+}
+
+fn scalePermille(value: u64, factor: u64) u64 {
+    const scaled = (@as(u128, value) * @as(u128, factor)) / 1000;
+    return @intCast(@min(scaled, std.math.maxInt(u64)));
+}
+
+fn adaptiveSoftLimit(
+    budget: TimeBudget,
+    depth: u32,
+    best_move_nodes: usize,
+    iteration_nodes: usize,
+    best_move_stability: u32,
+    score_delta: ?u32,
+) u64 {
+    if (depth < 5 or iteration_nodes == 0) return budget.soft_ms;
+
+    const node_share: u64 = @intCast(@min(
+        (@as(u128, best_move_nodes) * 1000) / @as(u128, iteration_nodes),
+        1000,
+    ));
+    const node_factor = std.math.clamp(((1480 - node_share) * 1680) / 1000, 500, 2000);
+    const stable_plies = @min(best_move_stability, 14);
+    const stability_factor = @max(@as(u64, 700), 1100 - @as(u64, stable_plies) * 30);
+
+    var factor = (node_factor * stability_factor) / 1000;
+    if (score_delta) |delta| {
+        if (delta >= 25) factor = (factor * 1100) / 1000;
+    }
+    factor = std.math.clamp(factor, 650, 1800);
+
+    return @min(scalePermille(budget.soft_ms, factor), budget.hard_ms);
 }
 
 // Adjust mate score for TT storage (store relative to root, not current ply)
@@ -289,6 +326,7 @@ pub const SearchEngine = struct {
     stop_search: *std.atomic.Value(bool),
     uci_output: ?std.fs.File,
     root_best_move: Move,
+    root_move_nodes: [ROOT_MOVE_BUCKETS]usize,
 
     // Search state
     tt: *TranspositionTable,
@@ -343,6 +381,7 @@ pub const SearchEngine = struct {
             .stop_search = stop_search,
             .uci_output = null,
             .root_best_move = Move.init(0, 0, null),
+            .root_move_nodes = [_]usize{0} ** ROOT_MOVE_BUCKETS,
             .tt = tt,
             .killer_moves = KillerMoves.init(),
             .history = HistoryTable.init(),
@@ -633,6 +672,9 @@ pub const SearchEngine = struct {
         self.root_best_move = best_move;
         const max_depth: u32 = if (options.depth) |d| @intCast(d) else 64;
         var completed_depth: u32 = 0;
+        var previous_completed_move: ?Move = null;
+        var previous_completed_score: ?i32 = null;
+        var best_move_stability: u32 = 0;
 
         // Iterative deepening
         var depth: u32 = options.start_depth;
@@ -640,6 +682,8 @@ pub const SearchEngine = struct {
             if (self.stop_search.load(.monotonic)) break;
 
             const iter_start = std.time.Instant.now() catch unreachable;
+            const iteration_nodes_before = self.nodes_searched;
+            self.root_move_nodes = [_]usize{0} ** ROOT_MOVE_BUCKETS;
 
             // Aspiration windows - narrow search window around previous score
             var asp_alpha: i32 = -INF;
@@ -679,8 +723,23 @@ pub const SearchEngine = struct {
             best_score = score;
             completed_depth = depth;
 
+            if (previous_completed_move) |previous_move| {
+                if (movesEqual(best_move, previous_move)) {
+                    best_move_stability +|= 1;
+                } else {
+                    best_move_stability = 0;
+                }
+            }
+            const score_delta: ?u32 = if (previous_completed_score) |previous_score|
+                @abs(score - previous_score)
+            else
+                null;
+            previous_completed_move = best_move;
+            previous_completed_score = score;
+
             const iter_time = elapsedMs(iter_start);
             const total_time = elapsedMs(start_time);
+            const iteration_nodes = self.nodes_searched - iteration_nodes_before;
 
             // UCI info output at every depth
             if (self.uci_output != null) {
@@ -701,7 +760,18 @@ pub const SearchEngine = struct {
                 if (time_budget) |budget| {
                     const total_time_ms: u64 = @intCast(@max(total_time, 0));
                     const iter_time_ms: u64 = @intCast(@max(iter_time, 0));
-                    if (total_time_ms >= budget.soft_ms or total_time_ms +| (iter_time_ms *| 2) >= budget.soft_ms) {
+                    const soft_limit = if (options.move_time == null)
+                        adaptiveSoftLimit(
+                            budget,
+                            depth,
+                            self.root_move_nodes[rootMoveBucket(best_move)],
+                            iteration_nodes,
+                            best_move_stability,
+                            score_delta,
+                        )
+                    else
+                        budget.soft_ms;
+                    if (total_time_ms >= soft_limit or total_time_ms +| (iter_time_ms *| 2) >= soft_limit) {
                         break;
                     }
                 }
@@ -1279,6 +1349,7 @@ pub const SearchEngine = struct {
 
         while (move_picker.next()) |move| {
             const old_previous = self.previous_move;
+            const root_nodes_before = if (ply == 0) self.nodes_searched else 0;
 
             const move_color = self.board.board.move;
             const opponent_color = oppositeColor(move_color);
@@ -1451,6 +1522,10 @@ pub const SearchEngine = struct {
                 self.continuation_keys[ply] = old_continuation_key;
             }
             self.history_count = old_hist_count; // Restore history count
+
+            if (ply == 0) {
+                self.root_move_nodes[rootMoveBucket(move)] +|= self.nodes_searched - root_nodes_before;
+            }
 
             // Discourage speculative non-checking minor-piece sacs for pawns unless
             // search already proves concrete compensation.
@@ -1859,4 +1934,19 @@ test "time budget stays inside usable clock and preserves fixed movetime" {
         .move_overhead = 0,
     }, .white, 1).?;
     try std.testing.expect(huge.soft_ms <= huge.hard_ms);
+}
+
+test "adaptive soft limit spends more on unstable roots and less on stable roots" {
+    const budget = TimeBudget{ .soft_ms = 100, .hard_ms = 400 };
+    try std.testing.expectEqual(@as(u64, 100), adaptiveSoftLimit(budget, 4, 300, 1000, 0, 40));
+
+    const unstable = adaptiveSoftLimit(budget, 8, 300, 1000, 0, 40);
+    const stable = adaptiveSoftLimit(budget, 8, 900, 1000, 14, 0);
+    try std.testing.expect(unstable > budget.soft_ms);
+    try std.testing.expect(stable < budget.soft_ms);
+    try std.testing.expect(unstable <= budget.hard_ms);
+    try std.testing.expect(stable <= budget.hard_ms);
+
+    const capped = adaptiveSoftLimit(.{ .soft_ms = 500, .hard_ms = 600 }, 8, 300, 1000, 0, 40);
+    try std.testing.expectEqual(@as(u64, 600), capped);
 }
