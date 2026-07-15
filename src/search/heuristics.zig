@@ -80,9 +80,9 @@ pub const HistoryTable = struct {
         };
     }
 
-    pub fn update(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
+    pub fn update(self: *HistoryTable, move: Move, depth: u32, color: piece.Color, max_bonus: u32) void {
         const c: usize = @intFromEnum(color);
-        const bonus = @as(i32, @intCast(@min(depth * depth, 400)));
+        const bonus = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
         const current = entry.*;
         const abs_current: i32 = @intCast(@abs(current));
@@ -90,9 +90,9 @@ pub const HistoryTable = struct {
         entry.* = @max(-16384, @min(16384, current + adjusted_bonus));
     }
 
-    pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color) void {
+    pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color, max_bonus: u32) void {
         const c: usize = @intFromEnum(color);
-        const penalty = @as(i32, @intCast(@min(depth * depth, 400)));
+        const penalty = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
         const current = entry.*;
         const abs_current: i32 = @intCast(@abs(current));
@@ -148,8 +148,9 @@ pub const ContinuationHistoryTable = struct {
         prev2_key: ?u16,
         current_key: u16,
         depth: u32,
+        max_bonus: u32,
     ) void {
-        const bonus = @as(i32, @intCast(@min(depth * depth, 400)));
+        const bonus = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         if (prev_key) |key| {
             updateCell(&self.prev_scores[key][current_key], bonus);
         }
@@ -164,8 +165,9 @@ pub const ContinuationHistoryTable = struct {
         prev2_key: ?u16,
         current_key: u16,
         depth: u32,
+        max_bonus: u32,
     ) void {
-        const penalty = @as(i32, @intCast(@min(depth * depth, 400)));
+        const penalty = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         if (prev_key) |key| {
             penalizeCell(&self.prev_scores[key][current_key], penalty);
         }

@@ -73,6 +73,32 @@ pub fn registerOptions(uci: *Uci) !void {
         .on_changed = handleMoveOverheadChange,
         .context = uci,
     });
+
+    // OpenBench parameter names must be single whitespace-free tokens. Scale
+    // options are fixed-point integers where 100 represents logical 1.00.
+    try registerSpin(uci, "LMRScale", "100", 50, 200, handleLmrScaleChange);
+    try registerSpin(uci, "LMRHistoryScale", "100", 0, 300, handleLmrHistoryScaleChange);
+    try registerSpin(uci, "LMPMoveScale", "100", 50, 200, handleLmpMoveScaleChange);
+    try registerSpin(uci, "HistoryMaxBonus", "400", 50, 1600, handleHistoryMaxBonusChange);
+}
+
+fn registerSpin(
+    uci: *Uci,
+    name: []const u8,
+    default_value: []const u8,
+    min_value: i32,
+    max_value: i32,
+    on_changed: *const fn (*Uci, []const u8) UciError!void,
+) !void {
+    try uci.options.items.append(uci.allocator, Option{
+        .name = name,
+        .type = .spin,
+        .default_value = default_value,
+        .min_value = min_value,
+        .max_value = max_value,
+        .on_changed = on_changed,
+        .context = uci,
+    });
 }
 
 pub fn handleLogFileChange(self: *Uci, value: []const u8) UciError!void {
@@ -178,4 +204,26 @@ pub fn handleHashChange(self: *Uci, value: []const u8) UciError!void {
     }
     self.hash_size_mb = parsed;
     self.tt.resize(parsed) catch return UciError.OutOfMemory;
+}
+
+fn parseTuningInt(value: []const u8, min_value: i32, max_value: i32) UciError!i32 {
+    const parsed = std.fmt.parseInt(i32, value, 10) catch return UciError.InvalidArgument;
+    if (parsed < min_value or parsed > max_value) return UciError.InvalidArgument;
+    return parsed;
+}
+
+pub fn handleLmrScaleChange(self: *Uci, value: []const u8) UciError!void {
+    self.search_tuning.lmr_scale_pct = try parseTuningInt(value, 50, 200);
+}
+
+pub fn handleLmrHistoryScaleChange(self: *Uci, value: []const u8) UciError!void {
+    self.search_tuning.lmr_history_scale_pct = try parseTuningInt(value, 0, 300);
+}
+
+pub fn handleLmpMoveScaleChange(self: *Uci, value: []const u8) UciError!void {
+    self.search_tuning.lmp_move_scale_pct = try parseTuningInt(value, 50, 200);
+}
+
+pub fn handleHistoryMaxBonusChange(self: *Uci, value: []const u8) UciError!void {
+    self.search_tuning.history_max_bonus = @intCast(try parseTuningInt(value, 50, 1600));
 }

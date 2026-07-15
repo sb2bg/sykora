@@ -14,6 +14,11 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const openbench_exe = b.option(
+        []const u8,
+        "openbench-exe",
+        "Install an OpenBench-named executable at the selected prefix",
+    );
 
     const exe = b.addExecutable(.{
         .name = "sykora",
@@ -27,7 +32,16 @@ pub fn build(b: *std.Build) void {
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
-    b.installArtifact(exe);
+    if (openbench_exe) |requested_name| {
+        const output_name = if (target.result.os.tag == .windows and !std.mem.endsWith(u8, requested_name, ".exe"))
+            b.fmt("{s}.exe", .{requested_name})
+        else
+            requested_name;
+        const install_openbench = b.addInstallFileWithDir(exe.getEmittedBin(), .prefix, output_name);
+        b.getInstallStep().dependOn(&install_openbench.step);
+    } else {
+        b.installArtifact(exe);
+    }
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish

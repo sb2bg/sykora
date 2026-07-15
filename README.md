@@ -128,12 +128,13 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 </details>
 
 <details>
-<summary><b>Tooling</b>: perft, NPS, STS, SPRT, ratings, NNUE pipelines</summary>
+<summary><b>Tooling</b>: perft, NPS, STS, SPRT, OpenBench, ratings, NNUE pipelines</summary>
 
 - Perft and movegen shell tests (`utils/test`).
 - NPS benchmarking (`utils/bench/nps.py`).
 - STS runner (`utils/sts/sts.py`).
 - Engine-vs-engine runners (`utils/match`, used internally by `utils/history`).
+- OpenBench build, benchmark, SPSA input, and instance scaffolding (`utils/openbench`).
 - Long-term archived experiment history, SPRT, and ratings workflow (`utils/history`).
 - NNUE data prep/training/export pipelines (`utils/nnue`, `utils/data`).
 
@@ -151,6 +152,10 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 | `Threads`        | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
 | `Hash`           | int    | `128`     | Transposition table size in MB (1..4096)                   |
 | `Move Overhead`  | int    | `30`      | Clock reserve in milliseconds (0..5000)                    |
+| `LMRScale`       | int    | `100`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
+| `LMRHistoryScale`| int    | `100`     | Fixed-point LMR history influence (100 = 1.00)             |
+| `LMPMoveScale`   | int    | `100`     | Fixed-point LMP move-count scale (100 = 1.00)              |
+| `HistoryMaxBonus`| int    | `400`     | Maximum quiet/continuation history update                  |
 
 The activation function (ReLU or SCReLU) is auto-detected from the network file header.
 
@@ -191,6 +196,18 @@ Run directly, or via the build system:
 ./zig-out/bin/sykora
 zig build run -Doptimize=ReleaseFast
 ```
+
+For OpenBench, the repository also implements its `EXE=` Makefile and
+deterministic CLI benchmark contracts:
+
+```bash
+make EXE=sykora-openbench
+./sykora-openbench bench
+python utils/openbench/validate.py ./sykora-openbench
+```
+
+See [`utils/openbench/README.md`](utils/openbench/README.md) for instance and
+SPSA setup.
 
 ## Testing
 

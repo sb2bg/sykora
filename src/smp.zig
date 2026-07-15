@@ -87,6 +87,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         self.nnue_scale,
     ) catch return UciError.OutOfMemory;
     defer search_engine.deinit();
+    search_engine.tuning = self.search_tuning;
 
     search_engine.uci_output = self.stdout;
     if (prior_count > 0) {
@@ -156,6 +157,7 @@ fn helperSearch(
         return;
     };
     defer search_engine.deinit();
+    search_engine.tuning = self.search_tuning;
 
     search_engine.uci_output = null;
     if (prior_count > 0) {

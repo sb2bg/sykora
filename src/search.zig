@@ -70,6 +70,16 @@ pub const SearchResult = struct {
     depth: u32,
 };
 
+/// Smooth search-shape controls exposed through UCI for OpenBench tuning.
+/// Percentage fields are fixed-point integers where 100 represents 1.00.
+/// Defaults preserve the historical search behavior.
+pub const SearchTuning = struct {
+    lmr_scale_pct: i32 = 100,
+    lmr_history_scale_pct: i32 = 100,
+    lmp_move_scale_pct: i32 = 100,
+    history_max_bonus: u32 = 400,
+};
+
 const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
 const ROOT_MOVE_BUCKETS = 64 * 64;
@@ -210,14 +220,17 @@ inline fn isPurePawnEndgame(b: board.BitBoard) bool {
     return b.occupied() == (kings | pawns);
 }
 
-inline fn lmpQuietMoveLimit(depth: u32) u32 {
-    return switch (depth) {
+inline fn lmpQuietMoveLimit(depth: u32, scale_pct: i32) u32 {
+    const base: u32 = switch (depth) {
         0 => 0,
         1 => 5,
         2 => 10,
         3 => 16,
         else => std.math.maxInt(u32),
     };
+    if (base == std.math.maxInt(u32)) return base;
+    const scaled = @divTrunc(@as(i64, base) * @as(i64, scale_pct), 100);
+    return @intCast(@max(scaled, 0));
 }
 
 inline fn addLmpQuietMoveBonus(limit: u32, bonus: u32) u32 {
@@ -235,14 +248,13 @@ inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
     return 60 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 4;
 }
 
-// Late Move Reduction parameters
+// Pre-computed fixed-point LMR table. Keeping two decimal places lets the
+// runtime scale option make useful sub-integer changes before final rounding.
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_FULL_DEPTH_MOVES: u32 = 4;
-
-// Pre-computed LMR reduction table: lmr_table[depth][moveIndex] = ln(depth) * ln(moveIndex) / 2.0
 const LMR_TABLE_MAX_DEPTH = 64;
 const LMR_TABLE_MAX_MOVES = 64;
-const lmr_table: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
+const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
     @setEvalBranchQuota(10000);
     var table: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = undefined;
     for (0..LMR_TABLE_MAX_DEPTH) |d| {
@@ -252,7 +264,7 @@ const lmr_table: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
             } else {
                 const ln_d = @log(@as(f64, @floatFromInt(d)));
                 const ln_m = @log(@as(f64, @floatFromInt(m)));
-                const val = ln_d * ln_m / 2.0;
+                const val = ln_d * ln_m * 50.0;
                 table[d][m] = @intFromFloat(@max(val, 0.0));
             }
         }
@@ -260,13 +272,13 @@ const lmr_table: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
     break :blk table;
 };
 
-// Late Move Pruning parameters
 const LMP_MAX_DEPTH: u32 = 3;
+const LMP_IMPROVING_BONUS: u32 = 2;
 
-// Null move pruning parameters
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
 const NULL_MOVE_REDUCTION: u32 = 3;
-const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8; // Verify at deeper depths
+const NULL_MOVE_DEEP_DEPTH: u32 = 6;
+const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
 const NULL_MOVE_STATIC_EVAL_MARGIN: i32 = 80;
 const SINGULAR_MIN_DEPTH: u32 = 8;
 const SINGULAR_REDUCTION: u32 = 2;
@@ -348,6 +360,7 @@ pub const SearchEngine = struct {
     nnue_net: ?*const nnue.Network,
     nnue_blend: i32,
     nnue_scale: i32,
+    tuning: SearchTuning,
     // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
     acc_stack: ?[]nnue.AccumulatorPair,
     acc_refresh_cache: ?*nnue.AccumulatorRefreshCache,
@@ -399,6 +412,7 @@ pub const SearchEngine = struct {
             .nnue_net = nnue_net,
             .nnue_blend = nnue_blend,
             .nnue_scale = nnue_scale,
+            .tuning = .{},
             .acc_stack = null,
             .acc_refresh_cache = null,
             .acc_ply = 0,
@@ -1128,7 +1142,7 @@ pub const SearchEngine = struct {
         }
 
         var reduction: u32 = NULL_MOVE_REDUCTION;
-        if (search_depth > 6) reduction += 1;
+        if (search_depth > NULL_MOVE_DEEP_DEPTH) reduction += 1;
         if (static_eval - beta_adj > 200) reduction += 1;
         reduction = @min(reduction, search_depth - 1);
 
@@ -1164,12 +1178,12 @@ pub const SearchEngine = struct {
         quiets_tried: []const Move,
     ) void {
         self.killer_moves.add(move, ply);
-        self.history.update(move, search_depth, color);
+        self.history.update(move, search_depth, color, self.tuning.history_max_bonus);
 
         if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
             const ctx = self.continuationContext(ply);
             const best_key = continuationKey(color, piece_type, move.to());
-            self.continuation_history.update(ctx.prev, ctx.prev2, best_key, search_depth);
+            self.continuation_history.update(ctx.prev, ctx.prev2, best_key, search_depth, self.tuning.history_max_bonus);
 
             for (quiets_tried) |quiet| {
                 if ((quiet.from() != move.from() or quiet.to() != move.to()) and
@@ -1177,7 +1191,7 @@ pub const SearchEngine = struct {
                 {
                     const quiet_piece = self.board.board.getPieceAt(quiet.from(), color).?;
                     const quiet_key = continuationKey(color, quiet_piece, quiet.to());
-                    self.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, search_depth);
+                    self.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, search_depth, self.tuning.history_max_bonus);
                 }
             }
         }
@@ -1188,7 +1202,7 @@ pub const SearchEngine = struct {
 
         for (quiets_tried) |quiet| {
             if (quiet.from() != move.from() or quiet.to() != move.to()) {
-                self.history.penalize(quiet, search_depth, color);
+                self.history.penalize(quiet, search_depth, color, self.tuning.history_max_bonus);
             }
         }
     }
@@ -1379,8 +1393,11 @@ pub const SearchEngine = struct {
 
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
-                const improving_lmp_bonus: u32 = if (improving) 2 else 0;
-                const quiet_lmp_limit = addLmpQuietMoveBonus(lmpQuietMoveLimit(search_depth), improving_lmp_bonus);
+                const improving_lmp_bonus: u32 = if (improving) LMP_IMPROVING_BONUS else 0;
+                const quiet_lmp_limit = addLmpQuietMoveBonus(
+                    lmpQuietMoveLimit(search_depth, self.tuning.lmp_move_scale_pct),
+                    improving_lmp_bonus,
+                );
 
                 // Late Move Pruning (LMP): at shallow non-PV nodes, trim low-history late quiets.
                 if (!is_pv_node and
@@ -1462,11 +1479,17 @@ pub const SearchEngine = struct {
                 const move_number = moves_searched + 1;
                 const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
                 const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
-                var reduction: i32 = lmr_table[d_idx][m_idx];
+                var reduction: i32 = @intCast(@divTrunc(
+                    @as(i64, lmr_table_x100[d_idx][m_idx]) * @as(i64, self.tuning.lmr_scale_pct),
+                    10_000,
+                ));
 
                 // History modulation: good history reduces less, bad history reduces more
                 const hist_score = self.quietHeuristicScore(move, color, ply);
-                reduction -= @divTrunc(hist_score, 8192);
+                reduction -= @intCast(@divTrunc(
+                    @as(i64, hist_score) * @as(i64, self.tuning.lmr_history_scale_pct),
+                    819_200,
+                ));
 
                 // Killer and counter moves get reduced less
                 const is_killer = self.killer_moves.isKiller(move, ply);
