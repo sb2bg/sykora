@@ -5,6 +5,8 @@ const MoveList = board.MoveList;
 const piece = @import("../piece.zig");
 const eval = @import("../evaluation.zig");
 const heuristics = @import("heuristics.zig");
+const capture_history_mod = @import("capture_history.zig");
+const CaptureHistory = capture_history_mod.CaptureHistory;
 const ContinuationHistoryTable = heuristics.ContinuationHistoryTable;
 const HistoryTable = heuristics.HistoryTable;
 const MAX_KILLER_MOVES = heuristics.MAX_KILLER_MOVES;
@@ -171,6 +173,7 @@ pub const MovePicker = struct {
     killer_moves: *const [MAX_KILLER_MOVES]Move,
     counter_move: ?Move,
     history: *const HistoryTable,
+    capture_history: *const CaptureHistory,
     continuation: *const ContinuationHistoryTable,
     prev_continuation_key: ?u16,
     prev2_continuation_key: ?u16,
@@ -181,6 +184,7 @@ pub const MovePicker = struct {
     bad_captures: MoveList,
 
     capture_scores: [256]i32,
+    capture_is_good: [256]bool,
     quiet_scores: [256]i32,
 
     capture_idx: usize,
@@ -194,6 +198,7 @@ pub const MovePicker = struct {
         killer_moves: *const [MAX_KILLER_MOVES]Move,
         counter_move: ?Move,
         history: *const HistoryTable,
+        capture_history: *const CaptureHistory,
         continuation: *const ContinuationHistoryTable,
         prev_continuation_key: ?u16,
         prev2_continuation_key: ?u16,
@@ -206,6 +211,7 @@ pub const MovePicker = struct {
             .killer_moves = killer_moves,
             .counter_move = counter_move,
             .history = history,
+            .capture_history = capture_history,
             .continuation = continuation,
             .prev_continuation_key = prev_continuation_key,
             .prev2_continuation_key = prev2_continuation_key,
@@ -214,6 +220,7 @@ pub const MovePicker = struct {
             .quiets = MoveList.init(),
             .bad_captures = MoveList.init(),
             .capture_scores = undefined,
+            .capture_is_good = undefined,
             .quiet_scores = undefined,
             .capture_idx = 0,
             .quiet_idx = 0,
@@ -243,18 +250,21 @@ pub const MovePicker = struct {
                         const idx = self.selectBestCapture();
                         const move = self.captures.moves[idx];
                         const score = self.capture_scores[idx];
+                        const is_good = self.capture_is_good[idx];
 
                         if (idx != self.capture_idx) {
                             self.captures.moves[idx] = self.captures.moves[self.capture_idx];
                             self.capture_scores[idx] = self.capture_scores[self.capture_idx];
+                            self.capture_is_good[idx] = self.capture_is_good[self.capture_idx];
                             self.captures.moves[self.capture_idx] = move;
                             self.capture_scores[self.capture_idx] = score;
+                            self.capture_is_good[self.capture_idx] = is_good;
                         }
                         self.capture_idx += 1;
 
                         if (self.isTTMove(move)) continue;
 
-                        if (score >= GOOD_CAPTURE_BASE) {
+                        if (is_good) {
                             return move;
                         } else {
                             self.bad_captures.append(move);
@@ -341,6 +351,12 @@ pub const MovePicker = struct {
                 score += seePieceValue(promo);
             }
 
+            // Preserve the existing tactical stage decision. Capture history
+            // may reorder moves inside a stage but never promote or demote one.
+            self.capture_is_good[i] = score >= GOOD_CAPTURE_BASE;
+            if (capture_history_mod.ENABLED) {
+                score += self.capture_history.score(&self.board_ptr.board, move);
+            }
             self.capture_scores[i] = score;
         }
     }
