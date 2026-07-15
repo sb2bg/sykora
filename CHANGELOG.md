@@ -6,6 +6,14 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+## [3.1] - 2026-07-14
+
+### Changed
+
+- Optimized `SYKNNUE7` dot products and added exact fast-path parity coverage.
+- Accelerated move generation, history scoring, NNUE updates, and other search hot paths.
+- Adapted the soft time limit to root best-move stability and score trends.
+
 ## [3.0] - 2026-07-12
 
 ### Changed
@@ -94,7 +102,8 @@ This changelog was reconstructed from the tagged release history and the commits
 - Fixed castling, en passant, capture handling, move legality edge cases, transposition-table scoring issues, and early search stability problems.
 - Fixed cleanup and shutdown behavior around search threads, bot sessions, and Zig `0.16` compatibility.
 
-[Unreleased]: https://github.com/sb2bg/sykora/compare/v3.0...HEAD
+[Unreleased]: https://github.com/sb2bg/sykora/compare/v3.1...HEAD
+[3.1]: https://github.com/sb2bg/sykora/compare/v3.0...v3.1
 [3.0]: https://github.com/sb2bg/sykora/compare/v0.2.2...v3.0
 [0.2.2]: https://github.com/sb2bg/sykora/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sb2bg/sykora/compare/v0.1.0...v0.2.1
