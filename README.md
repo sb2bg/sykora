@@ -152,10 +152,10 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 | `Threads`        | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
 | `Hash`           | int    | `128`     | Transposition table size in MB (1..4096)                   |
 | `Move Overhead`  | int    | `30`      | Clock reserve in milliseconds (0..5000)                    |
-| `LMRScale`       | int    | `100`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
-| `LMRHistoryScale`| int    | `100`     | Fixed-point LMR history influence (100 = 1.00)             |
-| `LMPMoveScale`   | int    | `100`     | Fixed-point LMP move-count scale (100 = 1.00)              |
-| `HistoryMaxBonus`| int    | `400`     | Maximum quiet/continuation history update                  |
+| `LMRScale`       | int    | `109`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
+| `LMRHistoryScale`| int    | `101`     | Fixed-point LMR history influence (100 = 1.00)             |
+| `LMPMoveScale`   | int    | `94`      | Fixed-point LMP move-count scale (100 = 1.00)              |
+| `HistoryMaxBonus`| int    | `380`     | Maximum quiet/continuation history update                  |
 
 The activation function (ReLU or SCReLU) is auto-detected from the network file header.
 

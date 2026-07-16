@@ -41,6 +41,7 @@ defaults. They are starting points, not promotion criteria.
 Paste `spsa.txt` into OpenBench's SPSA Input field. Every parameter is declared
 as `int` because UCI `spin` options are integral. The three scale parameters use
 fixed point: `100` means logical `1.00`, `105` means `1.05`.
+The checked-in starting values are the latest candidate accepted by SPRT.
 
 The initial tune intentionally contains only relatively smooth search-shape
 parameters:

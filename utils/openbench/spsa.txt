@@ -1,4 +1,4 @@
-LMRScale, int, 100, 50, 200, 7.5, 0.002
-LMRHistoryScale, int, 100, 0, 300, 15.0, 0.002
-LMPMoveScale, int, 100, 50, 200, 7.5, 0.002
-HistoryMaxBonus, int, 400, 50, 1600, 77.5, 0.002
+LMRScale, int, 109, 50, 200, 7.5, 0.002
+LMRHistoryScale, int, 101, 0, 300, 15.0, 0.002
+LMPMoveScale, int, 94, 50, 200, 7.5, 0.002
+HistoryMaxBonus, int, 380, 50, 1600, 77.5, 0.002

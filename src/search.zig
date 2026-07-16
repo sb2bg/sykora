@@ -72,12 +72,12 @@ pub const SearchResult = struct {
 
 /// Smooth search-shape controls exposed through UCI for OpenBench tuning.
 /// Percentage fields are fixed-point integers where 100 represents 1.00.
-/// Defaults preserve the historical search behavior.
+/// Defaults track the latest accepted SPSA candidate.
 pub const SearchTuning = struct {
-    lmr_scale_pct: i32 = 100,
-    lmr_history_scale_pct: i32 = 100,
-    lmp_move_scale_pct: i32 = 100,
-    history_max_bonus: u32 = 400,
+    lmr_scale_pct: i32 = 109,
+    lmr_history_scale_pct: i32 = 101,
+    lmp_move_scale_pct: i32 = 94,
+    history_max_bonus: u32 = 380,
 };
 
 const MAX_PLY = 64;
