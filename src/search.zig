@@ -284,6 +284,9 @@ const NULL_MOVE_REDUCTION: u32 = 3;
 const NULL_MOVE_DEEP_DEPTH: u32 = 6;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
 const NULL_MOVE_STATIC_EVAL_MARGIN: i32 = 80;
+const PROBCUT_MIN_DEPTH: u32 = 6;
+const PROBCUT_REDUCTION: u32 = 4;
+const PROBCUT_MARGIN_CP: i32 = 200;
 const SINGULAR_MIN_DEPTH: u32 = 8;
 const SINGULAR_REDUCTION: u32 = 2;
 const SINGULAR_MARGIN_BASE_CP: i32 = 30;
@@ -1191,6 +1194,81 @@ pub const SearchEngine = struct {
         return null_score;
     }
 
+    fn tryProbCut(
+        self: *Self,
+        do_null: bool,
+        is_pv_node: bool,
+        in_check: bool,
+        search_depth: u32,
+        static_eval: i32,
+        beta_adj: i32,
+        ply: u32,
+    ) !?i32 {
+        if (!do_null or
+            is_pv_node or
+            in_check or
+            ply == 0 or
+            search_depth < PROBCUT_MIN_DEPTH or
+            beta_adj <= -eval.MATE_BOUND + PROBCUT_MARGIN_CP or
+            beta_adj >= eval.MATE_BOUND - PROBCUT_MARGIN_CP)
+        {
+            return null;
+        }
+
+        const probcut_beta = beta_adj + PROBCUT_MARGIN_CP;
+        const see_threshold = @max(@as(i32, 0), probcut_beta - static_eval);
+
+        var tactical_moves = MoveList.init();
+        self.board.generateLegalCaptures(&tactical_moves);
+        self.orderCaptures(&tactical_moves);
+
+        const move_color = self.board.board.move;
+        for (tactical_moves.slice()) |move| {
+            if (staticExchangeEvalPosition(&self.board.board, move) < see_threshold) continue;
+
+            const moving_piece = self.board.board.getPieceAt(move.from(), move_color) orelse continue;
+            const old_previous = self.previous_move;
+            const old_hist_count = self.history_count;
+            const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
+
+            self.prepareAccumulatorForMove();
+            const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.pushAccumulator(move, undo);
+            self.previous_move = move;
+            if (ply < MAX_PLY) {
+                self.continuation_keys[ply] = self.moveContinuationKey(move, move_color, moving_piece);
+            }
+            if (self.history_count < 512) {
+                self.position_history[self.history_count] = self.board.zobrist_hasher.zobrist_hash;
+                self.history_count += 1;
+            }
+
+            var score = -try self.quiescence(-probcut_beta, -probcut_beta + 1, ply + 1);
+            if (score >= probcut_beta and !self.stop_search.load(.monotonic)) {
+                score = -try self.alphaBeta(
+                    -probcut_beta,
+                    -probcut_beta + 1,
+                    search_depth - PROBCUT_REDUCTION,
+                    ply + 1,
+                    true,
+                );
+            }
+
+            self.popAccumulator();
+            self.board.unmakeMoveUnchecked(move, undo);
+            self.previous_move = old_previous;
+            self.history_count = old_hist_count;
+            if (ply < MAX_PLY) {
+                self.continuation_keys[ply] = old_continuation_key;
+            }
+
+            if (self.stop_search.load(.monotonic)) return null;
+            if (score >= probcut_beta) return score;
+        }
+
+        return null;
+    }
+
     fn updateQuietHeuristicsOnBetaCutoff(
         self: *Self,
         move: Move,
@@ -1381,6 +1459,10 @@ pub const SearchEngine = struct {
         const null_score = try self.tryNullMovePrune(do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply);
         if (self.stop_search.load(.monotonic)) return 0;
         if (null_score) |score| return score;
+
+        const probcut_score = try self.tryProbCut(do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply);
+        if (self.stop_search.load(.monotonic)) return 0;
+        if (probcut_score) |score| return score;
 
         // Use staged move picker for efficient move ordering
         const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
