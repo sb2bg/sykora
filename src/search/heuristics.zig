@@ -7,6 +7,7 @@ pub const MAX_PLY = 64;
 pub const MAX_KILLER_MOVES = 2;
 pub const CONTINUATION_KEY_COUNT = 2 * 6 * 64;
 pub const INVALID_CONTINUATION_KEY = std.math.maxInt(u16);
+const COUNTER_MOVE_MAX_AGE: u8 = 2;
 
 pub const KillerMoves = struct {
     moves: [MAX_PLY][MAX_KILLER_MOVES]Move,
@@ -44,19 +45,23 @@ pub const KillerMoves = struct {
 
 pub const CounterMoveTable = struct {
     moves: [64][64]Move,
+    ages: [64][64]u8,
 
     pub fn init() CounterMoveTable {
         return CounterMoveTable{
             .moves = [_][64]Move{[_]Move{Move.init(0, 0, null)} ** 64} ** 64,
+            .ages = [_][64]u8{[_]u8{0} ** 64} ** 64,
         };
     }
 
     pub fn update(self: *CounterMoveTable, previous_move: Move, counter_move: Move) void {
         const entry = &self.moves[previous_move.from()][previous_move.to()];
         entry.* = counter_move;
+        self.ages[previous_move.from()][previous_move.to()] = COUNTER_MOVE_MAX_AGE;
     }
 
     pub fn get(self: *const CounterMoveTable, previous_move: Move) ?Move {
+        if (self.ages[previous_move.from()][previous_move.to()] == 0) return null;
         const entry = &self.moves[previous_move.from()][previous_move.to()];
         const move = entry.*;
         if (move.from() == 0 and move.to() == 0) return null;
@@ -65,6 +70,15 @@ pub const CounterMoveTable = struct {
 
     pub fn clear(self: *CounterMoveTable) void {
         self.moves = [_][64]Move{[_]Move{Move.init(0, 0, null)} ** 64} ** 64;
+        self.ages = [_][64]u8{[_]u8{0} ** 64} ** 64;
+    }
+
+    pub fn age(self: *CounterMoveTable) void {
+        for (0..64) |from| {
+            for (0..64) |to| {
+                self.ages[from][to] -|= 1;
+            }
+        }
     }
 };
 
@@ -215,3 +229,64 @@ pub const ContinuationHistoryTable = struct {
         cell.* = @intCast(@max(-16384, @min(16384, current - adjusted_penalty)));
     }
 };
+
+/// Search-ordering state that outlives an individual SearchEngine. Keep one
+/// instance per worker: searches mutate these tables without synchronization.
+pub const SearchHeuristics = struct {
+    history: HistoryTable,
+    counter_moves: CounterMoveTable,
+    continuation_history: ContinuationHistoryTable,
+
+    const Self = @This();
+
+    pub fn create(allocator: std.mem.Allocator) error{OutOfMemory}!*Self {
+        const self = try allocator.create(Self);
+        self.history = HistoryTable.init();
+        self.counter_moves = CounterMoveTable.init();
+        self.continuation_history.initInPlace();
+        return self;
+    }
+
+    pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+
+    /// Retain useful ordering information while steadily reducing stale data.
+    pub fn age(self: *Self) void {
+        self.history.age();
+        self.counter_moves.age();
+        self.continuation_history.age();
+    }
+
+    pub fn clear(self: *Self) void {
+        self.history.clear();
+        self.counter_moves.clear();
+        self.continuation_history.initInPlace();
+    }
+};
+
+test "persistent search heuristics age and reset together" {
+    const state = try SearchHeuristics.create(std.testing.allocator);
+    defer state.destroy(std.testing.allocator);
+
+    const previous = Move.init(1, 2, null);
+    const response = Move.init(3, 4, null);
+    const prev_key = continuationKey(.white, .knight, 2);
+    const current_key = continuationKey(.black, .bishop, 4);
+
+    state.history.update(response, 4, .white, 380);
+    state.counter_moves.update(previous, response);
+    state.continuation_history.update(prev_key, null, current_key, 4, 380);
+
+    state.age();
+    try std.testing.expectEqual(@as(i32, 8), state.history.getForColor(response, .white));
+    try std.testing.expectEqual(response.data, state.counter_moves.get(previous).?.data);
+    try std.testing.expectEqual(@as(i32, 8), state.continuation_history.get(prev_key, null, current_key));
+
+    state.age();
+    try std.testing.expectEqual(@as(?Move, null), state.counter_moves.get(previous));
+
+    state.clear();
+    try std.testing.expectEqual(@as(i32, 0), state.history.getForColor(response, .white));
+    try std.testing.expectEqual(@as(i32, 0), state.continuation_history.get(prev_key, null, current_key));
+}
