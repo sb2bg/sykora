@@ -11,9 +11,11 @@ const nnue = @import("nnue.zig");
 const move_picker_mod = @import("search/move_picker.zig");
 const tt_mod = @import("search/tt.zig");
 const heuristics = @import("search/heuristics.zig");
+const capture_history_mod = @import("search/capture_history.zig");
 
 const KillerMoves = heuristics.KillerMoves;
 pub const SearchHeuristics = heuristics.SearchHeuristics;
+const CaptureHistory = capture_history_mod.CaptureHistory;
 const continuationKey = heuristics.continuationKey;
 const INVALID_CONTINUATION_KEY = heuristics.INVALID_CONTINUATION_KEY;
 
@@ -358,6 +360,7 @@ pub const SearchEngine = struct {
     killer_moves: KillerMoves,
     heuristics_state: *SearchHeuristics,
     owns_heuristics_state: bool,
+    capture_history: CaptureHistory,
     nodes_searched: usize,
     seldepth: u32,
     previous_move: ?Move,
@@ -463,6 +466,7 @@ pub const SearchEngine = struct {
             .killer_moves = KillerMoves.init(),
             .heuristics_state = heuristics_state,
             .owns_heuristics_state = owns_heuristics_state,
+            .capture_history = CaptureHistory.init(),
             .nodes_searched = 0,
             .seldepth = 0,
             .previous_move = null,
@@ -701,6 +705,7 @@ pub const SearchEngine = struct {
         self.seldepth = 0;
         self.killer_moves = KillerMoves.init();
         self.heuristics_state.age();
+        self.capture_history.age();
         self.previous_move = null;
         self.continuation_keys = [_]u16{INVALID_CONTINUATION_KEY} ** MAX_PLY;
         self.static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE;
@@ -1043,6 +1048,7 @@ pub const SearchEngine = struct {
             killers,
             counter_move,
             &self.heuristics_state.history,
+            &self.capture_history,
             &self.heuristics_state.continuation_history,
             continuation_ctx.prev,
             continuation_ctx.prev2,
@@ -1325,6 +1331,23 @@ pub const SearchEngine = struct {
         return null;
     }
 
+    fn updateCaptureHeuristicsOnBetaCutoff(
+        self: *Self,
+        move: Move,
+        search_depth: u32,
+        captures_tried: []const Move,
+    ) void {
+        if (!capture_history_mod.ENABLED) return;
+        const best_key = CaptureHistory.keyFor(&self.board.board, move) orelse return;
+        self.capture_history.reward(best_key, search_depth);
+
+        for (captures_tried) |capture| {
+            if (movesEqual(capture, move)) continue;
+            const key = CaptureHistory.keyFor(&self.board.board, capture) orelse continue;
+            self.capture_history.penalize(key, search_depth);
+        }
+    }
+
     fn updateQuietHeuristicsOnBetaCutoff(
         self: *Self,
         move: Move,
@@ -1530,6 +1553,7 @@ pub const SearchEngine = struct {
             killers,
             counter_move,
             &self.heuristics_state.history,
+            &self.capture_history,
             &self.heuristics_state.continuation_history,
             continuation_ctx.prev,
             continuation_ctx.prev2,
@@ -1542,6 +1566,8 @@ pub const SearchEngine = struct {
         var quiets_seen: u32 = 0;
         var quiets_tried: [64]Move = undefined;
         var quiets_tried_count: usize = 0;
+        var captures_tried: [256]Move = undefined;
+        var captures_tried_count: usize = 0;
         const color = self.board.board.move;
         const root_pawn_endgame = ply == 0 and search_depth >= 2 and isPurePawnEndgame(self.board.board);
 
@@ -1775,6 +1801,9 @@ pub const SearchEngine = struct {
             if (!is_capture and !is_promotion and quiets_tried_count < 64) {
                 quiets_tried[quiets_tried_count] = move;
                 quiets_tried_count += 1;
+            } else if (is_capture and captures_tried_count < captures_tried.len) {
+                captures_tried[captures_tried_count] = move;
+                captures_tried_count += 1;
             }
 
             if (score > best_score) {
@@ -1798,6 +1827,12 @@ pub const SearchEngine = struct {
                         color,
                         old_previous,
                         quiets_tried[0..quiets_tried_count],
+                    );
+                } else if (is_capture) {
+                    self.updateCaptureHeuristicsOnBetaCutoff(
+                        move,
+                        search_depth,
+                        captures_tried[0..captures_tried_count],
                     );
                 }
                 break;
@@ -2058,6 +2093,9 @@ pub const SearchEngine = struct {
 
         for (move_slice, 0..) |move, i| {
             var score = staticExchangeEvalPosition(&self.board.board, move) * SEE_CAPTURE_SCALE;
+            if (capture_history_mod.ENABLED) {
+                score += self.capture_history.score(&self.board.board, move);
+            }
 
             if (self.board.board.en_passant_square == move.to() and
                 self.board.board.getPieceAt(move.from(), move_color) == .pawn and
