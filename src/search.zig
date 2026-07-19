@@ -256,6 +256,8 @@ inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
 // runtime scale option make useful sub-integer changes before final rounding.
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_FULL_DEPTH_MOVES: u32 = 4;
+const LMR_BAD_CAPTURE_MIN_DEPTH: u32 = 5;
+const LMR_BAD_CAPTURE_FULL_DEPTH_MOVES: u32 = 8;
 const LMR_TABLE_MAX_DEPTH = 64;
 const LMR_TABLE_MAX_MOVES = 64;
 const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
@@ -1483,6 +1485,14 @@ pub const SearchEngine = struct {
                 }
             }
 
+            const reduce_bad_capture = !is_pv_node and
+                !in_check and
+                is_capture and
+                !is_promotion and
+                search_depth >= LMR_BAD_CAPTURE_MIN_DEPTH and
+                moves_searched >= LMR_BAD_CAPTURE_FULL_DEPTH_MOVES and
+                staticExchangeEvalPosition(&self.board.board, move) < 0;
+
             // Make move
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
@@ -1516,9 +1526,9 @@ pub const SearchEngine = struct {
             if (moves_searched >= LMR_FULL_DEPTH_MOVES and
                 search_depth >= LMR_MIN_DEPTH and
                 !in_check and
-                !is_capture and
                 !is_promotion and
-                !gives_check)
+                !gives_check and
+                (!is_capture or reduce_bad_capture))
             {
                 // Base reduction from pre-computed log table
                 const move_number = moves_searched + 1;
@@ -1529,27 +1539,29 @@ pub const SearchEngine = struct {
                     10_000,
                 ));
 
-                // History modulation: good history reduces less, bad history reduces more
-                const hist_score = self.quietHeuristicScore(move, color, ply);
-                reduction -= @intCast(@divTrunc(
-                    @as(i64, hist_score) * @as(i64, self.tuning.lmr_history_scale_pct),
-                    819_200,
-                ));
+                if (!is_capture) {
+                    // History modulation: good history reduces less, bad history reduces more
+                    const hist_score = self.quietHeuristicScore(move, color, ply);
+                    reduction -= @intCast(@divTrunc(
+                        @as(i64, hist_score) * @as(i64, self.tuning.lmr_history_scale_pct),
+                        819_200,
+                    ));
 
-                // Killer and counter moves get reduced less
-                const is_killer = self.killer_moves.isKiller(move, ply);
-                var is_counter_move = false;
-                if (counter_move) |cm| {
-                    is_counter_move = cm.from() == move.from() and cm.to() == move.to();
-                }
-                if (is_killer) {
-                    reduction -= 1;
-                }
-                if (is_counter_move) {
-                    reduction -= 1;
-                }
-                if (improving) {
-                    reduction -= 1;
+                    // Killer and counter moves get reduced less
+                    const is_killer = self.killer_moves.isKiller(move, ply);
+                    var is_counter_move = false;
+                    if (counter_move) |cm| {
+                        is_counter_move = cm.from() == move.from() and cm.to() == move.to();
+                    }
+                    if (is_killer) {
+                        reduction -= 1;
+                    }
+                    if (is_counter_move) {
+                        reduction -= 1;
+                    }
+                    if (improving) {
+                        reduction -= 1;
+                    }
                 }
 
                 // PV nodes get reduced less
