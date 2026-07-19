@@ -6,6 +6,9 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+- Made OpenBench the canonical SPRT/promotion path and retired the tag-triggered
+  local release SPRT workflow.
+
 ## [3.1] - 2026-07-14
 
 ### Changed

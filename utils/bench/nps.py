@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import statistics
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -36,7 +37,8 @@ class BenchResult:
     run_idx: int
     depth: Optional[int]
     nodes: int
-    time_s: float
+    wall_time_s: float
+    reported_time_s: float
     nps: float
     bestmove: Optional[str]
 
@@ -113,13 +115,15 @@ def run_position(
         assert depth is not None
         limit = chess.engine.Limit(depth=depth)
 
+    started = time.monotonic()
     info = engine.analyse(board, limit, info=chess.engine.INFO_BASIC | chess.engine.INFO_PV)
+    wall_time_s = time.monotonic() - started
 
     nodes = int(info.get("nodes", 0))
-    time_s = float(info.get("time", 0.0))
-    nps = float(info.get("nps", 0.0))
-    if nps <= 0.0 and nodes > 0 and time_s > 0:
-        nps = nodes / time_s
+    reported_time_s = float(info.get("time", 0.0))
+    # Wall time is authoritative. An engine's last completed-depth info line can
+    # otherwise omit a large incomplete iteration and materially inflate NPS.
+    nps = nodes / wall_time_s if nodes > 0 and wall_time_s > 0 else 0.0
 
     pv = info.get("pv", [])
     bestmove = pv[0].uci() if pv else None
@@ -131,7 +135,8 @@ def run_position(
         run_idx=0,
         depth=depth_out,
         nodes=nodes,
-        time_s=time_s,
+        wall_time_s=wall_time_s,
+        reported_time_s=reported_time_s,
         nps=nps,
         bestmove=bestmove,
     )
@@ -152,7 +157,12 @@ def mean(values: List[float]) -> float:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark search NPS over a fixed position suite.")
     parser.add_argument("--engine", default="./zig-out/bin/sykora", help="Path to UCI engine binary")
-    parser.add_argument("--depth", type=int, default=10, help="Search depth (ignored only if --movetime-ms is used without depth)")
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Search depth (defaults to 10 without --movetime-ms; optional cap with it)",
+    )
     parser.add_argument("--movetime-ms", type=int, default=None, help="Per-position movetime in ms")
     parser.add_argument("--runs", type=int, default=1, help="Repeat full suite this many times")
     parser.add_argument("--position-file", default=None, help="Optional text file with 'label|fen' lines")
@@ -166,6 +176,8 @@ def main() -> int:
         parser.error("--movetime-ms must be > 0")
     if args.runs <= 0:
         parser.error("--runs must be > 0")
+    if args.depth is None and args.movetime_ms is None:
+        args.depth = 10
 
     positions = DEFAULT_POSITIONS if args.position_file is None else load_positions(Path(args.position_file))
     options = parse_uci_options(args.engine_opt)
@@ -198,7 +210,8 @@ def main() -> int:
                         depth_str = f"d{result.depth}" if result.depth is not None else "d?"
                         print(
                             f"run={run_idx:02d} pos={label:<14} {depth_str:<4} "
-                            f"nodes={result.nodes:>9} time={result.time_s:>6.3f}s "
+                            f"nodes={result.nodes:>9} wall={result.wall_time_s:>6.3f}s "
+                            f"engine={result.reported_time_s:>6.3f}s "
                             f"nps={result.nps:>10.0f} best={result.bestmove or 'none'}"
                         )
     except FileNotFoundError:
@@ -214,7 +227,7 @@ def main() -> int:
 
     nps_values = [r.nps for r in all_results if r.nps > 0]
     total_nodes = sum(r.nodes for r in all_results)
-    total_time = sum(r.time_s for r in all_results)
+    total_time = sum(r.wall_time_s for r in all_results)
     overall_nps = (total_nodes / total_time) if total_time > 0 else 0.0
 
     print("\nNPS summary")
@@ -222,12 +235,17 @@ def main() -> int:
     print(f"engine:          {args.engine}")
     print(f"positions:       {len(positions)}")
     print(f"runs:            {args.runs}")
-    print(f"depth:           {args.depth}" if args.movetime_ms is None else f"depth/time:      {args.depth} / {args.movetime_ms}ms")
+    if args.movetime_ms is None:
+        print(f"depth:           {args.depth}")
+    elif args.depth is None:
+        print(f"time:            {args.movetime_ms}ms")
+    else:
+        print(f"depth/time:      {args.depth} / {args.movetime_ms}ms")
     print(f"overall NPS:     {overall_nps:.0f}")
     print(f"mean NPS:        {mean(nps_values):.0f}")
     print(f"median NPS:      {median(nps_values):.0f}")
     print(f"total nodes:     {total_nodes}")
-    print(f"total time (s):  {total_time:.3f}")
+    print(f"wall time (s):   {total_time:.3f}")
     return 0
 
 
