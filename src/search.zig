@@ -280,8 +280,8 @@ const LMP_MAX_DEPTH: u32 = 3;
 const LMP_IMPROVING_BONUS: u32 = 2;
 
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
-const NULL_MOVE_REDUCTION_BASE: u32 = 2;
-const NULL_MOVE_DEPTH_DIVISOR: u32 = 4;
+const NULL_MOVE_REDUCTION_BASE: u32 = 3;
+const NULL_MOVE_DEPTH_DIVISOR: u32 = 6;
 const NULL_MOVE_EVAL_MARGIN_PER_REDUCTION: i32 = 200;
 const NULL_MOVE_EVAL_REDUCTION_CAP: u32 = 2;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
@@ -309,7 +309,7 @@ inline fn nullMoveReduction(search_depth: u32, eval_margin: i32) u32 {
     std.debug.assert(search_depth >= NULL_MOVE_MIN_DEPTH);
 
     const margin_reduction: u32 = @intCast(@divTrunc(
-        @max(eval_margin, 0),
+        @max(eval_margin, 1) - 1,
         NULL_MOVE_EVAL_MARGIN_PER_REDUCTION,
     ));
     const reduction = NULL_MOVE_REDUCTION_BASE +
@@ -2079,9 +2079,30 @@ test "search ply ceiling leaves accumulator headroom" {
 test "null move reduction grows conservatively with depth and eval margin" {
     try std.testing.expectEqual(@as(u32, 2), nullMoveReduction(3, 80));
     try std.testing.expectEqual(@as(u32, 3), nullMoveReduction(4, 80));
-    try std.testing.expectEqual(@as(u32, 3), nullMoveReduction(7, 80));
-    try std.testing.expectEqual(@as(u32, 4), nullMoveReduction(8, 80));
+    try std.testing.expectEqual(@as(u32, 4), nullMoveReduction(6, 80));
+    try std.testing.expectEqual(@as(u32, 4), nullMoveReduction(7, 80));
+    try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(12, 80));
+    try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(13, 80));
     try std.testing.expectEqual(@as(u32, 4), nullMoveReduction(7, 200));
+    try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(7, 201));
     try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(7, 400));
-    try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(7, 1_000));
+    try std.testing.expectEqual(@as(u32, 6), nullMoveReduction(7, 401));
+    try std.testing.expectEqual(@as(u32, 6), nullMoveReduction(7, 1_000));
+}
+
+test "null move reduction is never weaker than the fixed baseline" {
+    const margins = [_]i32{ 80, 199, 200, 201, 400, 401, 1_000, std.math.maxInt(i32) };
+    var search_depth: u32 = NULL_MOVE_MIN_DEPTH;
+    while (search_depth <= MAX_SEARCH_PLY) : (search_depth += 1) {
+        for (margins) |eval_margin| {
+            var baseline_reduction: u32 = 3;
+            if (search_depth > 6) baseline_reduction += 1;
+            if (eval_margin > 200) baseline_reduction += 1;
+            baseline_reduction = @min(baseline_reduction, search_depth - 1);
+
+            try std.testing.expect(
+                nullMoveReduction(search_depth, eval_margin) >= baseline_reduction,
+            );
+        }
+    }
 }
