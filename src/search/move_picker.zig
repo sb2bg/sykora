@@ -143,6 +143,30 @@ pub fn staticExchangeEvalPosition(b: *const board.BitBoard, move: Move) i32 {
     return captured_value + promotion_gain - reply_gain;
 }
 
+/// Evaluate the material risk of placing a piece on an empty square.
+pub fn staticExchangeEvalQuietPosition(b: *const board.BitBoard, move: Move) i32 {
+    const us = b.move;
+    const them = oppositeColor(us);
+    const from_sq = move.from();
+    const to_sq = move.to();
+
+    const moving_piece = b.getPieceAt(from_sq, us) orelse return 0;
+    if (move.promotion() != null or b.getPieceAt(to_sq, them) != null) return 0;
+    if (moving_piece == .pawn and b.en_passant_square == to_sq) return 0;
+
+    const from_mask = @as(u64, 1) << @intCast(from_sq);
+    const to_mask = @as(u64, 1) << @intCast(to_sq);
+    const occupied = (b.occupied() & ~from_mask) | to_mask;
+    const reply_gain = staticExchangeRec(
+        b,
+        occupied,
+        @intCast(to_sq),
+        them,
+        seePieceValue(moving_piece),
+    );
+    return -reply_gain;
+}
+
 /// Staged move picker for efficient move ordering
 /// Generates moves lazily in stages: TT move -> Good captures -> Killers -> Quiet moves -> Bad captures
 pub const MovePicker = struct {

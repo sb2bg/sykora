@@ -36,6 +36,10 @@ inline fn staticExchangeEvalPosition(b: *const board.BitBoard, move: Move) i32 {
     return move_picker_mod.staticExchangeEvalPosition(b, move);
 }
 
+inline fn staticExchangeEvalQuietPosition(b: *const board.BitBoard, move: Move) i32 {
+    return move_picker_mod.staticExchangeEvalQuietPosition(b, move);
+}
+
 inline fn movesEqual(a: Move, b: Move) bool {
     return a.data == b.data;
 }
@@ -302,6 +306,8 @@ const RAZOR_MARGIN: i32 = 500;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
 const MAIN_SEE_PRUNE_MAX_DEPTH: u32 = 4;
 const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
+const QUIET_SEE_PRUNE_MAX_DEPTH: u32 = 7;
+const QUIET_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 20;
 
 pub const SearchEngine = struct {
     const Self = @This();
@@ -1456,6 +1462,22 @@ pub const SearchEngine = struct {
                 {
                     continue;
                 }
+
+                // Quiet SEE pruning: trim late moves that leave material hanging.
+                const is_counter_move = if (counter_move) |counter| movesEqual(move, counter) else false;
+                if (!is_pv_node and
+                    !in_check and
+                    moves_searched > 0 and
+                    search_depth <= QUIET_SEE_PRUNE_MAX_DEPTH and
+                    !self.killer_moves.isKiller(move, ply) and
+                    !is_counter_move and
+                    !self.moveGivesCheck(move))
+                {
+                    const see_margin = QUIET_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+                    if (staticExchangeEvalQuietPosition(&self.board.board, move) < -see_margin) {
+                        continue;
+                    }
+                }
             }
 
             // SEE capture pruning - trim clearly losing captures at shallow non-PV nodes.
@@ -2062,4 +2084,20 @@ test "rule-50 handling preserves checkmate precedence in search and qsearch" {
 
 test "search ply ceiling leaves accumulator headroom" {
     try std.testing.expect(MAX_SEARCH_PLY < ACC_STACK_SIZE);
+}
+
+test "quiet SEE detects hanging pieces without changing safe quiets" {
+    const test_board = try Board.fromFen("4k3/8/8/4p3/8/8/8/3QK3 w - - 0 1");
+
+    const hanging = try Move.fromString("d1d4");
+    try std.testing.expectEqual(
+        -seePieceValue(.queen),
+        staticExchangeEvalQuietPosition(&test_board.board, hanging),
+    );
+
+    const safe = try Move.fromString("d1d3");
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        staticExchangeEvalQuietPosition(&test_board.board, safe),
+    );
 }
