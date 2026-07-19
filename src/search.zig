@@ -82,7 +82,7 @@ pub const SearchTuning = struct {
 
 const MAX_PLY = 64;
 const ACC_STACK_SIZE: usize = 128;
-// Check extensions and an in-check quiescence tail can outlive MAX_PLY. Every
+// Search extensions and an in-check quiescence tail can outlive MAX_PLY. Every
 // search path must terminate before exhausting the NNUE accumulator stack.
 const MAX_SEARCH_PLY: u32 = 120;
 const MAX_KILLER_MOVES = 2;
@@ -1335,11 +1335,7 @@ pub const SearchEngine = struct {
 
         const original_alpha = alpha;
 
-        // Check extension - extend search when in check (with ply cap to prevent seldepth explosion)
-        var search_depth = depth;
-        if (in_check and ply < 2 * depth + 8) {
-            search_depth += 1;
-        }
+        const search_depth = depth;
 
         const is_pv_node = (beta_adj - alpha) > 1;
 
