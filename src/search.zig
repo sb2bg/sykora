@@ -280,8 +280,10 @@ const LMP_MAX_DEPTH: u32 = 3;
 const LMP_IMPROVING_BONUS: u32 = 2;
 
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
-const NULL_MOVE_REDUCTION: u32 = 3;
-const NULL_MOVE_DEEP_DEPTH: u32 = 6;
+const NULL_MOVE_REDUCTION_BASE: u32 = 2;
+const NULL_MOVE_DEPTH_DIVISOR: u32 = 4;
+const NULL_MOVE_EVAL_MARGIN_PER_REDUCTION: i32 = 200;
+const NULL_MOVE_EVAL_REDUCTION_CAP: u32 = 2;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
 const NULL_MOVE_STATIC_EVAL_MARGIN: i32 = 80;
 const SINGULAR_MIN_DEPTH: u32 = 8;
@@ -302,6 +304,19 @@ const RAZOR_MARGIN: i32 = 500;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
 const MAIN_SEE_PRUNE_MAX_DEPTH: u32 = 4;
 const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
+
+inline fn nullMoveReduction(search_depth: u32, eval_margin: i32) u32 {
+    std.debug.assert(search_depth >= NULL_MOVE_MIN_DEPTH);
+
+    const margin_reduction: u32 = @intCast(@divTrunc(
+        @max(eval_margin, 0),
+        NULL_MOVE_EVAL_MARGIN_PER_REDUCTION,
+    ));
+    const reduction = NULL_MOVE_REDUCTION_BASE +
+        search_depth / NULL_MOVE_DEPTH_DIVISOR +
+        @min(margin_reduction, NULL_MOVE_EVAL_REDUCTION_CAP);
+    return @min(reduction, search_depth - 1);
+}
 
 pub const SearchEngine = struct {
     const Self = @This();
@@ -1161,10 +1176,7 @@ pub const SearchEngine = struct {
             self.continuation_keys[ply] = INVALID_CONTINUATION_KEY;
         }
 
-        var reduction: u32 = NULL_MOVE_REDUCTION;
-        if (search_depth > NULL_MOVE_DEEP_DEPTH) reduction += 1;
-        if (static_eval - beta_adj > 200) reduction += 1;
-        reduction = @min(reduction, search_depth - 1);
+        const reduction = nullMoveReduction(search_depth, static_eval - beta_adj);
 
         const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false);
 
@@ -2062,4 +2074,14 @@ test "rule-50 handling preserves checkmate precedence in search and qsearch" {
 
 test "search ply ceiling leaves accumulator headroom" {
     try std.testing.expect(MAX_SEARCH_PLY < ACC_STACK_SIZE);
+}
+
+test "null move reduction grows conservatively with depth and eval margin" {
+    try std.testing.expectEqual(@as(u32, 2), nullMoveReduction(3, 80));
+    try std.testing.expectEqual(@as(u32, 3), nullMoveReduction(4, 80));
+    try std.testing.expectEqual(@as(u32, 3), nullMoveReduction(7, 80));
+    try std.testing.expectEqual(@as(u32, 4), nullMoveReduction(8, 80));
+    try std.testing.expectEqual(@as(u32, 4), nullMoveReduction(7, 200));
+    try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(7, 400));
+    try std.testing.expectEqual(@as(u32, 5), nullMoveReduction(7, 1_000));
 }
