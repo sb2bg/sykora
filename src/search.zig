@@ -284,6 +284,7 @@ const NULL_MOVE_REDUCTION: u32 = 3;
 const NULL_MOVE_DEEP_DEPTH: u32 = 6;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
 const NULL_MOVE_STATIC_EVAL_MARGIN: i32 = 80;
+const INTERNAL_ITERATIVE_REDUCTION_MIN_DEPTH: u32 = 8;
 const SINGULAR_MIN_DEPTH: u32 = 8;
 const SINGULAR_REDUCTION: u32 = 2;
 const SINGULAR_MARGIN_BASE_CP: i32 = 30;
@@ -1348,6 +1349,17 @@ pub const SearchEngine = struct {
             return tt_score;
         }
         const tt_move = tt_probe.tt_move;
+
+        // Conservative internal iterative reduction: only deep internal
+        // non-PV nodes outside check lose one ply when the TT offers no move.
+        if (ply > 0 and
+            !is_pv_node and
+            !in_check and
+            search_depth >= INTERNAL_ITERATIVE_REDUCTION_MIN_DEPTH and
+            tt_move == null)
+        {
+            search_depth -= 1;
+        }
 
         const singular = try self.trySingularExtension(
             tt_probe,
