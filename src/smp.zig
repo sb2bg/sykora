@@ -5,6 +5,7 @@ const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
 const search_module = @import("search.zig");
 const SearchEngine = search_module.SearchEngine;
+const SearchHeuristics = search_module.SearchHeuristics;
 const SearchOptions = search_module.SearchOptions;
 const nnue = @import("nnue.zig");
 const Uci = @import("interface.zig").Uci;
@@ -60,6 +61,13 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
     }
 
     for (0..num_helpers) |i| {
+        if (self.helper_search_heuristics[i] == null) {
+            self.helper_search_heuristics[i] = SearchHeuristics.create(self.allocator) catch {
+                self.helper_results[i] = EMPTY_HELPER_RESULT;
+                continue;
+            };
+        }
+        const helper_heuristics = self.helper_search_heuristics[i].?;
         self.helper_threads[i] = std.Thread.spawn(.{ .stack_size = 8 * 1024 * 1024 }, helperSearch, .{
             self,
             i,
@@ -68,6 +76,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
             use_nnue_for_search,
             prior_count,
             start_time,
+            helper_heuristics,
         }) catch {
             self.helper_threads[i] = null;
             self.helper_results[i] = EMPTY_HELPER_RESULT;
@@ -76,7 +85,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
     }
 
     var search_board = self.board;
-    var search_engine = SearchEngine.init(
+    var search_engine = SearchEngine.initWithHeuristics(
         &search_board,
         self.allocator,
         &self.stop_search,
@@ -85,7 +94,8 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         net_ptr,
         self.nnue_blend,
         self.nnue_scale,
-    ) catch return UciError.OutOfMemory;
+        self.main_search_heuristics,
+    );
     defer search_engine.deinit();
     search_engine.tuning = self.search_tuning;
 
@@ -156,9 +166,10 @@ fn helperSearch(
     use_nnue_for_search: bool,
     prior_count: usize,
     start_time: std.time.Instant,
+    heuristics_state: *SearchHeuristics,
 ) void {
     var helper_board = self.board;
-    var search_engine = SearchEngine.init(
+    var search_engine = SearchEngine.initWithHeuristics(
         &helper_board,
         self.allocator,
         &self.stop_search,
@@ -167,10 +178,8 @@ fn helperSearch(
         net_ptr,
         self.nnue_blend,
         self.nnue_scale,
-    ) catch {
-        self.helper_results[idx] = EMPTY_HELPER_RESULT;
-        return;
-    };
+        heuristics_state,
+    );
     defer search_engine.deinit();
     search_engine.tuning = self.search_tuning;
 

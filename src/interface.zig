@@ -13,6 +13,7 @@ const ZobristHasher = @import("zobrist.zig").ZobristHasher;
 const search_module = @import("search.zig");
 const SearchEngine = search_module.SearchEngine;
 const SearchOptions = search_module.SearchOptions;
+const SearchHeuristics = search_module.SearchHeuristics;
 const TranspositionTable = search_module.TranspositionTable;
 const nnue = @import("nnue.zig");
 const smp = @import("smp.zig");
@@ -49,12 +50,16 @@ pub const Uci = struct {
     move_overhead_ms: u64,
     helper_threads: [smp.MAX_HELPERS]?std.Thread,
     helper_results: [smp.MAX_HELPERS]smp.HelperResult,
+    main_search_heuristics: *SearchHeuristics,
+    helper_search_heuristics: [smp.MAX_HELPERS]?*SearchHeuristics,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
         const stop_search = std.atomic.Value(bool).init(false);
         const default_hash_mb: usize = 128;
         const tt = try TranspositionTable.init(allocator, default_hash_mb);
+        const main_search_heuristics = try SearchHeuristics.create(allocator);
+        errdefer main_search_heuristics.destroy(allocator);
 
         uci_ptr.* = Uci{
             .stdin = stdin,
@@ -82,6 +87,8 @@ pub const Uci = struct {
             .move_overhead_ms = 30,
             .helper_threads = [_]?std.Thread{null} ** smp.MAX_HELPERS,
             .helper_results = [_]smp.HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** smp.MAX_HELPERS,
+            .main_search_heuristics = main_search_heuristics,
+            .helper_search_heuristics = [_]?*SearchHeuristics{null} ** smp.MAX_HELPERS,
         };
 
         uci_ptr.resetPositionHistory();
@@ -120,6 +127,13 @@ pub const Uci = struct {
         }
         if (self.nnue_network) |*network| {
             network.deinit();
+        }
+        self.main_search_heuristics.destroy(self.allocator);
+        for (&self.helper_search_heuristics) |*state_ptr| {
+            if (state_ptr.*) |state| {
+                state.destroy(self.allocator);
+                state_ptr.* = null;
+            }
         }
         self.tt.deinit();
         self.options.deinit();
@@ -193,6 +207,7 @@ pub const Uci = struct {
                 self.board = Board.startpos();
                 self.resetPositionHistory();
                 self.tt.clear();
+                self.resetSearchHeuristics();
             },
             .position => |pos_opts| {
                 switch (pos_opts.value) {
@@ -365,6 +380,13 @@ pub const Uci = struct {
     fn resetPositionHistory(self: *Self) void {
         self.position_hash_count = 0;
         self.pushCurrentHashToPositionHistory();
+    }
+
+    fn resetSearchHeuristics(self: *Self) void {
+        self.main_search_heuristics.clear();
+        for (self.helper_search_heuristics) |state| {
+            if (state) |allocated| allocated.clear();
+        }
     }
 
     fn pushCurrentHashToPositionHistory(self: *Self) void {

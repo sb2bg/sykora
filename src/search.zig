@@ -13,9 +13,7 @@ const tt_mod = @import("search/tt.zig");
 const heuristics = @import("search/heuristics.zig");
 
 const KillerMoves = heuristics.KillerMoves;
-const CounterMoveTable = heuristics.CounterMoveTable;
-const HistoryTable = heuristics.HistoryTable;
-const ContinuationHistoryTable = heuristics.ContinuationHistoryTable;
+pub const SearchHeuristics = heuristics.SearchHeuristics;
 const continuationKey = heuristics.continuationKey;
 const INVALID_CONTINUATION_KEY = heuristics.INVALID_CONTINUATION_KEY;
 
@@ -347,9 +345,8 @@ pub const SearchEngine = struct {
     // Search state
     tt: *TranspositionTable,
     killer_moves: KillerMoves,
-    history: HistoryTable,
-    counter_moves: CounterMoveTable,
-    continuation_history: *ContinuationHistoryTable,
+    heuristics_state: *SearchHeuristics,
+    owns_heuristics_state: bool,
     nodes_searched: usize,
     seldepth: u32,
     previous_move: ?Move,
@@ -388,10 +385,62 @@ pub const SearchEngine = struct {
         nnue_blend: i32,
         nnue_scale: i32,
     ) error{OutOfMemory}!Self {
-        const continuation_history = try allocator.create(ContinuationHistoryTable);
-        errdefer allocator.destroy(continuation_history);
-        continuation_history.initInPlace();
+        const heuristics_state = try SearchHeuristics.create(allocator);
+        errdefer heuristics_state.destroy(allocator);
 
+        return initWithHeuristicsOwnership(
+            board_ptr,
+            allocator,
+            stop_search,
+            tt,
+            use_nnue,
+            nnue_net,
+            nnue_blend,
+            nnue_scale,
+            heuristics_state,
+            true,
+        );
+    }
+
+    /// Borrow persistent ordering state owned by the UCI worker. The caller
+    /// must keep the state alive and exclusive until this engine is deinitialized.
+    pub fn initWithHeuristics(
+        board_ptr: *Board,
+        allocator: std.mem.Allocator,
+        stop_search: *std.atomic.Value(bool),
+        tt: *TranspositionTable,
+        use_nnue: bool,
+        nnue_net: ?*const nnue.Network,
+        nnue_blend: i32,
+        nnue_scale: i32,
+        heuristics_state: *SearchHeuristics,
+    ) Self {
+        return initWithHeuristicsOwnership(
+            board_ptr,
+            allocator,
+            stop_search,
+            tt,
+            use_nnue,
+            nnue_net,
+            nnue_blend,
+            nnue_scale,
+            heuristics_state,
+            false,
+        );
+    }
+
+    fn initWithHeuristicsOwnership(
+        board_ptr: *Board,
+        allocator: std.mem.Allocator,
+        stop_search: *std.atomic.Value(bool),
+        tt: *TranspositionTable,
+        use_nnue: bool,
+        nnue_net: ?*const nnue.Network,
+        nnue_blend: i32,
+        nnue_scale: i32,
+        heuristics_state: *SearchHeuristics,
+        owns_heuristics_state: bool,
+    ) Self {
         return Self{
             .board = board_ptr,
             .allocator = allocator,
@@ -401,9 +450,8 @@ pub const SearchEngine = struct {
             .root_move_nodes = [_]usize{0} ** ROOT_MOVE_BUCKETS,
             .tt = tt,
             .killer_moves = KillerMoves.init(),
-            .history = HistoryTable.init(),
-            .counter_moves = CounterMoveTable.init(),
-            .continuation_history = continuation_history,
+            .heuristics_state = heuristics_state,
+            .owns_heuristics_state = owns_heuristics_state,
             .nodes_searched = 0,
             .seldepth = 0,
             .previous_move = null,
@@ -433,7 +481,9 @@ pub const SearchEngine = struct {
 
     pub fn deinit(self: *Self) void {
         self.deinitAccumulatorStack();
-        self.allocator.destroy(self.continuation_history);
+        if (self.owns_heuristics_state) {
+            self.heuristics_state.destroy(self.allocator);
+        }
     }
 
     inline fn evalCacheIndex(hash: u64) usize {
@@ -639,9 +689,7 @@ pub const SearchEngine = struct {
         self.nodes_searched = 0;
         self.seldepth = 0;
         self.killer_moves = KillerMoves.init();
-        self.history.age(); // Age history instead of clearing
-        self.counter_moves.clear();
-        self.continuation_history.age();
+        self.heuristics_state.age();
         self.previous_move = null;
         self.continuation_keys = [_]u16{INVALID_CONTINUATION_KEY} ** MAX_PLY;
         self.static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE;
@@ -862,10 +910,10 @@ pub const SearchEngine = struct {
         color: piece.Color,
         ply: u32,
     ) i32 {
-        var score = self.history.getForColor(move, color);
+        var score = self.heuristics_state.history.getForColor(move, color);
         if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
             const ctx = self.continuationContext(ply);
-            score += self.continuation_history.get(
+            score += self.heuristics_state.continuation_history.get(
                 ctx.prev,
                 ctx.prev2,
                 continuationKey(color, piece_type, move.to()),
@@ -976,15 +1024,15 @@ pub const SearchEngine = struct {
         const reduced_depth = search_depth - 1 - SINGULAR_REDUCTION;
 
         const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
-        const counter_move: ?Move = if (self.previous_move) |prev| self.counter_moves.get(prev) else null;
+        const counter_move: ?Move = if (self.previous_move) |prev| self.heuristics_state.counter_moves.get(prev) else null;
         const continuation_ctx = self.continuationContext(ply);
         var move_picker = MovePicker.init(
             self.board,
             tt_move,
             killers,
             counter_move,
-            &self.history,
-            self.continuation_history,
+            &self.heuristics_state.history,
+            &self.heuristics_state.continuation_history,
             continuation_ctx.prev,
             continuation_ctx.prev2,
             ply,
@@ -1201,12 +1249,12 @@ pub const SearchEngine = struct {
         quiets_tried: []const Move,
     ) void {
         self.killer_moves.add(move, ply);
-        self.history.update(move, search_depth, color, self.tuning.history_max_bonus);
+        self.heuristics_state.history.update(move, search_depth, color, self.tuning.history_max_bonus);
 
         if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
             const ctx = self.continuationContext(ply);
             const best_key = continuationKey(color, piece_type, move.to());
-            self.continuation_history.update(ctx.prev, ctx.prev2, best_key, search_depth, self.tuning.history_max_bonus);
+            self.heuristics_state.continuation_history.update(ctx.prev, ctx.prev2, best_key, search_depth, self.tuning.history_max_bonus);
 
             for (quiets_tried) |quiet| {
                 if ((quiet.from() != move.from() or quiet.to() != move.to()) and
@@ -1214,18 +1262,18 @@ pub const SearchEngine = struct {
                 {
                     const quiet_piece = self.board.board.getPieceAt(quiet.from(), color).?;
                     const quiet_key = continuationKey(color, quiet_piece, quiet.to());
-                    self.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, search_depth, self.tuning.history_max_bonus);
+                    self.heuristics_state.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, search_depth, self.tuning.history_max_bonus);
                 }
             }
         }
 
         if (old_previous) |prev| {
-            self.counter_moves.update(prev, move);
+            self.heuristics_state.counter_moves.update(prev, move);
         }
 
         for (quiets_tried) |quiet| {
             if (quiet.from() != move.from() or quiet.to() != move.to()) {
-                self.history.penalize(quiet, search_depth, color, self.tuning.history_max_bonus);
+                self.heuristics_state.history.penalize(quiet, search_depth, color, self.tuning.history_max_bonus);
             }
         }
     }
@@ -1384,15 +1432,15 @@ pub const SearchEngine = struct {
 
         // Use staged move picker for efficient move ordering
         const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
-        const counter_move: ?Move = if (self.previous_move) |prev| self.counter_moves.get(prev) else null;
+        const counter_move: ?Move = if (self.previous_move) |prev| self.heuristics_state.counter_moves.get(prev) else null;
         const continuation_ctx = self.continuationContext(ply);
         var move_picker = MovePicker.init(
             self.board,
             tt_move,
             killers,
             counter_move,
-            &self.history,
-            self.continuation_history,
+            &self.heuristics_state.history,
+            &self.heuristics_state.continuation_history,
             continuation_ctx.prev,
             continuation_ctx.prev2,
             ply,
@@ -1912,7 +1960,7 @@ pub const SearchEngine = struct {
                 score += seePieceValue(promo) * 4;
             } else {
                 // In-check quiescence can include quiet evasions.
-                score += self.history.getForColor(move, move_color);
+                score += self.heuristics_state.history.getForColor(move, move_color);
             }
 
             scores[i] = score;
@@ -2045,6 +2093,32 @@ test "repetition distinguishes duplicate root, pre-root twofold, and search cycl
     engine.history_count = 3;
     try std.testing.expect(engine.isRepetition());
     try std.testing.expectEqual(DRAW_SCORE, try engine.quiescence(-INF, INF, 1));
+}
+
+test "borrowed search heuristics remain owned by the caller" {
+    var test_board = Board.startpos();
+    var stop = std.atomic.Value(bool).init(false);
+    var tt = try TranspositionTable.init(std.testing.allocator, 1);
+    defer tt.deinit();
+    const state = try SearchHeuristics.create(std.testing.allocator);
+    defer state.destroy(std.testing.allocator);
+
+    var engine = SearchEngine.initWithHeuristics(
+        &test_board,
+        std.testing.allocator,
+        &stop,
+        &tt,
+        false,
+        null,
+        0,
+        100,
+        state,
+    );
+    engine.deinit();
+
+    const move = Move.init(1, 2, null);
+    state.history.update(move, 2, .white, 380);
+    try std.testing.expectEqual(@as(i32, 4), state.history.getForColor(move, .white));
 }
 
 test "rule-50 handling preserves checkmate precedence in search and qsearch" {
