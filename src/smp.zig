@@ -129,6 +129,21 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         total_nodes += self.helper_results[i].nodes;
     }
 
+    // The last standard `info` line must describe the entire command, including
+    // work spent in an incomplete final iteration and all helper threads.
+    const total_time = @max(elapsedMs(start_time), 0);
+    const total_nps = if (total_time > 0)
+        (total_nodes * 1000) / @as(usize, @intCast(total_time))
+    else
+        0;
+    try self.writeStdout("info depth {d} score cp {d} nodes {d} time {d} nps {d} pv {f}", .{
+        result.depth,
+        result.score,
+        total_nodes,
+        total_time,
+        total_nps,
+        self.best_move,
+    });
     try self.writeInfoString("search thread stopped, total nodes {d}", .{total_nodes});
     try self.writeStdout("bestmove {f}", .{self.best_move});
 }

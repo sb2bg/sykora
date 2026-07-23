@@ -12,8 +12,6 @@ Magic bitboards, alpha-beta with modern pruning and reductions, Lazy SMP, embedd
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
-[![Release SPRT](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml/badge.svg)](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml)
-
 [Play live on Lichess →](https://lichess.org/@/sykorabot)
 
 </div>
@@ -239,7 +237,12 @@ python utils/sts/sts.py --epd /path/to/sts --pattern "STS*.epd" --engine ./zig-o
 
 STS is still available as a diagnostic tool, but it is not the recommended promotion signal for NNUE changes.
 
-The canonical engine-vs-engine workflow is the archived `history.py` flow:
+OpenBench is the canonical engine-vs-engine promotion and tuning workflow. Its
+engine definition, deterministic benchmark contract, validator, and SPSA
+scaffolding live under `utils/openbench/`; see `utils/openbench/README.md`.
+
+The archived `history.py` flow remains useful for local diagnostics and
+reproducible historical records:
 
 ```bash
 # Initialize ledger folders
@@ -253,7 +256,7 @@ python utils/history/history.py snapshot --engine ./zig-out/bin/sykora --label "
 python utils/history/history.py list-engines
 python utils/history/history.py selfplay baseline candidate --games 120 --movetime-ms 200
 
-# Archived SPRT
+# Archived local SPRT diagnostic
 python utils/history/history.py sprt baseline candidate \
   --elo0 -30 --elo1 30 \
   --games-per-batch 12 --max-games 360 \
@@ -270,9 +273,9 @@ python utils/history/history.py sts candidate --movetime-ms 100
 
 Every archived selfplay/SPRT run writes settings, summary JSON, stdout/stderr logs, and reproducibility metadata under `history/`.
 
-The `Release SPRT` workflow (`.github/workflows/sprt.yml`) uses the same archived `history.py sprt` path.
-
-Low-level runners under `utils/match/` remain available, but they are implementation details rather than the recommended user/agent entrypoints.
+Low-level runners under `utils/match/` remain available, but neither they nor
+the archived local SPRT are promotion gates. They are implementation details
+and diagnostics; strength decisions are made from OpenBench workloads.
 
 See `history/README.md` for folder schema and the archived workflow.
 
