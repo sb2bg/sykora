@@ -27,6 +27,7 @@ if str(UTILS_NNUE_DIR) not in sys.path:
 from common import (  # noqa: E402
     FEATURE_SET_KING_BUCKETS_MIRRORED,
     MAGIC_V7,
+    MAGIC_V8,
     OUTPUT_BUCKET_SCHEME_MATERIAL,
     V7_SECTION_FT_BIAS,
     V7_SECTION_FT_WEIGHT,
@@ -36,17 +37,17 @@ from common import (  # noqa: E402
     V7_SECTION_L2_WEIGHT,
     V7_SECTION_OUT_BIAS,
     V7_SECTION_OUT_WEIGHT,
+    V8_SECTION_THREAT_WEIGHT,
     board_feature_indices,
-    read_syk_nnue_v6,
     read_syk_nnue_v7,
+    read_syk_nnue_v8,
 )
-
-ACTIVATION_SCRELU = 1
+from full_threats_v1 import enumerate_board  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Sykora NNUE engine/reference parity check.")
-    p.add_argument("--net", required=True, help="SYKNNUE6 or SYKNNUE7 net path")
+    p.add_argument("--net", required=True, help="SYKNNUE7 or SYKNNUE8 net path")
     p.add_argument("--fens", required=True, help="FEN suite (one per line)")
     p.add_argument(
         "--engine",
@@ -74,51 +75,6 @@ def output_bucket(net: dict, board: chess.Board) -> int:
     return min(non_king // divisor, o - 1)
 
 
-def reference_eval(net: dict, ft_w, fen: str) -> int:
-    import numpy as np
-
-    board = chess.Board(fen)
-    h = net["ft_hidden_size"]
-    q0 = net["q0"]
-    q = net["q"]
-    scale = net["scale"]
-    use_screlu = net["activation_type"] == ACTIVATION_SCRELU
-
-    white_feats, black_feats, stm_is_white = board_feature_indices(
-        board,
-        feature_set=FEATURE_SET_KING_BUCKETS_MIRRORED,
-        bucket_layout_64=net["bucket_layout_64"],
-    )
-
-    ft_b = np.asarray(net["ft_biases"], dtype=np.int64)
-    acc_white = ft_b.copy()
-    if white_feats:
-        acc_white = acc_white + ft_w[np.asarray(white_feats, dtype=np.int64)].sum(axis=0)
-    acc_black = ft_b.copy()
-    if black_feats:
-        acc_black = acc_black + ft_w[np.asarray(black_feats, dtype=np.int64)].sum(axis=0)
-
-    us = acc_white if stm_is_white else acc_black
-    them = acc_black if stm_is_white else acc_white
-
-    b = output_bucket(net, board)
-    row = np.asarray(net["out_weights"], dtype=np.int64)[b * 2 * h : b * 2 * h + 2 * h]
-    w_us = row[:h]
-    w_them = row[h : 2 * h]
-
-    def activated_dot(acc, w):
-        v = np.clip(acc, 0, q0)
-        if use_screlu:
-            v = v * v
-        return int((v * w).sum())
-
-    total = activated_dot(us, w_us) + activated_dot(them, w_them)
-    if use_screlu:
-        total = div_round_nearest_signed(total, q0)
-    total += net["out_biases"][b]
-    return div_round_nearest_signed(total * scale, q0 * q)
-
-
 def reference_eval_v7(net: dict, tensors: dict, fen: str) -> int:
     import numpy as np
 
@@ -141,6 +97,14 @@ def reference_eval_v7(net: dict, tensors: dict, fen: str) -> int:
     acc_black = ft_b.copy()
     if black_feats:
         acc_black += ft_w[np.asarray(black_feats, dtype=np.int64)].sum(axis=0)
+    if V8_SECTION_THREAT_WEIGHT in tensors:
+        threat_weights = tensors[V8_SECTION_THREAT_WEIGHT]
+        white_threats = enumerate_board(board, chess.WHITE)
+        black_threats = enumerate_board(board, chess.BLACK)
+        if white_threats:
+            acc_white += threat_weights[np.asarray(white_threats, dtype=np.int64)].sum(axis=0)
+        if black_threats:
+            acc_black += threat_weights[np.asarray(black_threats, dtype=np.int64)].sum(axis=0)
     us = acc_white if stm_is_white else acc_black
     them = acc_black if stm_is_white else acc_white
     us = np.clip(us, 0, q0)
@@ -239,23 +203,19 @@ def report_coverage(net: dict, fens: list[str]) -> None:
 
 
 def main() -> int:
-    try:
-        import numpy as np
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("numpy is required") from exc
-
     args = parse_args()
     net_path = Path(args.net)
-    if net_path.read_bytes()[:8] == MAGIC_V7:
+    magic = net_path.read_bytes()[:8]
+    if magic == MAGIC_V8:
+        net = read_syk_nnue_v8(net_path)
+        tensors = decode_v7_tensors(net)
+        evaluator = lambda fen: reference_eval_v7(net, tensors, fen)
+    elif magic == MAGIC_V7:
         net = read_syk_nnue_v7(net_path)
         tensors = decode_v7_tensors(net)
         evaluator = lambda fen: reference_eval_v7(net, tensors, fen)
     else:
-        net = read_syk_nnue_v6(net_path)
-        h = net["ft_hidden_size"]
-        input_size = 768 * net["input_bucket_count"]
-        ft_w = np.asarray(net["ft_weights"], dtype=np.int64).reshape(input_size, h)
-        evaluator = lambda fen: reference_eval(net, ft_w, fen)
+        raise SystemExit(f"unsupported network magic: {magic!r}; expected SYKNNUE7 or SYKNNUE8")
 
     fens = [
         ln.strip()

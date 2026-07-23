@@ -1,15 +1,21 @@
-# Train, export, and verify Sykora's pairwise-MLP SYKNNUE7 network.
+# Train, export, and verify Sykora's registered SYKNNUE8 or legacy v7 network.
 #
-# First run:
-#   .\launch_training.ps1 -Smoke
+# First v8 pipeline check (random init is diagnostic-only):
+#   .\launch_training.ps1 -Smoke -AllowRandomV8Init
 #
-# Full run:
-#   .\launch_training.ps1
+# T1024 pilot from the retained v7 full-precision checkpoint:
+#   .\launch_training.ps1 -WarmStart <v7-checkpoint-directory>
 
 param(
     [switch]$Smoke,
     [switch]$DryRun,
+    [ValidateSet("v8-t1024", "v8-t768", "v7")]
+    [string]$Profile = "v8-t1024",
+    [ValidateSet("pilot", "broad")]
+    [string]$Stage = "pilot",
     [string]$Resume = "",
+    [string]$WarmStart = "",
+    [switch]$AllowRandomV8Init,
     [int]$StartSuperbatch = 0
 )
 
@@ -75,15 +81,16 @@ function Resolve-Binpacks([string[]]$Names) {
 $trainingDatasets = Resolve-Binpacks $trainBinpacks
 $validationDatasets = Resolve-Binpacks $validationBinpacks
 
-# --- Registered SYKNNUE7 profile ---
-$hidden = 1024
+# --- Registered network profile and training stage ---
+$networkFormat = if ($Profile -eq "v7") { "syk7" } else { "syk8" }
+$hidden = if ($Profile -eq "v8-t768") { 768 } else { 1024 }
 $dense1 = 16
 $dense2 = 32
 $outputBuckets = 8
-$endSuperbatch = 800
+$endSuperbatch = if ($Stage -eq "pilot") { 200 } else { 800 }
 $batchSize = 16384
 $batchesPerSuperbatch = 6104
-$saveRate = 25
+$saveRate = if ($Stage -eq "pilot") { 10 } else { 25 }
 $validationPositions = 262144
 if ($Smoke) {
     $endSuperbatch = 2
@@ -91,6 +98,28 @@ if ($Smoke) {
     $batchesPerSuperbatch = 16
     $saveRate = 1
     $validationPositions = 16384
+}
+$lrFinalSuperbatch = if ($networkFormat -eq "syk8") { 800 } else { $endSuperbatch }
+
+if ($Resume -and $WarmStart) {
+    Write-Error "-Resume and -WarmStart are mutually exclusive"
+    exit 2
+}
+if ($AllowRandomV8Init -and ($Resume -or $WarmStart)) {
+    Write-Error "-AllowRandomV8Init cannot be combined with -Resume or -WarmStart"
+    exit 2
+}
+if ($AllowRandomV8Init -and $networkFormat -ne "syk8") {
+    Write-Error "-AllowRandomV8Init is only valid for a v8 profile"
+    exit 2
+}
+if ($networkFormat -eq "syk8" -and -not $Resume -and -not $WarmStart -and -not $AllowRandomV8Init) {
+    Write-Error "v8 requires -WarmStart/-Resume (or -AllowRandomV8Init for a smoke diagnostic)"
+    exit 2
+}
+if ($Profile -ne "v8-t1024" -and $WarmStart) {
+    Write-Error "-WarmStart is only valid for the v8-t1024 profile"
+    exit 2
 }
 
 $validationCache = Join-Path $dataDir "validation\t80_2024_06_v3filter_$validationPositions.data"
@@ -109,14 +138,16 @@ if ($StartSuperbatch -gt $endSuperbatch) {
 }
 
 $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
-$runPrefix = if ($Smoke) { "smoke_v7" } else { "v7" }
+$profileTag = $Profile -replace '-', '_'
+$runPrefix = if ($Smoke) { "smoke_$profileTag" } else { "${profileTag}_$Stage" }
 $runId = "${runPrefix}_${timestamp}"
 
 Write-Host "============================================"
-Write-Host "  Sykora SYKNNUE7 training"
+Write-Host "  Sykora $($networkFormat.ToUpper()) training"
 Write-Host "============================================"
 Write-Host "Run ID:        $runId"
-Write-Host "Architecture:  factorised pairwise-MLP"
+Write-Host "Profile:       $Profile ($Stage)"
+Write-Host "Architecture:  factorised pairwise-MLP$(if ($networkFormat -eq 'syk8') { ' + full_threats_v1' })"
 Write-Host "Shape:         H=$hidden, $hidden -> $dense1 -> $($dense1 * 2) -> $dense2 -> 1"
 Write-Host "Output heads:  $outputBuckets material buckets"
 Write-Host "Superbatches:  $StartSuperbatch -> $endSuperbatch"
@@ -140,7 +171,7 @@ $arguments = @(
     "--binpack-buffer-mb", 12288,
     "--binpack-threads", 6,
     "--validation-buffer-mb", 512,
-    "--network-format", "syk7",
+    "--network-format", $networkFormat,
     "--architecture", "pairwise-mlp",
     "--bucket-layout", "v3_10",
     "--hidden", $hidden,
@@ -155,10 +186,20 @@ $arguments = @(
     "--threads", 8,
     "--wdl", 0.75,
     "--lr-start", 0.001,
+    "--lr-final-superbatch", $lrFinalSuperbatch,
     "--export-after"
 )
+if ($networkFormat -eq "syk8") {
+    $arguments += @("--validate-all-checkpoints", "--export-best-validation")
+}
 if ($Resume) {
     $arguments += @("--resume", $Resume)
+}
+if ($WarmStart) {
+    $arguments += @("--warm-start", $WarmStart)
+}
+if ($AllowRandomV8Init) {
+    $arguments += "--allow-random-v8-init"
 }
 if ($DryRun) {
     $arguments += "--dry-run"

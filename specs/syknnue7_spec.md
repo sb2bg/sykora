@@ -7,14 +7,9 @@ Research date: 2026-07-09
 
 ## 1. Decision
 
-`SYKNNUE7` should be a sectioned, self-describing container that can carry two
-explicit architecture profiles:
-
-1. `legacy_linear`: the exact v3 architecture, for pipeline reproduction and
-   regression testing.
-2. `pairwise_mlp`: the strength target, using a factorised king-bucket feature
-   transformer, pairwise product pooling, eight material heads, and a small
-   nonlinear tail.
+`SYKNNUE7` is a sectioned, self-describing container for the `pairwise_mlp`
+architecture: a factorised king-bucket feature transformer, pairwise product
+pooling, eight material heads, and a small nonlinear tail.
 
 The first strength candidate should be PSQ-only:
 
@@ -53,9 +48,8 @@ output buckets=8, material-head scheme
 dense tail=1024 -> 16 -> 32 -> 32 -> 1
 ```
 
-The mature v3 model remains available as `src/net.sknnue.v3.bak`. Its lossless
-SYKNNUE6 repack remains useful as a known baseline; the v6 label described its
-container, not a separately trained architecture.
+The mature v3 model remains archived as `src/net.sknnue.v3.bak`, but is no
+longer loadable by the current runtime.
 
 ### 2.2 v3 matured much later than the existing spec says
 
@@ -74,7 +68,7 @@ that checkpoint maturity can reverse the conclusion of an architecture test.
 Future runs must not reject a wider model merely because an early checkpoint
 loses.
 
-There is also an arithmetic error in the v6 spec. With batch size 16,384 and
+There was also an arithmetic error in the earlier training notes. With batch size 16,384 and
 6,104 batches per superbatch, one superbatch is about 100 million sampled
 positions. Therefore 640 superbatches are about 64.0 billion position samples,
 not about 670 million. This is sampled throughput, not necessarily unique
@@ -200,21 +194,7 @@ run.
 
 ## 4. Architecture Profiles
 
-### 4.1 Profile 0: `legacy_linear`
-
-This profile exists for reproducibility, converters, and A/B isolation. Its
-inference contract is the existing v3/v6 contract:
-
-```text
-factorised 10-bucket PSQ FT, H=512
-  -> SCReLU(us) || SCReLU(them)
-  -> one linear output
-```
-
-The exported FT weights contain the merged factoriser. The runtime never
-loads a separate factoriser.
-
-### 4.2 Profile 1: `pairwise_mlp`
+### 4.1 `pairwise_mlp`
 
 Normative first strength target:
 
@@ -305,7 +285,7 @@ An L1-to-output skip, as used by current PlentyChess, is an optional later
 architecture flag and must be its own ablation. It is not enabled in the
 initial target.
 
-### 4.3 Exact integer dense contract
+### 4.2 Exact integer dense contract
 
 All signed divisions use round-to-nearest with ties away from zero.
 
@@ -385,7 +365,7 @@ u16     header_bytes          = 160
 u16     section_count
 u16     section_entry_bytes   = 48
 u32     flags
-u16     architecture_id       # 0=legacy_linear, 1=pairwise_mlp
+u16     architecture_id       # 1=pairwise_mlp
 u16     feature_set_id        # 1=mirrored_psq, future 2=psq_threats_pairs
 u16     input_bucket_count
 u16     output_bucket_count
@@ -702,13 +682,13 @@ can touch many features after one board move.
    checks ply, check status, and score magnitude, but does not itself reject
    captures, promotions, or checking moves. If the source dataset is already
    quiet, name that invariant explicitly and verify it.
-10. **The v6 postmortem overstates causality.** “No factoriser” is plausible and
+10. **The earlier postmortem overstates causality.** “No factoriser” is plausible and
    worth correcting, but no clean run proves it was the single dominant cause.
    This can prematurely discard techniques that are successful upstream.
 
 ### P2: tooling and format cleanup
 
-11. **Training-volume math in the v6 spec is wrong by roughly two orders of
+11. **Training-volume math in the earlier notes is wrong by roughly two orders of
     magnitude.** Use actual sample counts from the trainer rather than hand
     estimates.
 12. **Compiler version is documented but not enforced.** `zig build test`
@@ -716,10 +696,10 @@ can touch many features after one board move.
     fails because `GeneralPurposeAllocator` moved. The repository declares
     Zig 0.15.2, and a 0.15.2 build succeeds. Set `minimum_zig_version`, add a
     preflight version check, or use the pinned compiler in scripts.
-13. **The v6 output-bucket formula is needlessly restricted.** Runtime accepts
-    only bucket counts dividing 32, while Bullet's general material selector
-    uses ceiling division. O=1 and O=8 agree today. V7 stores the selector ID
-    and exact formula so future counts cannot silently diverge.
+13. **The old output-bucket formula was needlessly restricted.** The legacy
+    runtime accepted only bucket counts dividing 32, while Bullet's general
+    material selector uses ceiling division. O=1 and O=8 agree today. V7 stores
+    the selector ID and exact formula so future counts cannot silently diverge.
 14. **Format validation is duplicated.** Python tooling validates fewer fields
     than the Zig loader. Build one conformance fixture set containing valid,
     truncated, overflowed, overlapping, wrong-shape, and bad-hash files and run
@@ -742,14 +722,13 @@ V7 is ready to ship as the default only when all of these are true:
 - fast-TC SPRT passes and LTC confirms architectures with a material NPS cost;
 - the final file includes complete provenance and zero unexpected quantisation
   clipping;
-- the old embedded v3 net remains available as `src/net.sknnue.v3.bak` for
-  regression testing.
+- the old v3 net remains archived as `src/net.sknnue.v3.bak`.
 
 ## 11. Recommended Immediate Work Order
 
 1. **Done:** add held-out data, a persistent validation sample, and
    reproducibility manifests to the trainer.
-2. Add incremental-vs-full NNUE differential tests to the current v6 runtime.
+2. **Done:** add incremental-vs-full NNUE differential tests to the runtime.
 3. Make the match gate pentanomial/SPRT-capable with a larger paired opening
    suite.
 4. Run Stage R at the proven duration and establish a trustworthy baseline.

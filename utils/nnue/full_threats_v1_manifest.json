@@ -1,0 +1,334 @@
+{
+  "scheme": "full_threats_v1",
+  "scheme_id": 1,
+  "feature_count": 60720,
+  "record_bytes": 8,
+  "canonical_order": "attacker_colour,type,source,target,target_colour,target_type",
+  "packing_sha256": "964591edbe856c9f90694dcbfabe42d58b011a469e3275a8aaa9e4249b21988a",
+  "reachable_id_count": 51130,
+  "features_per_attacker_colour": 30360,
+  "geometry_counts": [
+    132,
+    336,
+    560,
+    896,
+    1456
+  ],
+  "target_slot_counts": [
+    6,
+    10,
+    8,
+    8,
+    10
+  ],
+  "type_bases": [
+    0,
+    792,
+    4152,
+    8632,
+    15800
+  ],
+  "max_active_threats": 240,
+  "golden": [
+    {
+      "id": 0,
+      "attacker_colour": 0,
+      "attacker_type": 0,
+      "source": 8,
+      "target": 16,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": true
+    },
+    {
+      "id": 5,
+      "attacker_colour": 0,
+      "attacker_type": 0,
+      "source": 8,
+      "target": 16,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 791,
+      "attacker_colour": 0,
+      "attacker_type": 0,
+      "source": 55,
+      "target": 63,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 792,
+      "attacker_colour": 0,
+      "attacker_type": 1,
+      "source": 0,
+      "target": 10,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": true
+    },
+    {
+      "id": 801,
+      "attacker_colour": 0,
+      "attacker_type": 1,
+      "source": 0,
+      "target": 10,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": true
+    },
+    {
+      "id": 4151,
+      "attacker_colour": 0,
+      "attacker_type": 1,
+      "source": 63,
+      "target": 53,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": true
+    },
+    {
+      "id": 4152,
+      "attacker_colour": 0,
+      "attacker_type": 2,
+      "source": 0,
+      "target": 9,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": true
+    },
+    {
+      "id": 4159,
+      "attacker_colour": 0,
+      "attacker_type": 2,
+      "source": 0,
+      "target": 9,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 8631,
+      "attacker_colour": 0,
+      "attacker_type": 2,
+      "source": 63,
+      "target": 54,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 8632,
+      "attacker_colour": 0,
+      "attacker_type": 3,
+      "source": 0,
+      "target": 1,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": false
+    },
+    {
+      "id": 8639,
+      "attacker_colour": 0,
+      "attacker_type": 3,
+      "source": 0,
+      "target": 1,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 15799,
+      "attacker_colour": 0,
+      "attacker_type": 3,
+      "source": 63,
+      "target": 62,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": false
+    },
+    {
+      "id": 15800,
+      "attacker_colour": 0,
+      "attacker_type": 4,
+      "source": 0,
+      "target": 1,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": false
+    },
+    {
+      "id": 15809,
+      "attacker_colour": 0,
+      "attacker_type": 4,
+      "source": 0,
+      "target": 1,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": true
+    },
+    {
+      "id": 30359,
+      "attacker_colour": 0,
+      "attacker_type": 4,
+      "source": 63,
+      "target": 62,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": false
+    },
+    {
+      "id": 30360,
+      "attacker_colour": 1,
+      "attacker_type": 0,
+      "source": 8,
+      "target": 0,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": false
+    },
+    {
+      "id": 30365,
+      "attacker_colour": 1,
+      "attacker_type": 0,
+      "source": 8,
+      "target": 0,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 31151,
+      "attacker_colour": 1,
+      "attacker_type": 0,
+      "source": 55,
+      "target": 47,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 31152,
+      "attacker_colour": 1,
+      "attacker_type": 1,
+      "source": 0,
+      "target": 10,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": true
+    },
+    {
+      "id": 31161,
+      "attacker_colour": 1,
+      "attacker_type": 1,
+      "source": 0,
+      "target": 10,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": true
+    },
+    {
+      "id": 34511,
+      "attacker_colour": 1,
+      "attacker_type": 1,
+      "source": 63,
+      "target": 53,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": true
+    },
+    {
+      "id": 34512,
+      "attacker_colour": 1,
+      "attacker_type": 2,
+      "source": 0,
+      "target": 9,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": true
+    },
+    {
+      "id": 34519,
+      "attacker_colour": 1,
+      "attacker_type": 2,
+      "source": 0,
+      "target": 9,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 38991,
+      "attacker_colour": 1,
+      "attacker_type": 2,
+      "source": 63,
+      "target": 54,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 38992,
+      "attacker_colour": 1,
+      "attacker_type": 3,
+      "source": 0,
+      "target": 1,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": false
+    },
+    {
+      "id": 38999,
+      "attacker_colour": 1,
+      "attacker_type": 3,
+      "source": 0,
+      "target": 1,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": true
+    },
+    {
+      "id": 46159,
+      "attacker_colour": 1,
+      "attacker_type": 3,
+      "source": 63,
+      "target": 62,
+      "target_colour": 1,
+      "target_type": 3,
+      "reachable": false
+    },
+    {
+      "id": 46160,
+      "attacker_colour": 1,
+      "attacker_type": 4,
+      "source": 0,
+      "target": 1,
+      "target_colour": 0,
+      "target_type": 0,
+      "reachable": false
+    },
+    {
+      "id": 46169,
+      "attacker_colour": 1,
+      "attacker_type": 4,
+      "source": 0,
+      "target": 1,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": true
+    },
+    {
+      "id": 60719,
+      "attacker_colour": 1,
+      "attacker_type": 4,
+      "source": 63,
+      "target": 62,
+      "target_colour": 1,
+      "target_type": 4,
+      "reachable": false
+    }
+  ]
+}

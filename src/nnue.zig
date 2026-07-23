@@ -1,5 +1,6 @@
 const std = @import("std");
 const nnue_dot = @import("nnue_dot.zig");
+const full_threats_v1 = @import("full_threats_v1.zig");
 const board = @import("bitboard.zig");
 const Board = board.Board;
 const piece = @import("piece.zig");
@@ -11,10 +12,8 @@ pub const MAX_HIDDEN_SIZE: usize = 2048;
 pub const Q0: i32 = 255;
 pub const Q: i32 = 64;
 pub const SCALE: i32 = 400;
-const MAX_NETWORK_BYTES = 64 * 1024 * 1024;
+const MAX_NETWORK_BYTES = 128 * 1024 * 1024;
 
-const MAGIC_V6 = "SYKNNUE6";
-const FORMAT_VERSION_V6: u16 = 6;
 const MAGIC_V7 = "SYKNNUE7";
 const FORMAT_VERSION_V7: u16 = 7;
 const V7_HEADER_BYTES: usize = 160;
@@ -22,20 +21,19 @@ const V7_SECTION_ENTRY_BYTES: usize = 48;
 const V7_HASH_OFFSET: usize = 114;
 const MAX_V7_SECTIONS: usize = 32;
 const MAX_DENSE_SIZE: usize = 256;
+const MAGIC_V8 = "SYKNNUE8";
+const FORMAT_VERSION_V8: u16 = 8;
+const V8_HEADER_BYTES: usize = 224;
+const V8_HASH_OFFSET: usize = 172;
 
 pub const Architecture = enum(u16) {
-    legacy_linear = 0,
     pairwise_mlp = 1,
+    pairwise_mlp_threats = 2,
 };
 
 pub const FeatureSet = enum(u8) {
-    legacy_psqt = 0,
     king_buckets_mirrored = 1,
-};
-
-pub const OutputBucketScheme = enum(u8) {
-    single = 0,
-    material_popcount = 1,
+    mirrored_psq_full_threats_v1 = 2,
 };
 
 pub const LoadError = error{
@@ -60,45 +58,46 @@ pub const Network = struct {
     bucket_count: u8, // input king buckets
     bucket_layout: [64]u8,
     ft_hidden_size: u16,
-    activation_type: u8, // 0 = ReLU, 1 = SCReLU
     output_bucket_count: u8,
-    output_bucket_scheme: OutputBucketScheme,
     q0: u16,
     pool_quant: u16,
     q: u16,
     scale: u16,
     dense1_size: u16,
     dense2_size: u16,
+    threat_feature_count: u32,
+    threat_scheme_id: u16,
+    threat_quant: u16,
+    psq_abs_bound: u32,
+    threat_abs_bound: u32,
     ft_biases: []i16, // [H]
     ft_weights: []i16, // [I * H]
-    output_biases: ?[]i32, // V6: [O]
-    output_weights: ?[]i16, // V6: [O * 2 * H], bucket-major
-    l1_biases: ?[]i32, // V7: [O, D1]
-    l1_weights: ?[]i8, // V7: [O, H, D1]
-    l1_weights_grouped: ?[]i8, // V7 registered fast path: [O, H/4, D1, 4]
-    l2_biases: ?[]i32, // V7: [O, D2]
-    l2_weights: ?[]i8, // V7: [O, 2*D1, D2]
-    v7_output_biases: ?[]i32, // V7: [O]
-    v7_output_weights: ?[]i8, // V7: [O, D2]
+    threat_weights: ?[]i8, // V8: [60_720 * H]
+    l1_biases: []i32, // [O, D1]
+    l1_weights: []i8, // [O, H, D1]
+    l1_weights_grouped: ?[]i8, // registered fast path: [O, H/4, D1, 4]
+    l2_biases: []i32, // [O, D2]
+    l2_weights: []i8, // [O, 2*D1, D2]
+    output_biases: []i32, // [O]
+    output_weights: []i8, // [O, D2]
 
     pub fn deinit(self: *Network) void {
         self.allocator.free(self.ft_biases);
         self.allocator.free(self.ft_weights);
-        if (self.output_biases) |values| self.allocator.free(values);
-        if (self.output_weights) |values| self.allocator.free(values);
-        if (self.l1_biases) |values| self.allocator.free(values);
-        if (self.l1_weights) |values| self.allocator.free(values);
+        if (self.threat_weights) |values| self.allocator.free(values);
+        self.allocator.free(self.l1_biases);
+        self.allocator.free(self.l1_weights);
         if (self.l1_weights_grouped) |values| self.allocator.free(values);
-        if (self.l2_biases) |values| self.allocator.free(values);
-        if (self.l2_weights) |values| self.allocator.free(values);
-        if (self.v7_output_biases) |values| self.allocator.free(values);
-        if (self.v7_output_weights) |values| self.allocator.free(values);
+        self.allocator.free(self.l2_biases);
+        self.allocator.free(self.l2_weights);
+        self.allocator.free(self.output_biases);
+        self.allocator.free(self.output_weights);
     }
 
     pub fn loadFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
         if (data.len < 8) return error.InvalidNetwork;
-        if (std.mem.eql(u8, data[0..8], MAGIC_V6)) return loadFromBytesV6(allocator, data);
         if (std.mem.eql(u8, data[0..8], MAGIC_V7)) return loadFromBytesV7(allocator, data);
+        if (std.mem.eql(u8, data[0..8], MAGIC_V8)) return loadFromBytesV8(allocator, data);
         return error.UnsupportedVersion;
     }
 
@@ -133,52 +132,13 @@ fn allocAndReadInts(
     pos: *usize,
     len: usize,
 ) LoadError![]T {
-    const values = allocator.alloc(T, len) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-        };
-    };
+    const values = allocator.alloc(T, len) catch return error.OutOfMemory;
     errdefer allocator.free(values);
 
     for (values) |*value| {
         value.* = readBytesInt(T, data, pos) orelse return error.InvalidNetwork;
     }
     return values;
-}
-
-fn checkedMulU64(a: u64, b: u64) ?u64 {
-    return std.math.mul(u64, a, b) catch null;
-}
-
-fn checkedAddU64(a: u64, b: u64) ?u64 {
-    return std.math.add(u64, a, b) catch null;
-}
-
-fn computeV6PayloadBytes(
-    input_size: usize,
-    ft_hidden_size: usize,
-    output_bucket_count: usize,
-) ?u64 {
-    var total: u64 = 0;
-
-    const hidden_size_u64: u64 = @intCast(ft_hidden_size);
-    const ft_bias_bytes = checkedMulU64(hidden_size_u64, @sizeOf(i16)) orelse return null;
-    total = checkedAddU64(total, ft_bias_bytes) orelse return null;
-
-    const ft_weight_count = checkedMulU64(@as(u64, @intCast(input_size)), hidden_size_u64) orelse return null;
-    total = checkedAddU64(total, checkedMulU64(ft_weight_count, @sizeOf(i16)) orelse return null) orelse return null;
-
-    const bias_bytes = checkedMulU64(@as(u64, @intCast(output_bucket_count)), @sizeOf(i32)) orelse return null;
-    total = checkedAddU64(total, bias_bytes) orelse return null;
-
-    const single_head_weight_count = checkedMulU64(2, hidden_size_u64) orelse return null;
-    const output_weight_count = checkedMulU64(
-        @as(u64, @intCast(output_bucket_count)),
-        single_head_weight_count,
-    ) orelse return null;
-    total = checkedAddU64(total, checkedMulU64(output_weight_count, @sizeOf(i16)) orelse return null) orelse return null;
-
-    return total;
 }
 
 /// Production accumulators are i16. Prove at load time that no reachable
@@ -197,12 +157,13 @@ fn validateI16AccumulatorBounds(
     ft_weights: []const i16,
     hidden_size: usize,
     bucket_count: usize,
-) LoadError!void {
+) LoadError!u32 {
     const tops = allocator.alloc(u16, hidden_size * ACC_BOUND_FEATURES) catch return error.OutOfMemory;
     defer allocator.free(tops);
     const mins = allocator.alloc(u16, hidden_size) catch return error.OutOfMemory;
     defer allocator.free(mins);
 
+    var maximum: u32 = 0;
     for (0..bucket_count) |bucket| {
         @memset(tops, 0);
         @memset(mins, 0);
@@ -230,115 +191,10 @@ fn validateI16AccumulatorBounds(
                 bound += magnitude;
             }
             if (bound > std.math.maxInt(i16)) return error.AccumulatorBoundsExceeded;
+            maximum = @max(maximum, @as(u32, @intCast(bound)));
         }
     }
-}
-
-fn loadFromBytesV6(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
-    var pos: usize = 8;
-
-    const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    if (version != FORMAT_VERSION_V6) return error.UnsupportedVersion;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const feature_set = std.meta.intToEnum(FeatureSet, data[pos]) catch return error.InvalidNetwork;
-    pos += 1;
-    if (feature_set != .king_buckets_mirrored) return error.InvalidNetwork;
-
-    const ft_hidden_size_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    const ft_hidden_size: usize = @intCast(ft_hidden_size_u16);
-    if (ft_hidden_size == 0 or ft_hidden_size > MAX_HIDDEN_SIZE) return error.InvalidNetwork;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const activation_type = data[pos];
-    pos += 1;
-    if (activation_type > 1) return error.InvalidNetwork;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const bucket_count = data[pos];
-    pos += 1;
-    if (bucket_count == 0) return error.InvalidNetwork;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const output_bucket_count = data[pos];
-    pos += 1;
-    if (output_bucket_count == 0) return error.InvalidNetwork;
-
-    if (pos >= data.len) return error.InvalidNetwork;
-    const output_bucket_scheme = std.meta.intToEnum(OutputBucketScheme, data[pos]) catch return error.InvalidNetwork;
-    pos += 1;
-    switch (output_bucket_scheme) {
-        .single => if (output_bucket_count != 1) return error.InvalidNetwork,
-        .material_popcount => if (32 % @as(usize, output_bucket_count) != 0) return error.InvalidNetwork,
-    }
-
-    const q0 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    const q = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    const scale = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    if (q0 == 0 or q == 0 or scale == 0) return error.InvalidNetwork;
-
-    var bucket_layout = [_]u8{0} ** 64;
-    for (&bucket_layout) |*entry| {
-        if (pos >= data.len) return error.InvalidNetwork;
-        entry.* = data[pos];
-        pos += 1;
-        if (entry.* >= bucket_count) return error.InvalidNetwork;
-    }
-
-    const input_size = LEGACY_INPUT_SIZE * @as(usize, bucket_count);
-    const payload_size = computeV6PayloadBytes(
-        input_size,
-        ft_hidden_size,
-        output_bucket_count,
-    ) orelse return error.InvalidNetwork;
-    const expected_size = checkedAddU64(@as(u64, @intCast(pos)), payload_size) orelse return error.InvalidNetwork;
-    if (expected_size != data.len) return error.InvalidNetwork;
-
-    // Payload order: output_biases, ft_biases, ft_weights, output_weights.
-    const output_biases = try allocAndReadInts(i32, allocator, data, &pos, output_bucket_count);
-    errdefer allocator.free(output_biases);
-
-    const ft_biases = try allocAndReadInts(i16, allocator, data, &pos, ft_hidden_size);
-    errdefer allocator.free(ft_biases);
-
-    const ft_weights = try allocAndReadInts(i16, allocator, data, &pos, input_size * ft_hidden_size);
-    errdefer allocator.free(ft_weights);
-
-    const output_weights = try allocAndReadInts(i16, allocator, data, &pos, @as(usize, output_bucket_count) * 2 * ft_hidden_size);
-    errdefer allocator.free(output_weights);
-
-    if (pos != data.len) return error.InvalidNetwork;
-
-    try validateI16AccumulatorBounds(allocator, ft_biases, ft_weights, ft_hidden_size, bucket_count);
-
-    return Network{
-        .allocator = allocator,
-        .architecture = .legacy_linear,
-        .feature_set = feature_set,
-        .bucket_count = bucket_count,
-        .bucket_layout = bucket_layout,
-        .ft_hidden_size = ft_hidden_size_u16,
-        .activation_type = activation_type,
-        .output_bucket_count = output_bucket_count,
-        .output_bucket_scheme = output_bucket_scheme,
-        .q0 = q0,
-        .pool_quant = 0,
-        .q = q,
-        .scale = scale,
-        .dense1_size = 0,
-        .dense2_size = 0,
-        .ft_biases = ft_biases,
-        .ft_weights = ft_weights,
-        .output_biases = output_biases,
-        .output_weights = output_weights,
-        .l1_biases = null,
-        .l1_weights = null,
-        .l1_weights_grouped = null,
-        .l2_biases = null,
-        .l2_weights = null,
-        .v7_output_biases = null,
-        .v7_output_weights = null,
-    };
+    return maximum;
 }
 
 const V7Section = struct {
@@ -589,14 +445,14 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
     // structurally valid files whose biases could overflow those lanes.
     if (dense1_size == 16 and dense2_size == 32) {
         if (hidden_size % 4 != 0) return error.InvalidNetwork;
-        const l1_margin = @as(i64, hidden_size) * 127 * 127;
+        const l1_margin = @as(i64, hidden_size) * 127 * 128;
         for (l1_biases) |bias| {
             const value: i64 = bias;
             if (value < std.math.minInt(i32) + l1_margin or value > std.math.maxInt(i32) - l1_margin) {
                 return error.InvalidNetwork;
             }
         }
-        const l2_margin: i64 = 32 * 64 * 127;
+        const l2_margin: i64 = 32 * 64 * 128;
         for (l2_biases) |bias| {
             const value: i64 = bias;
             if (value < std.math.minInt(i32) + l2_margin or value > std.math.maxInt(i32) - l2_margin) {
@@ -624,7 +480,7 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         }
     }
 
-    try validateI16AccumulatorBounds(allocator, ft_biases, ft_weights, hidden_size, bucket_count);
+    _ = try validateI16AccumulatorBounds(allocator, ft_biases, ft_weights, hidden_size, bucket_count);
 
     return .{
         .allocator = allocator,
@@ -633,26 +489,308 @@ fn loadFromBytesV7(allocator: std.mem.Allocator, data: []const u8) LoadError!Net
         .bucket_count = bucket_count,
         .bucket_layout = bucket_layout,
         .ft_hidden_size = hidden_size,
-        .activation_type = 0,
         .output_bucket_count = @intCast(output_bucket_count_u16),
-        .output_bucket_scheme = .material_popcount,
         .q0 = q0,
         .pool_quant = pool_quant,
         .q = q,
         .scale = scale,
         .dense1_size = dense1_size,
         .dense2_size = dense2_size,
+        .threat_feature_count = 0,
+        .threat_scheme_id = 0,
+        .threat_quant = 0,
+        .psq_abs_bound = 0,
+        .threat_abs_bound = 0,
         .ft_biases = ft_biases,
         .ft_weights = ft_weights,
-        .output_biases = null,
-        .output_weights = null,
+        .threat_weights = null,
         .l1_biases = l1_biases,
         .l1_weights = l1_weights,
         .l1_weights_grouped = l1_weights_grouped,
         .l2_biases = l2_biases,
         .l2_weights = l2_weights,
-        .v7_output_biases = output_biases,
-        .v7_output_weights = output_weights,
+        .output_biases = output_biases,
+        .output_weights = output_weights,
+    };
+}
+
+fn validateThreatWeights(
+    allocator: std.mem.Allocator,
+    weights: []const i8,
+    hidden_size: usize,
+    declared_bound: u32,
+) LoadError!void {
+    if (weights.len != full_threats_v1.feature_count * hidden_size) return error.InvalidNetwork;
+    const sums = allocator.alloc(u32, hidden_size) catch return error.OutOfMemory;
+    defer allocator.free(sums);
+    @memset(sums, 0);
+
+    for (0..full_threats_v1.feature_count) |feature| {
+        const row = weights[feature * hidden_size ..][0..hidden_size];
+        if (!full_threats_v1.isReachableId(@intCast(feature))) {
+            for (row) |weight| {
+                if (weight != 0) return error.InvalidNetwork;
+            }
+        }
+        for (row, sums) |weight, *sum| {
+            const magnitude: u8 = @abs(weight);
+            sum.* = std.math.add(u32, sum.*, magnitude) catch return error.AccumulatorBoundsExceeded;
+        }
+    }
+    var actual_bound: u32 = 0;
+    for (sums) |sum| actual_bound = @max(actual_bound, sum);
+    if (actual_bound != declared_bound) return error.InvalidNetwork;
+}
+
+fn loadFromBytesV8(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
+    if (data.len < V8_HEADER_BYTES or data.len > MAX_NETWORK_BYTES) return error.InvalidNetwork;
+    var pos: usize = 8;
+
+    const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const header_bytes = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const section_count_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const section_entry_bytes = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const flags = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
+    if (version != FORMAT_VERSION_V8) return error.UnsupportedVersion;
+    if (header_bytes != V8_HEADER_BYTES or section_entry_bytes != V7_SECTION_ENTRY_BYTES or flags != 0) {
+        return error.InvalidNetwork;
+    }
+
+    const architecture = std.meta.intToEnum(
+        Architecture,
+        readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork,
+    ) catch return error.InvalidNetwork;
+    const feature_set_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    if (feature_set_u16 > 255) return error.InvalidNetwork;
+    const feature_set = std.meta.intToEnum(FeatureSet, @as(u8, @intCast(feature_set_u16))) catch return error.InvalidNetwork;
+    const bucket_count_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const output_bucket_count_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const hidden_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const dense1_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const dense2_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    if (architecture != .pairwise_mlp_threats or feature_set != .mirrored_psq_full_threats_v1 or
+        bucket_count_u16 != 10 or output_bucket_count_u16 != 8 or
+        (hidden_size != 768 and hidden_size != 1024) or dense1_size != 16 or dense2_size != 32)
+    {
+        return error.InvalidNetwork;
+    }
+
+    if (pos + 8 > data.len) return error.InvalidNetwork;
+    const ft_activation = data[pos];
+    const pooling = data[pos + 1];
+    const dense1_activation = data[pos + 2];
+    const dense2_activation = data[pos + 3];
+    const output_selector = data[pos + 4];
+    pos += 5;
+    if (ft_activation != 0 or pooling != 1 or dense1_activation != 1 or dense2_activation != 1 or output_selector != 1) {
+        return error.InvalidNetwork;
+    }
+    if (!bytesAreZero(data[pos .. pos + 3])) return error.InvalidNetwork;
+    pos += 3;
+
+    const q0 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const pool_quant = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const q = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const scale = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    const psq_feature_count = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
+    const threat_feature_count = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
+    const threat_scheme_id = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    if (pos + 2 > data.len) return error.InvalidNetwork;
+    const psq_element_type = data[pos];
+    const threat_element_type = data[pos + 1];
+    pos += 2;
+    const threat_quant = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+    if (pos >= data.len) return error.InvalidNetwork;
+    const resolved_accumulator_type = data[pos];
+    pos += 1;
+    if (!bytesAreZero(data[pos .. pos + 3])) return error.InvalidNetwork;
+    pos += 3;
+    if (q0 != Q0 or pool_quant != 128 or q != Q or scale != SCALE or
+        psq_feature_count != 768 * bucket_count_u16 or
+        threat_feature_count != full_threats_v1.feature_count or
+        threat_scheme_id != full_threats_v1.scheme_id or
+        psq_element_type != 3 or threat_element_type != 1 or
+        threat_quant != Q0 or resolved_accumulator_type != 4)
+    {
+        return error.InvalidNetwork;
+    }
+
+    var bucket_layout = [_]u8{0} ** 64;
+    var max_bucket: u8 = 0;
+    for (&bucket_layout) |*entry| {
+        if (pos >= data.len) return error.InvalidNetwork;
+        entry.* = data[pos];
+        pos += 1;
+        if (entry.* >= bucket_count_u16) return error.InvalidNetwork;
+        max_bucket = @max(max_bucket, entry.*);
+    }
+    if (@as(u16, max_bucket) + 1 != bucket_count_u16) return error.InvalidNetwork;
+
+    if (pos + 32 > data.len or !std.mem.eql(u8, data[pos .. pos + 32], &full_threats_v1.packing_hash)) {
+        return error.InvalidNetwork;
+    }
+    pos += 32;
+    const psq_abs_bound = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
+    const threat_abs_bound = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
+    if (pos + 32 + 20 != V8_HEADER_BYTES) return error.InvalidNetwork;
+    const expected_hash = data[pos .. pos + 32];
+    pos += 32;
+    if (!bytesAreZero(data[pos .. pos + 20])) return error.InvalidNetwork;
+    pos += 20;
+
+    var actual_hash: [32]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(data[0..V8_HASH_OFFSET]);
+    hasher.update(&([_]u8{0} ** 32));
+    hasher.update(data[V8_HASH_OFFSET + 32 ..]);
+    hasher.final(&actual_hash);
+    if (!std.mem.eql(u8, expected_hash, &actual_hash)) return error.InvalidNetwork;
+
+    const section_count: usize = section_count_u16;
+    if (section_count != 9 or section_count > MAX_V7_SECTIONS) return error.InvalidNetwork;
+    const table_bytes = std.math.mul(usize, section_count, V7_SECTION_ENTRY_BYTES) catch return error.InvalidNetwork;
+    const table_end = std.math.add(usize, V8_HEADER_BYTES, table_bytes) catch return error.InvalidNetwork;
+    if (table_end > data.len) return error.InvalidNetwork;
+
+    var section_storage: [MAX_V7_SECTIONS]V7Section = undefined;
+    const sections = section_storage[0..section_count];
+    var previous_end = std.mem.alignForward(usize, table_end, 64);
+    if (previous_end > data.len or !bytesAreZero(data[table_end..previous_end])) return error.InvalidNetwork;
+    for (sections, 0..) |*section, index| {
+        var entry_pos = V8_HEADER_BYTES + index * V7_SECTION_ENTRY_BYTES;
+        const id = readBytesInt(u16, data, &entry_pos) orelse return error.InvalidNetwork;
+        if (entry_pos + 2 > data.len) return error.InvalidNetwork;
+        const element_type = data[entry_pos];
+        const rank = data[entry_pos + 1];
+        entry_pos += 2;
+        const section_flags = readBytesInt(u32, data, &entry_pos) orelse return error.InvalidNetwork;
+        if (rank == 0 or rank > 4 or section_flags != 1) return error.InvalidNetwork;
+        var dimensions = [_]u32{1} ** 4;
+        for (&dimensions) |*dimension| dimension.* = readBytesInt(u32, data, &entry_pos) orelse return error.InvalidNetwork;
+        for (dimensions[0..rank]) |dimension| if (dimension == 0) return error.InvalidNetwork;
+        for (dimensions[rank..]) |dimension| if (dimension != 1) return error.InvalidNetwork;
+        const file_offset_u64 = readBytesInt(u64, data, &entry_pos) orelse return error.InvalidNetwork;
+        const byte_length_u64 = readBytesInt(u64, data, &entry_pos) orelse return error.InvalidNetwork;
+        const crc32 = readBytesInt(u32, data, &entry_pos) orelse return error.InvalidNetwork;
+        const reserved = readBytesInt(u32, data, &entry_pos) orelse return error.InvalidNetwork;
+        if (reserved != 0 or entry_pos != V8_HEADER_BYTES + (index + 1) * V7_SECTION_ENTRY_BYTES) return error.InvalidNetwork;
+        const file_offset = std.math.cast(usize, file_offset_u64) orelse return error.InvalidNetwork;
+        const byte_length = std.math.cast(usize, byte_length_u64) orelse return error.InvalidNetwork;
+        if (file_offset % 64 != 0 or file_offset < previous_end) return error.InvalidNetwork;
+        const section_end = std.math.add(usize, file_offset, byte_length) catch return error.InvalidNetwork;
+        if (section_end > data.len or !bytesAreZero(data[previous_end..file_offset])) return error.InvalidNetwork;
+        var expected_length = v7TypeSize(element_type) orelse return error.InvalidNetwork;
+        for (dimensions[0..rank]) |dimension| expected_length = std.math.mul(usize, expected_length, dimension) catch return error.InvalidNetwork;
+        if (expected_length != byte_length or std.hash.crc.Crc32.hash(data[file_offset..section_end]) != crc32) {
+            return error.InvalidNetwork;
+        }
+        for (sections[0..index]) |prior| if (prior.id == id) return error.InvalidNetwork;
+        section.* = .{
+            .id = id,
+            .element_type = element_type,
+            .rank = rank,
+            .dimensions = dimensions,
+            .offset = file_offset,
+            .byte_length = byte_length,
+        };
+        previous_end = section_end;
+    }
+    if (previous_end != data.len) return error.InvalidNetwork;
+
+    const h32: u32 = hidden_size;
+    const psq32: u32 = psq_feature_count;
+    const threat32: u32 = threat_feature_count;
+    const ft_bias_section = try requireV7Section(sections, 1, 3, &.{h32});
+    const ft_weight_section = try requireV7Section(sections, 2, 3, &.{ psq32, h32 });
+    const threat_weight_section = try requireV7Section(sections, 3, 1, &.{ threat32, h32 });
+    const l1_bias_section = try requireV7Section(sections, 10, 4, &.{ 8, 16 });
+    const l1_weight_section = try requireV7Section(sections, 11, 1, &.{ 8, h32, 16 });
+    const l2_bias_section = try requireV7Section(sections, 12, 4, &.{ 8, 32 });
+    const l2_weight_section = try requireV7Section(sections, 13, 1, &.{ 8, 32, 32 });
+    const output_bias_section = try requireV7Section(sections, 14, 4, &.{8});
+    const output_weight_section = try requireV7Section(sections, 15, 1, &.{ 8, 32 });
+
+    const ft_biases = try allocV7SectionInts(i16, allocator, data, ft_bias_section);
+    errdefer allocator.free(ft_biases);
+    const ft_weights = try allocV7SectionInts(i16, allocator, data, ft_weight_section);
+    errdefer allocator.free(ft_weights);
+    const threat_weights = try allocV7SectionInts(i8, allocator, data, threat_weight_section);
+    errdefer allocator.free(threat_weights);
+    const l1_biases = try allocV7SectionInts(i32, allocator, data, l1_bias_section);
+    errdefer allocator.free(l1_biases);
+    const l1_weights = try allocV7SectionInts(i8, allocator, data, l1_weight_section);
+    errdefer allocator.free(l1_weights);
+    const l2_biases = try allocV7SectionInts(i32, allocator, data, l2_bias_section);
+    errdefer allocator.free(l2_biases);
+    const l2_weights = try allocV7SectionInts(i8, allocator, data, l2_weight_section);
+    errdefer allocator.free(l2_weights);
+    const output_biases = try allocV7SectionInts(i32, allocator, data, output_bias_section);
+    errdefer allocator.free(output_biases);
+    const output_weights = try allocV7SectionInts(i8, allocator, data, output_weight_section);
+    errdefer allocator.free(output_weights);
+
+    const hidden: usize = hidden_size;
+    const groups = hidden / 4;
+    const grouped = allocator.alloc(i8, l1_weights.len) catch return error.OutOfMemory;
+    errdefer allocator.free(grouped);
+    for (0..8) |bucket| {
+        for (0..groups) |group| {
+            for (0..16) |output| {
+                for (0..4) |lane| {
+                    const input = group * 4 + lane;
+                    const source = (bucket * hidden + input) * 16 + output;
+                    const destination = ((bucket * groups + group) * 16 + output) * 4 + lane;
+                    grouped[destination] = l1_weights[source];
+                }
+            }
+        }
+    }
+
+    const l1_margin = @as(i64, hidden_size) * 127 * 128;
+    for (l1_biases) |bias| {
+        const value: i64 = bias;
+        if (value < std.math.minInt(i32) + l1_margin or value > std.math.maxInt(i32) - l1_margin) return error.InvalidNetwork;
+    }
+    const l2_margin: i64 = 32 * 64 * 128;
+    for (l2_biases) |bias| {
+        const value: i64 = bias;
+        if (value < std.math.minInt(i32) + l2_margin or value > std.math.maxInt(i32) - l2_margin) return error.InvalidNetwork;
+    }
+
+    const actual_psq_bound = try validateI16AccumulatorBounds(allocator, ft_biases, ft_weights, hidden, bucket_count_u16);
+    if (actual_psq_bound != psq_abs_bound) return error.InvalidNetwork;
+    try validateThreatWeights(allocator, threat_weights, hidden, threat_abs_bound);
+    if (@as(u64, psq_abs_bound) + threat_abs_bound > std.math.maxInt(i32)) return error.AccumulatorBoundsExceeded;
+
+    return .{
+        .allocator = allocator,
+        .architecture = architecture,
+        .feature_set = feature_set,
+        .bucket_count = @intCast(bucket_count_u16),
+        .bucket_layout = bucket_layout,
+        .ft_hidden_size = hidden_size,
+        .output_bucket_count = 8,
+        .q0 = q0,
+        .pool_quant = pool_quant,
+        .q = q,
+        .scale = scale,
+        .dense1_size = dense1_size,
+        .dense2_size = dense2_size,
+        .threat_feature_count = threat_feature_count,
+        .threat_scheme_id = threat_scheme_id,
+        .threat_quant = threat_quant,
+        .psq_abs_bound = psq_abs_bound,
+        .threat_abs_bound = threat_abs_bound,
+        .ft_biases = ft_biases,
+        .ft_weights = ft_weights,
+        .threat_weights = threat_weights,
+        .l1_biases = l1_biases,
+        .l1_weights = l1_weights,
+        .l1_weights_grouped = grouped,
+        .l2_biases = l2_biases,
+        .l2_weights = l2_weights,
+        .output_biases = output_biases,
+        .output_weights = output_weights,
     };
 }
 
@@ -697,10 +835,6 @@ fn featureIndex(
     const side = if (perspective == .white) color else oppositeColor(color);
     const side_idx: usize = @intFromEnum(side);
     const piece_idx: usize = @intFromEnum(piece_type);
-
-    if (net.feature_set == .legacy_psqt) {
-        return side_idx * 6 * 64 + piece_idx * 64 + sq;
-    }
 
     if ((king_sq % 8) > 3) {
         sq ^= 7;
@@ -780,7 +914,6 @@ pub const AccumulatorRefreshCache = struct {
 const SIMD_LANES = std.simd.suggestVectorLength(i16) orelse 8;
 const WeightVec = @Vector(SIMD_LANES, i16);
 const I32Vec = @Vector(SIMD_LANES, i32);
-const I64Vec = @Vector(SIMD_LANES, i64);
 
 inline fn AccVecOf(comptime Slice: type) type {
     return @Vector(SIMD_LANES, std.meta.Elem(Slice));
@@ -800,7 +933,6 @@ inline fn perspectiveLayoutChanged(
     old_king_sq: u8,
     new_king_sq: u8,
 ) bool {
-    if (net.feature_set != .king_buckets_mirrored) return false;
     const old_perspective_king_sq = perspectiveKingSquare(perspective, old_king_sq);
     const new_perspective_king_sq = perspectiveKingSquare(perspective, new_king_sq);
     return net.bucket_layout[old_perspective_king_sq] != net.bucket_layout[new_perspective_king_sq] or
@@ -915,44 +1047,6 @@ inline fn clampVecToActivationRange(values: I32Vec, max_value: i32) I32Vec {
     return @min(@max(values, zero), max_vec);
 }
 
-inline fn activatedDot(
-    acc_values: anytype,
-    weights: []const i16,
-    hidden_size: usize,
-    activation_type: u8,
-    q0: i32,
-) i64 {
-    const AccVec = AccVecOf(@TypeOf(acc_values));
-    const use_screlu = activation_type == 1;
-    var h: usize = 0;
-
-    // Accumulate in i64 lanes and reduce once at the end instead of a
-    // horizontal reduce per chunk. Lane sums cannot overflow: each product
-    // is at most q0^2 * 32767 (~2.13e9) and a lane sees at most
-    // MAX_HIDDEN_SIZE / SIMD_LANES of them.
-    var sum_vec: I64Vec = @splat(0);
-    while (h + SIMD_LANES <= hidden_size) : (h += SIMD_LANES) {
-        const acc_ptr: *align(1) const AccVec = @ptrCast(&acc_values[h]);
-        const weight_ptr: *align(1) const WeightVec = @ptrCast(&weights[h]);
-        const clamped = clampVecToActivationRange(@intCast(acc_ptr.*), q0);
-        const activated = if (use_screlu) clamped * clamped else clamped;
-        const product = activated * @as(I32Vec, @intCast(weight_ptr.*));
-        sum_vec += @as(I64Vec, @intCast(product));
-    }
-    var sum: i64 = @reduce(.Add, sum_vec);
-
-    while (h < hidden_size) : (h += 1) {
-        const v = clampToActivationRange(acc_values[h], q0);
-        if (use_screlu) {
-            sum += @as(i64, v) * @as(i64, v) * @as(i64, weights[h]);
-        } else {
-            sum += @as(i64, v) * @as(i64, weights[h]);
-        }
-    }
-
-    return sum;
-}
-
 fn initPerspectiveAccumulator(
     net: *const Network,
     b: *Board,
@@ -1027,7 +1121,6 @@ pub fn seedAccumulatorRefreshCache(
     acc: *const AccumulatorPair,
     cache: *AccumulatorRefreshCache,
 ) void {
-    if (net.feature_set != .king_buckets_mirrored) return;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
 
     inline for ([_]piece.Color{ .white, .black }) |perspective| {
@@ -1212,12 +1305,10 @@ pub fn updateAccumulators(
     const state = b.board;
     const white_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.white) & state.getKindBitboard(.king)));
     const black_king_sq: u8 = @intCast(@ctz(state.getColorBitboard(.black) & state.getKindBitboard(.king)));
-    const refresh_white = net.feature_set == .king_buckets_mirrored and
-        moved_piece == .king and
+    const refresh_white = moved_piece == .king and
         moved_color == .white and
         perspectiveLayoutChanged(net, .white, from_sq, to_sq);
-    const refresh_black = net.feature_set == .king_buckets_mirrored and
-        moved_piece == .king and
+    const refresh_black = moved_piece == .king and
         moved_color == .black and
         perspectiveLayoutChanged(net, .black, from_sq, to_sq);
     const final_piece = promotion orelse moved_piece;
@@ -1386,47 +1477,11 @@ pub fn updateAccumulators(
 }
 
 inline fn outputBucket(net: *const Network, b: *Board) usize {
-    switch (net.output_bucket_scheme) {
-        .single => return 0,
-        .material_popcount => {
-            const o: usize = net.output_bucket_count;
-            const n = @popCount(b.board.occupied()); // includes kings, 2..32
-            const divisor = (32 + o - 1) / o;
-            const non_king = if (n >= 2) n - 2 else 0;
-            return @min(non_king / divisor, o - 1);
-        },
-    }
-}
-
-fn evaluateLinearFromAccumulators(
-    net: *const Network,
-    acc: anytype,
-    b: *Board,
-) i32 {
-    const stm_is_white = b.board.move == .white;
-    const hidden_size: usize = @intCast(net.ft_hidden_size);
-    const q0: i32 = net.q0;
-    const q: i32 = net.q;
-    const scale: i32 = net.scale;
-    const use_screlu = net.activation_type == 1;
-    const final_den: i64 = @as(i64, q0) * @as(i64, q);
-
-    const bucket = outputBucket(net, b);
-    const weights_base = bucket * 2 * hidden_size;
-    const all_weights = net.output_weights orelse unreachable;
-    const weights = all_weights[weights_base .. weights_base + 2 * hidden_size];
-
-    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
-    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
-
-    var sum = activatedDot(us_acc, weights[0..hidden_size], hidden_size, net.activation_type, q0) +
-        activatedDot(them_acc, weights[hidden_size .. 2 * hidden_size], hidden_size, net.activation_type, q0);
-
-    if (use_screlu) {
-        sum = divRoundNearestSigned(sum, q0);
-    }
-    sum += (net.output_biases orelse unreachable)[bucket];
-    return @intCast(divRoundNearestSigned(sum * scale, final_den));
+    const output_buckets: usize = net.output_bucket_count;
+    const piece_count = @popCount(b.board.occupied()); // includes kings, 2..32
+    const divisor = (32 + output_buckets - 1) / output_buckets;
+    const non_king_count = if (piece_count >= 2) piece_count - 2 else 0;
+    return @min(non_king_count / divisor, output_buckets - 1);
 }
 
 const V7Dense1Vec = @Vector(16, i32);
@@ -1442,12 +1497,12 @@ fn evaluatePairwiseMlpTail16x32(
     const hidden_size: usize = @intCast(net.ft_hidden_size);
     const q: i64 = net.q;
     const pool_quant: i64 = net.pool_quant;
-    const l1_biases = net.l1_biases orelse unreachable;
+    const l1_biases = net.l1_biases;
     const l1_weights = net.l1_weights_grouped orelse unreachable;
-    const l2_biases = net.l2_biases orelse unreachable;
-    const l2_weights = net.l2_weights orelse unreachable;
-    const output_biases = net.v7_output_biases orelse unreachable;
-    const output_weights = net.v7_output_weights orelse unreachable;
+    const l2_biases = net.l2_biases;
+    const l2_weights = net.l2_weights;
+    const output_biases = net.output_biases;
+    const output_weights = net.output_weights;
 
     const l1_bias_ptr: *align(1) const V7Dense1Vec = @ptrCast(&l1_biases[bucket * 16]);
     var l1_sums = l1_bias_ptr.*;
@@ -1494,12 +1549,12 @@ fn evaluatePairwiseMlpTail16x32(
     return @intCast(divRoundNearestSigned(sum * net.scale, q * q));
 }
 
-fn evaluatePairwiseMlpFromAccumulators(
+fn evaluatePairwiseMlpFromSlices(
     net: *const Network,
-    acc: anytype,
+    us_acc: anytype,
+    them_acc: anytype,
     b: *Board,
 ) i32 {
-    const stm_is_white = b.board.move == .white;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
     const half = hidden_size / 2;
     const dense1_size: usize = @intCast(net.dense1_size);
@@ -1508,8 +1563,6 @@ fn evaluatePairwiseMlpFromAccumulators(
     const pool_quant: i64 = net.pool_quant;
     const bucket = outputBucket(net, b);
 
-    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
-    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
     const AccVec = AccVecOf(@TypeOf(us_acc));
     var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
     var index: usize = 0;
@@ -1541,8 +1594,8 @@ fn evaluatePairwiseMlpFromAccumulators(
         return evaluatePairwiseMlpTail16x32(net, pooled[0..hidden_size], bucket);
     }
 
-    const l1_biases = net.l1_biases orelse unreachable;
-    const l1_weights = net.l1_weights orelse unreachable;
+    const l1_biases = net.l1_biases;
+    const l1_weights = net.l1_weights;
     var dense1_activated: [2 * MAX_DENSE_SIZE]i32 = undefined;
     for (0..dense1_size) |output| {
         var sum: i64 = l1_biases[bucket * dense1_size + output];
@@ -1556,8 +1609,8 @@ fn evaluatePairwiseMlpFromAccumulators(
         dense1_activated[dense1_size + output] = @intCast(@min(squared, q));
     }
 
-    const l2_biases = net.l2_biases orelse unreachable;
-    const l2_weights = net.l2_weights orelse unreachable;
+    const l2_biases = net.l2_biases;
+    const l2_weights = net.l2_weights;
     var dense2_activated: [MAX_DENSE_SIZE]i32 = undefined;
     for (0..dense2_size) |output| {
         var sum: i64 = l2_biases[bucket * dense2_size + output];
@@ -1570,8 +1623,8 @@ fn evaluatePairwiseMlpFromAccumulators(
         dense2_activated[output] = @intCast(divRoundNearestNonNeg(clipped * clipped, q));
     }
 
-    const output_biases = net.v7_output_biases orelse unreachable;
-    const output_weights = net.v7_output_weights orelse unreachable;
+    const output_biases = net.output_biases;
+    const output_weights = net.output_weights;
     var sum: i64 = output_biases[bucket];
     for (0..dense2_size) |input| {
         sum += @as(i64, dense2_activated[input]) *
@@ -1580,7 +1633,60 @@ fn evaluatePairwiseMlpFromAccumulators(
     return @intCast(divRoundNearestSigned(sum * net.scale, q * q));
 }
 
-/// Evaluate using pre-computed accumulators (activation + head only).
+fn evaluatePairwiseMlpFromAccumulators(
+    net: *const Network,
+    acc: anytype,
+    b: *Board,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const stm_is_white = b.board.move == .white;
+    const us_acc = if (stm_is_white) acc.white[0..hidden_size] else acc.black[0..hidden_size];
+    const them_acc = if (stm_is_white) acc.black[0..hidden_size] else acc.white[0..hidden_size];
+    return evaluatePairwiseMlpFromSlices(net, us_acc, them_acc, b);
+}
+
+fn addThreatFeatures(
+    net: *const Network,
+    b: *Board,
+    perspective: piece.Color,
+    destination: []i32,
+) void {
+    var feature_storage: [full_threats_v1.max_active]u16 = undefined;
+    const features = full_threats_v1.enumerate(&b.board, perspective, &feature_storage);
+    const threat_weights = net.threat_weights orelse unreachable;
+    const hidden_size = destination.len;
+    for (features) |feature| {
+        const base = @as(usize, feature) * hidden_size;
+        const row = threat_weights[base .. base + hidden_size];
+        for (destination, row) |*value, weight| value.* += weight;
+    }
+}
+
+fn evaluatePairwiseMlpThreatsFromAccumulators(
+    net: *const Network,
+    acc: anytype,
+    b: *Board,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    var resolved_white: [MAX_HIDDEN_SIZE]i32 = undefined;
+    var resolved_black: [MAX_HIDDEN_SIZE]i32 = undefined;
+    for (acc.white[0..hidden_size], resolved_white[0..hidden_size]) |value, *resolved| {
+        resolved.* = value;
+    }
+    for (acc.black[0..hidden_size], resolved_black[0..hidden_size]) |value, *resolved| {
+        resolved.* = value;
+    }
+    addThreatFeatures(net, b, .white, resolved_white[0..hidden_size]);
+    addThreatFeatures(net, b, .black, resolved_black[0..hidden_size]);
+
+    const stm_is_white = b.board.move == .white;
+    const us_acc = if (stm_is_white) resolved_white[0..hidden_size] else resolved_black[0..hidden_size];
+    const them_acc = if (stm_is_white) resolved_black[0..hidden_size] else resolved_white[0..hidden_size];
+    return evaluatePairwiseMlpFromSlices(net, us_acc, them_acc, b);
+}
+
+/// Evaluate using pre-computed PSQ accumulators. V8 also resolves its
+/// reference threat accumulator from the current board before the dense tail.
 /// Returns score from the side-to-move perspective. `acc` may point at
 /// `AccumulatorPair` or `AccumulatorPairWide`; results are bit-identical
 /// for any net that passes the load-time accumulator bound check.
@@ -1590,8 +1696,8 @@ pub fn evaluateFromAccumulators(
     b: *Board,
 ) i32 {
     return switch (net.architecture) {
-        .legacy_linear => evaluateLinearFromAccumulators(net, acc, b),
         .pairwise_mlp => evaluatePairwiseMlpFromAccumulators(net, acc, b),
+        .pairwise_mlp_threats => evaluatePairwiseMlpThreatsFromAccumulators(net, acc, b),
     };
 }
 

@@ -101,6 +101,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate every saved checkpoint instead of only the final checkpoint",
     )
+    parser.add_argument(
+        "--export-best-validation",
+        action="store_true",
+        help="Export the lowest-MSE validated checkpoint instead of blindly exporting the final one",
+    )
 
     parser.add_argument(
         "--bullet-repo", default=str(DEFAULT_BULLET_REPO), help="Path to Bullet repository"
@@ -127,13 +132,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--architecture",
-        choices=["linear", "pairwise-linear", "pairwise-mlp"],
+        choices=["pairwise-linear", "pairwise-mlp"],
         default="pairwise-mlp",
         help="Network graph to train",
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk6", "syk7"],
+        choices=["syk7", "syk8"],
         default="syk7",
         help="Checkpoint architecture family",
     )
@@ -159,6 +164,12 @@ def parse_args() -> argparse.Namespace:
         help="Superbatch at which this cosine phase starts (set to fine-tune start to restart LR)",
     )
     parser.add_argument(
+        "--lr-final-superbatch",
+        type=int,
+        default=0,
+        help="Cosine horizon; 0 uses end-superbatch (set to 800 for a resumable v8 pilot)",
+    )
+    parser.add_argument(
         "--lr-final", type=float, default=0.0, help="0 uses lr_start * 0.3^5"
     )
     parser.add_argument("--wdl", type=float, default=0.75)
@@ -180,6 +191,16 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         default="",
         help="Checkpoint directory whose optimiser_state should be resumed",
+    )
+    parser.add_argument(
+        "--warm-start",
+        default="",
+        help="Full-precision v7 checkpoint used to initialise a zero-threat T1024 run",
+    )
+    parser.add_argument(
+        "--allow-random-v8-init",
+        action="store_true",
+        help="Allow v8 without a v7 warm start (smoke diagnostics only)",
     )
     parser.add_argument(
         "--export-after",
@@ -287,20 +308,48 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("invalid superbatch bounds")
     if args.lr_origin_superbatch <= 0 or args.lr_origin_superbatch > args.start_superbatch:
         raise ValueError("--lr-origin-superbatch must be in [1, start-superbatch]")
+    lr_final_superbatch = args.lr_final_superbatch or args.end_superbatch
+    if lr_final_superbatch < args.end_superbatch or lr_final_superbatch < args.lr_origin_superbatch:
+        raise ValueError(
+            "--lr-final-superbatch must be >= end-superbatch and lr-origin-superbatch"
+        )
     if args.lr_start <= 0 or args.lr_final < 0:
         raise ValueError("learning rates must be non-negative and lr_start must be > 0")
     if not 0.0 <= args.wdl <= 1.0:
         raise ValueError("--wdl must be in [0, 1]")
-    if args.architecture == "linear" and args.network_format != "syk6":
-        raise ValueError("linear architecture must use --network-format syk6")
-    if args.architecture != "linear" and args.network_format != "syk7":
-        raise ValueError("pairwise architectures must use --network-format syk7")
-    if args.architecture != "linear" and args.hidden % 2:
+    if args.resume and args.warm_start:
+        raise ValueError("--resume and --warm-start are mutually exclusive")
+    if args.warm_start and args.network_format != "syk8":
+        raise ValueError("--warm-start is only supported for syk8 T1024")
+    if args.allow_random_v8_init and args.network_format != "syk8":
+        raise ValueError("--allow-random-v8-init is only valid for syk8")
+    if args.allow_random_v8_init and (args.resume or args.warm_start):
+        raise ValueError("--allow-random-v8-init cannot be combined with resume or warm start")
+    if args.architecture == "pairwise-linear" and args.network_format != "syk7":
+        raise ValueError("pairwise-linear must use --network-format syk7")
+    if args.architecture == "pairwise-mlp" and args.network_format not in {"syk7", "syk8"}:
+        raise ValueError("pairwise-mlp must use --network-format syk7 or syk8")
+    if args.network_format == "syk8":
+        if args.architecture != "pairwise-mlp":
+            raise ValueError("syk8 requires --architecture pairwise-mlp")
+        if args.hidden not in {768, 1024}:
+            raise ValueError("syk8 registered widths are --hidden 1024 (T1024) and 768 (T768)")
+        if args.dense1 != 16 or args.dense2 != 32 or args.output_buckets != 8:
+            raise ValueError("syk8 requires --dense1 16 --dense2 32 --output-buckets 8")
+        if not args.resume and not args.warm_start and not args.allow_random_v8_init:
+            raise ValueError(
+                "syk8 requires --warm-start/--resume, or --allow-random-v8-init for diagnostics"
+            )
+        if args.hidden == 768 and args.warm_start:
+            raise ValueError("T768 cannot use the exact H=1024 v7 warm start")
+    if args.hidden % 2:
         raise ValueError("pairwise architectures require an even --hidden")
     if args.export_after and args.architecture == "pairwise-linear":
         raise ValueError("pairwise-linear is an ablation and has no deployable exporter")
     if args.parity_engine and not args.export_after:
         raise ValueError("--parity-engine requires --export-after")
+    if args.export_best_validation and (not args.export_after or not args.validate_after):
+        raise ValueError("--export-best-validation requires validation and --export-after")
 
 
 def main() -> int:
@@ -355,6 +404,28 @@ def main() -> int:
         return 2
     run_dir.mkdir(parents=True, exist_ok=True)
     provenance_dir.mkdir(parents=True, exist_ok=True)
+
+    warm_start_cmd: list[str] = []
+    warm_start_weights = Path()
+    warm_start_report = Path()
+    if args.warm_start:
+        warm_source = Path(args.warm_start).resolve()
+        if not warm_source.exists():
+            print(f"Warm-start source not found: {warm_source}", file=sys.stderr)
+            return 1
+        warm_dir = run_dir / "warm_start"
+        warm_start_weights = warm_dir / "weights.bin"
+        warm_start_report = warm_dir / "verification.json"
+        warm_start_cmd = [
+            sys.executable,
+            str(THIS_DIR / "warm_start_v8.py"),
+            "--source",
+            str(warm_source),
+            "--output",
+            str(warm_start_weights),
+            "--report",
+            str(warm_start_report),
+        ]
 
     repo_provenance = git_snapshot(REPO_ROOT, provenance_dir, "sykora")
     bullet_provenance = git_snapshot(bullet_repo, provenance_dir, "bullet")
@@ -424,8 +495,12 @@ def main() -> int:
     else:
         validation_sample = Path()
         print("WARNING: no held-out validation data was supplied")
+    if args.export_best_validation and str(validation_sample) == ".":
+        print("--export-best-validation requires held-out validation data", file=sys.stderr)
+        return 2
 
     final_lr = args.lr_final if args.lr_final > 0 else args.lr_start * (0.3**5)
+    lr_final_superbatch = args.lr_final_superbatch or args.end_superbatch
     dataset_str = ";".join(str(path) for path in datasets)
     env = os.environ.copy()
     env.update(
@@ -440,6 +515,7 @@ def main() -> int:
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
             "SYK_LR_ORIGIN_SUPERBATCH": str(args.lr_origin_superbatch),
+            "SYK_LR_FINAL_SUPERBATCH": str(lr_final_superbatch),
             "SYK_START_SUPERBATCH": str(args.start_superbatch),
             "SYK_END_SUPERBATCH": str(args.end_superbatch),
             "SYK_BATCH_SIZE": str(args.batch_size),
@@ -456,6 +532,8 @@ def main() -> int:
             "SYK_VALIDATION_SAMPLE": str(validation_sample) if str(validation_sample) != "." else "",
         }
     )
+    if warm_start_cmd:
+        env["SYK_WARM_START_WEIGHTS"] = str(warm_start_weights)
     resume_metadata = None
     if args.resume:
         resume = Path(args.resume).resolve()
@@ -538,11 +616,10 @@ def main() -> int:
         "--output",
         str(final_npz),
     ]
-    exporter_name = (
-        "export_npz_to_syk6.py"
-        if args.network_format == "syk6"
-        else "export_npz_to_syk7.py"
-    )
+    exporter_name = {
+        "syk7": "export_npz_to_syk7.py",
+        "syk8": "export_npz_to_syk8.py",
+    }[args.network_format]
     export_cmd = [
         sys.executable,
         str(THIS_DIR / exporter_name),
@@ -551,6 +628,8 @@ def main() -> int:
         "--output-net",
         str(final_net),
     ]
+    if args.network_format == "syk8" and args.allow_random_v8_init:
+        export_cmd.append("--allow-clipping")
     parity_cmd: list[str] = []
     if args.parity_engine:
         parity_engine = Path(args.parity_engine).resolve()
@@ -575,12 +654,21 @@ def main() -> int:
     ]
     tool_sources = [
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "main.rs",
+        REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "full_threats_v1.rs",
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "bin" / "sample_binpack.rs",
+        REPO_ROOT / "src" / "nnue.zig",
+        REPO_ROOT / "src" / "full_threats_v1.zig",
+        REPO_ROOT / "specs" / "syknnue8_spec.md",
         Path(__file__).resolve(),
+        REPO_ROOT / "utils" / "nnue" / "common.py",
         THIS_DIR / "checkpoint_raw_to_npz.py",
         THIS_DIR / "validate_checkpoints.py",
-        THIS_DIR / "export_npz_to_syk6.py",
         THIS_DIR / "export_npz_to_syk7.py",
+        THIS_DIR / "export_npz_to_syk8.py",
+        THIS_DIR / "warm_start_v8.py",
+        REPO_ROOT / "utils" / "nnue" / "full_threats_v1.py",
+        REPO_ROOT / "utils" / "nnue" / "full_threats_v1.bin",
+        REPO_ROOT / "utils" / "nnue" / "full_threats_v1_manifest.json",
         THIS_DIR / "check_net_parity.py",
         REPO_ROOT / "launch_training.ps1",
     ]
@@ -612,8 +700,15 @@ def main() -> int:
             "checkpoint": env.get("SYK_RESUME", ""),
             "source_run_id": resume_metadata.get("run_id") if resume_metadata else None,
         },
+        "warm_start": {
+            "source": str(Path(args.warm_start).resolve()) if args.warm_start else "",
+            "weights": str(warm_start_weights) if warm_start_cmd else "",
+            "verification": str(warm_start_report) if warm_start_cmd else "",
+            "allow_random_v8_init": args.allow_random_v8_init,
+        },
         "commands": {
             "sample_validation": sample_cmd,
+            "prepare_warm_start": warm_start_cmd,
             "train": train_cmd,
             "validate": validation_cmd if str(validation_sample) != "." else [],
             "convert_final": converter_cmd if args.export_after else [],
@@ -629,6 +724,7 @@ def main() -> int:
             "dense1": args.dense1,
             "dense2": args.dense2,
             "factorised": True,
+            "factorisation_mode": "virtual_sparse" if args.network_format == "syk8" else "separate_tensor",
             "output_bucket_count": args.output_buckets,
             "output_bucket_scheme": "single" if args.output_buckets == 1 else "material_popcount",
         },
@@ -644,6 +740,7 @@ def main() -> int:
             "lr_start": args.lr_start,
             "lr_final": final_lr,
             "lr_origin_superbatch": args.lr_origin_superbatch,
+            "lr_final_superbatch": lr_final_superbatch,
             "wdl": args.wdl,
             "save_rate": args.save_rate,
             "threads": args.threads,
@@ -654,10 +751,24 @@ def main() -> int:
         "env": {key: value for key, value in env.items() if key.startswith("SYK_")},
         "artifacts": {
             "final_checkpoint": str(final_checkpoint) if args.export_after else "",
+            "export_checkpoint": str(final_checkpoint) if args.export_after else "",
             "final_npz": str(final_npz) if args.export_after else "",
             "final_net": str(final_net) if args.export_after else "",
         },
     }
+    if args.network_format == "syk8":
+        meta["network"].update(
+            {
+                "architecture_id": "pairwise_mlp_threats",
+                "feature_set": "mirrored_psq_full_threats_v1",
+                "psq_feature_count": 768 * (max(meta["network"]["bucket_layout_64"]) + 1),
+                "threat_feature_count": 60_720,
+                "threat_scheme_id": 1,
+                "threat_packing_sha256": "964591edbe856c9f90694dcbfabe42d58b011a469e3275a8aaa9e4249b21988a",
+                "threat_storage": "i8",
+                "resolved_accumulator": "i32",
+            }
+        )
     meta_path = run_dir / "run_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -679,6 +790,8 @@ def main() -> int:
 
     if sample_cmd:
         print("$", " ".join(sample_cmd))
+    if warm_start_cmd:
+        print("$", " ".join(warm_start_cmd))
     print("$", " ".join(train_cmd))
     if args.dry_run:
         return 0
@@ -696,6 +809,19 @@ def main() -> int:
         meta["datasets"]["validation_sample_fingerprint"] = dataset_fingerprint(
             validation_sample, False
         )
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+    if warm_start_cmd:
+        meta["status"] = "preparing_warm_start"
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+        try:
+            subprocess.run(warm_start_cmd, cwd=str(REPO_ROOT), check=True)
+        except subprocess.CalledProcessError as exc:
+            meta["status"] = "warm_start_failed"
+            meta["warm_start_exit_code"] = exc.returncode
+            meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+            return exc.returncode
+        meta["warm_start"]["verification_result"] = json.loads(warm_start_report.read_text())
         meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
     meta["status"] = "training"
@@ -729,9 +855,24 @@ def main() -> int:
         print(" ".join(validation_cmd))
 
     if args.export_after:
-        if not (final_checkpoint / "raw.bin").is_file():
+        export_checkpoint = final_checkpoint
+        if args.export_best_validation:
+            validation_report = json.loads((run_dir / "validation_results.json").read_text())
+            export_checkpoint = Path(validation_report["best"]["checkpoint"]).resolve()
+            if export_checkpoint.parent != ckpt_dir.resolve():
+                meta["status"] = "export_failed"
+                meta["export_error"] = f"validated checkpoint escaped run directory: {export_checkpoint}"
+                meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+                print(meta["export_error"], file=sys.stderr)
+                return 2
+            converter_cmd[3] = str(export_checkpoint)
+            meta["commands"]["convert_final"] = converter_cmd
+            meta["artifacts"]["export_checkpoint"] = str(export_checkpoint)
+            meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+            print(f"Exporting best held-out checkpoint: {export_checkpoint.name}")
+        if not (export_checkpoint / "raw.bin").is_file():
             meta["status"] = "export_failed"
-            meta["export_error"] = f"final checkpoint not found: {final_checkpoint}"
+            meta["export_error"] = f"export checkpoint not found: {export_checkpoint}"
             meta_path.write_text(json.dumps(meta, indent=2) + "\n")
             print(meta["export_error"], file=sys.stderr)
             return 1

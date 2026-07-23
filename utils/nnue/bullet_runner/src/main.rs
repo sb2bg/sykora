@@ -1,7 +1,9 @@
+mod full_threats_v1;
+
 use bullet_lib::{
     game::{
-        formats::sfbinpack::TrainingDataEntry,
-        inputs::{ChessBucketsMirrored, get_num_buckets},
+        formats::{bulletformat::ChessBoard, sfbinpack::TrainingDataEntry},
+        inputs::{ChessBucketsMirrored, SparseInputType, get_num_buckets},
         outputs::MaterialCount,
     },
     nn::{
@@ -16,6 +18,8 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader::DirectSequentialDataLoader},
 };
 use std::env;
+
+use full_threats_v1::FullThreatInputs;
 
 #[rustfmt::skip]
 const BUCKET_LAYOUT_V3_10: [usize; 32] = [
@@ -36,9 +40,53 @@ const DENSE_QUANT_I32: i32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Architecture {
-    Linear,
     PairwiseLinear,
     PairwiseMlp,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TrainingInputs {
+    Psq(ChessBucketsMirrored),
+    PsqThreats(FullThreatInputs),
+}
+
+impl SparseInputType for TrainingInputs {
+    type RequiredDataType = ChessBoard;
+
+    fn num_inputs(&self) -> usize {
+        match self {
+            Self::Psq(inputs) => inputs.num_inputs(),
+            Self::PsqThreats(inputs) => inputs.num_inputs(),
+        }
+    }
+
+    fn max_active(&self) -> usize {
+        match self {
+            Self::Psq(inputs) => inputs.max_active(),
+            Self::PsqThreats(inputs) => inputs.max_active(),
+        }
+    }
+
+    fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, f: F) {
+        match self {
+            Self::Psq(inputs) => inputs.map_features(pos, f),
+            Self::PsqThreats(inputs) => inputs.map_features(pos, f),
+        }
+    }
+
+    fn shorthand(&self) -> String {
+        match self {
+            Self::Psq(inputs) => inputs.shorthand(),
+            Self::PsqThreats(inputs) => inputs.shorthand(),
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::Psq(inputs) => inputs.description(),
+            Self::PsqThreats(inputs) => inputs.description(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,25 +123,19 @@ impl LrScheduler for CosineDecayFrom {
 impl Architecture {
     fn parse(value: &str) -> Self {
         match value {
-            "linear" => Self::Linear,
             "pairwise-linear" => Self::PairwiseLinear,
             "pairwise-mlp" => Self::PairwiseMlp,
             other => panic!(
-                "unsupported SYK_ARCHITECTURE={other}; expected linear, pairwise-linear, or pairwise-mlp"
+                "unsupported SYK_ARCHITECTURE={other}; expected pairwise-linear or pairwise-mlp"
             ),
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            Self::Linear => "linear",
             Self::PairwiseLinear => "pairwise-linear",
             Self::PairwiseMlp => "pairwise-mlp",
         }
-    }
-
-    fn uses_pairwise(self) -> bool {
-        self != Self::Linear
     }
 }
 
@@ -121,40 +163,46 @@ fn binpack_filter(entry: &TrainingDataEntry) -> bool {
         && entry.score.unsigned_abs() <= 10000
 }
 
-fn saved_format(architecture: Architecture, num_input_buckets: usize) -> Vec<SavedFormat> {
-    let mut format = vec![
-        // Keep the training-only factoriser in raw.bin. Bullet applies
-        // transforms only to quantised.bin; without this explicit entry the
-        // raw checkpoint contains l0w residuals but not the l0f values needed
-        // to reconstruct effective FT weights. The empty transform excludes
-        // this training-only tensor from quantised.bin while the raw writer,
-        // which ignores transforms, still serialises it.
-        SavedFormat::id("l0f").transform(|_, _| Vec::new()),
-        SavedFormat::id("l0w")
-            .transform(move |store, weights| {
-                let factoriser = store.get("l0f").values.repeat(num_input_buckets);
-                weights
-                    .into_iter()
-                    .zip(factoriser)
-                    .map(|(bucket, shared)| bucket + shared)
-                    .collect()
-            })
-            .round()
-            .quantise::<i16>(FT_QUANT),
-        SavedFormat::id("l0b").round().quantise::<i16>(FT_QUANT),
-    ];
+fn saved_format(
+    architecture: Architecture,
+    num_input_buckets: usize,
+    uses_threats: bool,
+) -> Vec<SavedFormat> {
+    let mut format = if uses_threats {
+        vec![
+            // V8's l0w is a virtual-factorised vocabulary containing shared
+            // PSQ, bucket residual, and threat rows. Raw checkpoints retain
+            // it verbatim; checkpoint_raw_to_npz.py separates and merges the
+            // deployed tensors. Mixed i16/i8 quantisation cannot be expressed
+            // in Bullet's single SavedFormat item.
+            SavedFormat::id("l0w").transform(|_, _| Vec::new()),
+            SavedFormat::id("l0b").round().quantise::<i16>(FT_QUANT),
+        ]
+    } else {
+        vec![
+            // Keep the training-only factoriser in raw.bin. Bullet applies
+            // transforms only to quantised.bin; without this explicit entry the
+            // raw checkpoint contains l0w residuals but not the l0f values needed
+            // to reconstruct effective FT weights. The empty transform excludes
+            // this training-only tensor from quantised.bin while the raw writer,
+            // which ignores transforms, still serialises it.
+            SavedFormat::id("l0f").transform(|_, _| Vec::new()),
+            SavedFormat::id("l0w")
+                .transform(move |store, weights| {
+                    let factoriser = store.get("l0f").values.repeat(num_input_buckets);
+                    weights
+                        .into_iter()
+                        .zip(factoriser)
+                        .map(|(bucket, shared)| bucket + shared)
+                        .collect()
+                })
+                .round()
+                .quantise::<i16>(FT_QUANT),
+            SavedFormat::id("l0b").round().quantise::<i16>(FT_QUANT),
+        ]
+    };
 
     match architecture {
-        Architecture::Linear => {
-            format.extend([
-                SavedFormat::id("outw")
-                    .round()
-                    .quantise::<i16>(DENSE_QUANT_I16),
-                SavedFormat::id("outb")
-                    .round()
-                    .quantise::<i32>(i32::from(FT_QUANT) * DENSE_QUANT_I32),
-            ]);
-        }
         Architecture::PairwiseLinear => {
             format.extend([
                 SavedFormat::id("outw")
@@ -208,6 +256,7 @@ fn run_network<const O: usize>(
     initial_lr: f32,
     final_lr: f32,
     lr_origin_superbatch: usize,
+    lr_final_superbatch: usize,
     start_superbatch: usize,
     superbatches: usize,
     batch_size: usize,
@@ -218,33 +267,39 @@ fn run_network<const O: usize>(
     output_dir: &str,
     net_id: String,
     resume_from: Option<&str>,
+    warm_start_weights: Option<&str>,
+    uses_threats: bool,
 ) {
-    let save_format = saved_format(architecture, num_input_buckets);
+    let save_format = saved_format(architecture, num_input_buckets, uses_threats);
+    let input_getter = if uses_threats {
+        TrainingInputs::PsqThreats(FullThreatInputs::new(BUCKET_LAYOUT_V3_10))
+    } else {
+        TrainingInputs::Psq(ChessBucketsMirrored::new(BUCKET_LAYOUT_V3_10))
+    };
 
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(AdamW)
-        .inputs(ChessBucketsMirrored::new(BUCKET_LAYOUT_V3_10))
+        .inputs(input_getter)
         .output_buckets(MaterialCount::<O>)
         .use_threads(threads)
         .save_format(&save_format)
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(move |builder, stm_inputs, ntm_inputs, output_buckets| {
-            let l0f = builder.new_weights("l0f", Shape::new(hl_size, 768), InitSettings::Zeroed);
-            let expanded_factoriser = l0f.repeat(num_input_buckets);
-
-            let mut l0 = builder.new_affine("l0", 768 * num_input_buckets, hl_size);
-            l0.init_with_effective_input_size(32);
-            l0.weights = l0.weights + expanded_factoriser;
+            let input_size = if uses_threats {
+                full_threats_v1::TRAINING_INPUTS
+            } else {
+                768 * num_input_buckets
+            };
+            let mut l0 = builder.new_affine("l0", input_size, hl_size);
+            l0.init_with_effective_input_size(if uses_threats { 128 } else { 32 });
+            if !uses_threats {
+                let l0f =
+                    builder.new_weights("l0f", Shape::new(hl_size, 768), InitSettings::Zeroed);
+                l0.weights = l0.weights + l0f.repeat(num_input_buckets);
+            }
 
             match architecture {
-                Architecture::Linear => {
-                    let out = builder.new_affine("out", 2 * hl_size, O);
-                    let stm_hidden = l0.forward(stm_inputs).screlu();
-                    let ntm_hidden = l0.forward(ntm_inputs).screlu();
-                    out.forward(stm_hidden.concat(ntm_hidden))
-                        .select(output_buckets)
-                }
                 Architecture::PairwiseLinear => {
                     let out = builder.new_affine("out", hl_size, O);
                     let stm_hidden = l0.forward(stm_inputs).crelu().pairwise_mul();
@@ -275,7 +330,9 @@ fn run_network<const O: usize>(
         ..Default::default()
     };
     trainer.optimiser.set_params_for_weight("l0w", ft_clipping);
-    trainer.optimiser.set_params_for_weight("l0f", ft_clipping);
+    if !uses_threats {
+        trainer.optimiser.set_params_for_weight("l0f", ft_clipping);
+    }
 
     if architecture == Architecture::PairwiseMlp {
         let dense_clipping = AdamWParams {
@@ -310,7 +367,7 @@ fn run_network<const O: usize>(
             initial_lr,
             final_lr,
             start_superbatch: lr_origin_superbatch,
-            final_superbatch: superbatches,
+            final_superbatch: lr_final_superbatch,
         },
         save_rate,
     };
@@ -329,16 +386,50 @@ fn run_network<const O: usize>(
     {
         trainer.load_from_checkpoint(path);
     }
+    if let Some(path) = warm_start_weights
+        && !path.is_empty()
+    {
+        if resume_from.is_some_and(|value| !value.is_empty()) {
+            panic!("SYK_RESUME and SYK_WARM_START_WEIGHTS are mutually exclusive");
+        }
+        trainer
+            .optimiser
+            .load_weights_from_file(path)
+            .unwrap_or_else(|error| panic!("failed to load warm-start weights {path}: {error:?}"));
+        println!("Warm-start weights: {path}");
+    }
 
     println!("Architecture: {}", architecture.name());
     println!(
-        "Input layout: v3_10 ({} mirrored king buckets)",
-        num_input_buckets
+        "Input layout: v3_10 ({} mirrored king buckets){}",
+        num_input_buckets,
+        if uses_threats {
+            " + full_threats_v1"
+        } else {
+            ""
+        }
     );
-    println!("FT width: {hl_size} per perspective (factorised)");
+    println!(
+        "FT width: {hl_size} per perspective ({})",
+        if uses_threats {
+            "virtual-factorised"
+        } else {
+            "factorised"
+        }
+    );
+    if uses_threats {
+        println!(
+            "Threat inputs: {}, scheme={}, packing hash={}",
+            full_threats_v1::FEATURE_COUNT,
+            full_threats_v1::SCHEME_ID,
+            full_threats_v1::PACKING_HASH
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+    }
     println!("Output buckets: {O}");
     match architecture {
-        Architecture::Linear => println!("Head: bucketed linear {} -> 1", 2 * hl_size),
         Architecture::PairwiseLinear => {
             println!("Head: pairwise pool -> bucketed linear {hl_size} -> 1")
         }
@@ -393,6 +484,7 @@ fn main() {
     let superbatches = env_usize("SYK_END_SUPERBATCH", 800);
     let start_superbatch = env_usize("SYK_START_SUPERBATCH", 1);
     let lr_origin_superbatch = env_usize("SYK_LR_ORIGIN_SUPERBATCH", 1);
+    let lr_final_superbatch = env_usize("SYK_LR_FINAL_SUPERBATCH", superbatches);
     let final_lr = env_f32("SYK_LR_FINAL", initial_lr * 0.3f32.powi(5));
     let wdl_proportion = env_f32("SYK_WDL", 0.75);
     let save_rate = env_usize("SYK_SAVE_RATE", 10);
@@ -402,6 +494,7 @@ fn main() {
     let output_dir = env_string("SYK_OUTPUT_DIR", "checkpoints");
     let net_id = env_string("SYK_NET_ID", "sykora_v7");
     let resume_from = env::var("SYK_RESUME").ok();
+    let warm_start_weights = env::var("SYK_WARM_START_WEIGHTS").ok();
     let data_format = env_string("SYK_DATA_FORMAT", "bullet");
     let network_format = env_string("SYK_NETWORK_FORMAT", "syk7");
     let hl_size = env_usize("SYK_HIDDEN", 1024);
@@ -419,23 +512,34 @@ fn main() {
         "SYK_LR_ORIGIN_SUPERBATCH must be <= SYK_START_SUPERBATCH"
     );
     assert!(
+        lr_final_superbatch >= superbatches && lr_final_superbatch >= lr_origin_superbatch,
+        "SYK_LR_FINAL_SUPERBATCH must cover the run and cosine origin"
+    );
+    assert!(
         batches_per_superbatch > 0,
         "SYK_BATCHES_PER_SUPERBATCH must be > 0"
     );
-    if architecture.uses_pairwise() {
-        assert!(
-            hl_size.is_multiple_of(2),
-            "pairwise architectures require an even FT width"
-        );
-    }
+    assert!(
+        hl_size.is_multiple_of(2),
+        "pairwise architectures require an even FT width"
+    );
 
     assert_eq!(
         bucket_layout_name, "v3_10",
         "only the proven v3_10 bucket layout is currently supported"
     );
     match (network_format.as_str(), architecture) {
-        ("syk6", Architecture::Linear) => {}
         ("syk7", Architecture::PairwiseLinear | Architecture::PairwiseMlp) => {}
+        ("syk8", Architecture::PairwiseMlp) => {
+            assert_eq!(
+                output_buckets, 8,
+                "SYKNNUE8 requires eight material output buckets"
+            );
+            assert!(
+                hl_size == 1024 || hl_size == 768,
+                "SYKNNUE8 registered widths are H=1024 (T1024) and H=768 (T768)"
+            );
+        }
         _ => panic!(
             "network format/architecture mismatch: format={network_format}, architecture={}",
             architecture.name()
@@ -443,6 +547,7 @@ fn main() {
     }
 
     let num_input_buckets = get_num_buckets(&BUCKET_LAYOUT_V3_10);
+    let uses_threats = network_format == "syk8";
     let dataset_paths: Vec<&str> = dataset_path
         .split(';')
         .filter(|path| !path.is_empty())
@@ -471,6 +576,7 @@ fn main() {
                 initial_lr,
                 final_lr,
                 lr_origin_superbatch,
+                lr_final_superbatch,
                 start_superbatch,
                 superbatches,
                 batch_size,
@@ -481,6 +587,8 @@ fn main() {
                 &output_dir,
                 net_id,
                 resume_from.as_deref(),
+                warm_start_weights.as_deref(),
+                uses_threats,
             )
         };
     }

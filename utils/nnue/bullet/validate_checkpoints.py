@@ -13,6 +13,11 @@ import tempfile
 from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
+UTILS_NNUE_DIR = THIS_DIR.parent
+if str(UTILS_NNUE_DIR) not in sys.path:
+    sys.path.insert(0, str(UTILS_NNUE_DIR))
+
+from full_threats_v1 import MAX_ACTIVE_THREATS, enumerate_board  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,13 +72,50 @@ def load_validation(path: Path, max_positions: int):
     return data
 
 
-def prepare_features(data, bucket_layout: list[int], output_buckets: int):
+def packed_position_board(position):
+    import chess
+
+    board = chess.Board.empty()
+    ordinal = 0
+    remaining = int(position["occ"])
+    while remaining:
+        lsb = remaining & -remaining
+        square = lsb.bit_length() - 1
+        packed = int(position["pcs"][ordinal // 2])
+        piece_code = (packed >> (4 * (ordinal & 1))) & 0xF
+        piece_type = (piece_code & 7) + 1
+        colour = chess.BLACK if piece_code & 8 else chess.WHITE
+        board.set_piece_at(square, chess.Piece(piece_type, colour))
+        ordinal += 1
+        remaining ^= lsb
+    board.turn = chess.WHITE
+    return board
+
+
+def prepare_features(
+    data,
+    bucket_layout: list[int],
+    output_buckets: int,
+    *,
+    with_threats: bool,
+):
     import numpy as np
+    import chess
 
     count = data.size
     stm = np.full((count, 32), -1, dtype=np.int32)
     ntm = np.full((count, 32), -1, dtype=np.int32)
     buckets = np.zeros(count, dtype=np.intp)
+    stm_threats = (
+        np.full((count, MAX_ACTIVE_THREATS), -1, dtype=np.int32)
+        if with_threats
+        else None
+    )
+    ntm_threats = (
+        np.full((count, MAX_ACTIVE_THREATS), -1, dtype=np.int32)
+        if with_threats
+        else None
+    )
 
     for row, position in enumerate(data):
         occ = int(position["occ"])
@@ -102,7 +144,27 @@ def prepare_features(data, bucket_layout: list[int], output_buckets: int):
             divisor = (32 + output_buckets - 1) // output_buckets
             buckets[row] = min((occ.bit_count() - 2) // divisor, output_buckets - 1)
 
-    return stm, ntm, buckets
+        if with_threats:
+            board = packed_position_board(position)
+            stm_features = enumerate_board(board, chess.WHITE)
+            ntm_features = enumerate_board(board, chess.BLACK)
+            if len(stm_features) != len(ntm_features):
+                raise AssertionError(
+                    f"threat perspective count mismatch at row {row}: "
+                    f"{len(stm_features)} != {len(ntm_features)}"
+                )
+            stm_threats[row, : len(stm_features)] = stm_features
+            ntm_threats[row, : len(ntm_features)] = ntm_features
+
+    if with_threats:
+        max_active = max(
+            int(np.count_nonzero(stm_threats >= 0, axis=1).max()),
+            int(np.count_nonzero(ntm_threats >= 0, axis=1).max()),
+        )
+        stm_threats = stm_threats[:, :max_active]
+        ntm_threats = ntm_threats[:, :max_active]
+
+    return stm, ntm, stm_threats, ntm_threats, buckets
 
 
 def sigmoid(values):
@@ -111,7 +173,18 @@ def sigmoid(values):
     return 1.0 / (1.0 + np.exp(-np.clip(values, -80.0, 80.0)))
 
 
-def forward_batch(ckpt, ft_weights, padded_ft_weights, ft_bias, stm_idx, ntm_idx, buckets):
+def forward_batch(
+    ckpt,
+    ft_weights,
+    padded_ft_weights,
+    ft_bias,
+    stm_idx,
+    ntm_idx,
+    stm_threat_idx,
+    ntm_threat_idx,
+    padded_threat_weights,
+    buckets,
+):
     import numpy as np
 
     sentinel = ft_weights.shape[0]
@@ -119,20 +192,14 @@ def forward_batch(ckpt, ft_weights, padded_ft_weights, ft_bias, stm_idx, ntm_idx
     ntm_safe = np.where(ntm_idx >= 0, ntm_idx, sentinel)
     stm_acc = ft_bias + padded_ft_weights[stm_safe].sum(axis=1, dtype=np.float32)
     ntm_acc = ft_bias + padded_ft_weights[ntm_safe].sum(axis=1, dtype=np.float32)
+    if padded_threat_weights is not None:
+        sentinel = padded_threat_weights.shape[0] - 1
+        stm_safe = np.where(stm_threat_idx >= 0, stm_threat_idx, sentinel)
+        ntm_safe = np.where(ntm_threat_idx >= 0, ntm_threat_idx, sentinel)
+        stm_acc += padded_threat_weights[stm_safe].sum(axis=1, dtype=np.float32)
+        ntm_acc += padded_threat_weights[ntm_safe].sum(axis=1, dtype=np.float32)
 
     architecture = str(np.asarray(ckpt["architecture"]).reshape(-1)[0])
-    if architecture == "linear":
-        h = ft_weights.shape[1]
-        hidden = np.concatenate(
-            (np.clip(stm_acc, 0.0, 1.0) ** 2, np.clip(ntm_acc, 0.0, 1.0) ** 2),
-            axis=1,
-        )
-        weights = np.asarray(ckpt["out_weights"], dtype=np.float32)[buckets]
-        biases = np.asarray(ckpt["out_bias"], dtype=np.float32)[buckets]
-        if hidden.shape[1] != 2 * h:
-            raise AssertionError("linear hidden shape mismatch")
-        return np.einsum("bi,bi->b", hidden, weights, optimize=True) + biases
-
     half = ft_weights.shape[1] // 2
     stm_clipped = np.clip(stm_acc, 0.0, 1.0)
     ntm_clipped = np.clip(ntm_acc, 0.0, 1.0)
@@ -163,7 +230,17 @@ def forward_batch(ckpt, ft_weights, padded_ft_weights, ft_bias, stm_idx, ntm_idx
     return np.einsum("bi,bi->b", hidden, l3w, optimize=True) + l3b
 
 
-def validate_npz(npz_path: Path, data, stm, ntm, buckets, wdl: float, batch_size: int) -> dict:
+def validate_npz(
+    npz_path: Path,
+    data,
+    stm,
+    ntm,
+    stm_threats,
+    ntm_threats,
+    buckets,
+    wdl: float,
+    batch_size: int,
+) -> dict:
     import numpy as np
 
     score_target = sigmoid(data["score"].astype(np.float32) / 400.0)
@@ -178,6 +255,15 @@ def validate_npz(npz_path: Path, data, stm, ntm, buckets, wdl: float, batch_size
         padded_ft_weights = np.concatenate(
             (ft_weights, np.zeros((1, ft_weights.shape[1]), dtype=np.float32)), axis=0
         )
+        padded_threat_weights = None
+        if "threat_weights" in ckpt.files:
+            threat_weights = np.asarray(ckpt["threat_weights"], dtype=np.float32)
+            padded_threat_weights = np.empty(
+                (threat_weights.shape[0] + 1, threat_weights.shape[1]), dtype=np.float32
+            )
+            padded_threat_weights[:-1] = threat_weights
+            padded_threat_weights[-1] = 0.0
+            del threat_weights
         for start in range(0, data.size, batch_size):
             end = min(start + batch_size, data.size)
             predictions[start:end] = sigmoid(
@@ -188,6 +274,9 @@ def validate_npz(npz_path: Path, data, stm, ntm, buckets, wdl: float, batch_size
                     ft_bias,
                     stm[start:end],
                     ntm[start:end],
+                    stm_threats[start:end] if stm_threats is not None else None,
+                    ntm_threats[start:end] if ntm_threats is not None else None,
+                    padded_threat_weights,
                     buckets[start:end],
                 )
             )
@@ -206,7 +295,7 @@ def validate_npz(npz_path: Path, data, stm, ntm, buckets, wdl: float, batch_size
             "mse": float(np.mean(error[mask] ** 2)),
             "mae": float(np.mean(np.abs(error[mask]))),
         }
-    return {
+    result = {
         "architecture": architecture,
         "positions": int(data.size),
         "mse": float(np.mean(error**2)),
@@ -216,6 +305,11 @@ def validate_npz(npz_path: Path, data, stm, ntm, buckets, wdl: float, batch_size
         "target_mean": float(targets.mean()),
         "per_output_bucket": bucket_metrics,
     }
+    if stm_threats is not None:
+        active = np.count_nonzero(stm_threats >= 0, axis=1)
+        result["active_threats_mean"] = float(active.mean())
+        result["active_threats_max"] = int(active.max())
+    return result
 
 
 def main() -> int:
@@ -233,11 +327,22 @@ def main() -> int:
 
     run_meta = json.loads(run_meta_path.read_text())
     output_buckets = int(run_meta["network"]["output_bucket_count"])
+    with_threats = run_meta["network"].get("format") == "syk8"
     bucket_layout = [int(value) for value in run_meta["network"]["bucket_layout_64"]]
     wdl = float(run_meta["training"]["wdl"])
     data = load_validation(validation_path, args.max_positions)
     print(f"Preparing features for {data.size:,} held-out positions...")
-    stm, ntm, buckets = prepare_features(data, bucket_layout, output_buckets)
+    stm, ntm, stm_threats, ntm_threats, buckets = prepare_features(
+        data,
+        bucket_layout,
+        output_buckets,
+        with_threats=with_threats,
+    )
+    validation_batch_size = min(args.batch_size, 64) if with_threats else args.batch_size
+    if validation_batch_size != args.batch_size:
+        print(
+            f"Capping v8 validation batch size at {validation_batch_size} to bound threat-gather memory"
+        )
 
     checkpoints = sorted(
         [path for path in checkpoint_root.iterdir() if path.is_dir() and (path / "raw.bin").is_file()],
@@ -270,7 +375,18 @@ def main() -> int:
                 str(npz_path),
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
-            metrics = validate_npz(npz_path, data, stm, ntm, buckets, wdl, args.batch_size)
+            metrics = validate_npz(
+                npz_path,
+                data,
+                stm,
+                ntm,
+                stm_threats,
+                ntm_threats,
+                buckets,
+                wdl,
+                validation_batch_size,
+            )
+            npz_path.unlink()
             metrics["checkpoint"] = str(checkpoint.resolve())
             metrics["checkpoint_name"] = checkpoint.name
             metrics["superbatch"] = checkpoint_key(checkpoint)[0]

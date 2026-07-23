@@ -14,6 +14,9 @@ if str(UTILS_NNUE_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_NNUE_DIR))
 
 from common import (  # noqa: E402
+    FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1,
+    FULL_THREATS_V1_COUNT,
+    FULL_THREATS_V1_PACKING_SHA256,
     NNUE_Q,
     NNUE_Q0,
     SCALE,
@@ -57,11 +60,11 @@ def take_f32(buf, offset: int, count: int):
 def parse_network_config(run_meta: dict) -> dict:
     network = dict(run_meta.get("network", {}))
     env = run_meta.get("env", {})
-    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk6"
-    architecture = network.get("architecture") or env.get("SYK_ARCHITECTURE") or "linear"
-    if architecture not in {"linear", "pairwise-linear", "pairwise-mlp"}:
+    network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk7"
+    architecture = network.get("architecture") or env.get("SYK_ARCHITECTURE") or "pairwise-mlp"
+    if architecture not in {"pairwise-linear", "pairwise-mlp"}:
         raise ValueError(f"unsupported architecture: {architecture!r}")
-    if network_format not in {"syk6", "syk7"}:
+    if network_format not in {"syk7", "syk8"}:
         raise ValueError(f"unsupported network format: {network_format!r}")
 
     if "bucket_layout_64" in network:
@@ -84,7 +87,7 @@ def parse_network_config(run_meta: dict) -> dict:
         "output_bucket_count": int(
             network.get("output_bucket_count") or env.get("SYK_OUTPUT_BUCKETS") or 1
         ),
-        "factorised": bool(network.get("factorised", architecture in {"linear", "pairwise-linear", "pairwise-mlp"})),
+        "factorised": bool(network.get("factorised", True)),
     }
 
 
@@ -92,8 +95,6 @@ def tail_float_count(config: dict) -> int:
     h = config["ft_hidden"]
     outputs = config["output_bucket_count"]
     architecture = config["architecture"]
-    if architecture == "linear":
-        return outputs * 2 * h + outputs
     if architecture == "pairwise-linear":
         return outputs * h + outputs
     dense1 = config["dense1"]
@@ -112,6 +113,15 @@ def expected_raw_sizes(config: dict) -> dict[str, int]:
     h = config["ft_hidden"]
     buckets = max(config["bucket_layout_64"]) + 1
     common = 768 * buckets * h + h + tail_float_count(config)
+    if config["format"] == "syk8":
+        return {
+            "virtual_factorised": (
+                768 + 768 * buckets + FULL_THREATS_V1_COUNT
+            )
+            * h
+            + h
+            + tail_float_count(config)
+        }
     return {
         "factorised": 768 * h + common,
         "missing_factoriser": common,
@@ -149,8 +159,8 @@ def raw_from_optimizer_state(raw_path: Path, config: dict):
     if not state_path.is_file():
         return None
     tensors = read_optimizer_weights(state_path)
-    names = ["l0f", "l0w", "l0b"]
-    if config["architecture"] in {"linear", "pairwise-linear"}:
+    names = ["l0w", "l0b"] if config["format"] == "syk8" else ["l0f", "l0w", "l0b"]
+    if config["architecture"] == "pairwise-linear":
         if "outw" in tensors and "outb" in tensors:
             names.extend(["outw", "outb"])
         else:
@@ -174,13 +184,7 @@ def decode_tail(raw, offset: int, config: dict) -> tuple[dict, int]:
     architecture = config["architecture"]
     tensors: dict[str, object] = {}
 
-    if architecture == "linear":
-        outw, offset = take_f32(raw, offset, outputs * 2 * h)
-        outb, offset = take_f32(raw, offset, outputs)
-        # Bullet stores affine weights column-major: [input, output].
-        tensors["out_weights"] = outw.reshape(2 * h, outputs).T.astype(np.float32)
-        tensors["out_bias"] = outb.reshape(outputs).astype(np.float32)
-    elif architecture == "pairwise-linear":
+    if architecture == "pairwise-linear":
         outw, offset = take_f32(raw, offset, outputs * h)
         outb, offset = take_f32(raw, offset, outputs)
         tensors["out_weights"] = outw.reshape(h, outputs).T.astype(np.float32)
@@ -227,14 +231,16 @@ def main() -> int:
 
     raw = np.fromfile(raw_path, dtype="<f4")
     sizes = expected_raw_sizes(config)
-    if raw.size == sizes["factorised"]:
+    if config["format"] == "syk8" and raw.size == sizes["virtual_factorised"]:
+        raw_layout = "virtual_factorised"
+    elif config["format"] != "syk8" and raw.size == sizes["factorised"]:
         raw_layout = "factorised"
-    elif raw.size == sizes["missing_factoriser"]:
+    elif config["format"] != "syk8" and raw.size == sizes["missing_factoriser"]:
         raw_layout = "missing_factoriser"
     else:
         raise ValueError(
             f"raw.bin has {raw.size} floats; expected "
-            f"factorised={sizes['factorised']} or missing_factoriser={sizes['missing_factoriser']}"
+            + ", ".join(f"{name}={size}" for name, size in sizes.items())
         )
 
     if raw_layout == "missing_factoriser" and config["factorised"]:
@@ -252,7 +258,16 @@ def main() -> int:
             )
 
     offset = 0
-    if raw_layout in {"factorised", "factorised_from_optimizer_state"}:
+    threat_weights = None
+    if raw_layout == "virtual_factorised":
+        virtual_count = 768 + input_size + FULL_THREATS_V1_COUNT
+        l0w, offset = take_f32(raw, offset, virtual_count * h)
+        virtual = l0w.reshape(virtual_count, h)
+        factoriser = virtual[:768]
+        residual = virtual[768 : 768 + input_size]
+        threat_weights = virtual[768 + input_size :]
+        ft_weights = residual + np.tile(factoriser, (bucket_count, 1))
+    elif raw_layout in {"factorised", "factorised_from_optimizer_state"}:
         l0f, offset = take_f32(raw, offset, 768 * h)
         l0w, offset = take_f32(raw, offset, input_size * h)
         # Raw affine storage is column-major, so both tensors are already
@@ -273,10 +288,16 @@ def main() -> int:
         "ft_weights": ft_weights.astype(np.float32),
         "ft_bias": l0b.reshape(h).astype(np.float32),
         "bucket_layout_64": np.asarray(config["bucket_layout_64"], dtype=np.uint8),
-        "feature_set": np.asarray([1], dtype=np.uint8),
+        "feature_set": np.asarray(
+            [
+                FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1
+                if config["format"] == "syk8"
+                else 1
+            ],
+            dtype=np.uint8,
+        ),
         "input_bucket_count": np.asarray([bucket_count], dtype=np.uint8),
         "output_bucket_count": np.asarray([config["output_bucket_count"]], dtype=np.uint8),
-        "activation_type": np.asarray([1], dtype=np.uint8),
         "q0": np.asarray([NNUE_Q0], dtype=np.uint16),
         "q": np.asarray([NNUE_Q], dtype=np.uint16),
         "scale": np.asarray([SCALE], dtype=np.uint16),
@@ -287,6 +308,15 @@ def main() -> int:
         "raw_layout": np.asarray([raw_layout]),
         **tail,
     }
+    if threat_weights is not None:
+        payload["threat_weights"] = threat_weights.astype(np.float32)
+        payload["threat_feature_count"] = np.asarray(
+            [FULL_THREATS_V1_COUNT], dtype=np.uint32
+        )
+        payload["threat_scheme_id"] = np.asarray([1], dtype=np.uint16)
+        payload["threat_packing_sha256"] = np.asarray(
+            [FULL_THREATS_V1_PACKING_SHA256]
+        )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output, **payload)
@@ -297,7 +327,9 @@ def main() -> int:
     print(f"Raw layout: {raw_layout}")
     print(f"Buckets: input={bucket_count}, output={config['output_bucket_count']}")
     print(f"FT hidden: {h}")
-    if raw_layout in {"factorised", "factorised_from_optimizer_state"}:
+    if raw_layout == "virtual_factorised":
+        print("Factoriser: merged virtual shared PSQ rows; retained zero-bucketed threat rows")
+    elif raw_layout in {"factorised", "factorised_from_optimizer_state"}:
         print("Factoriser: merged l0f into every l0w bucket residual")
     else:
         print("WARNING: l0f unavailable; l0w treated as complete weights")

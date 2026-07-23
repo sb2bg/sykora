@@ -92,8 +92,9 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 <summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
-  - `SYKNNUE7` pairwise MLP: factorised mirrored king-bucketed sparse inputs (10 buckets), H=1024 feature transformer, and eight material heads
-  - Pairwise product pooling with a CReLU/CSReLU dense tail and incremental accumulators during search
+  - Embedded `SYKNNUE7` pairwise MLP: factorised mirrored king-bucketed sparse inputs (10 buckets), H=1024 feature transformer, and eight material heads
+  - External `SYKNNUE8` T1024/T768 support: the v7 graph plus frozen `full_threats_v1` inputs
+  - Pairwise product pooling with a CReLU/CSReLU dense tail; PSQ accumulation is incremental, while v8 threats currently use the correctness-first scalar reference path
   - Factorised training: shared `768 → H` factoriser merged into per-bucket weights at export
   - Trained on Stockfish binpack data via the Bullet trainer
   - Blendable with classical eval via `NnueBlend` (default: `100` = pure NNUE)
@@ -277,7 +278,7 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora embeds the `v7_20260710T055911Z-800` `SYKNNUE7` pairwise-MLP candidate and can also load compatible nets from an external `EvalFile`. The previous mature v3 weights remain in `src/net.sknnue.v3.bak` as a regression baseline.
+Sykora embeds the `v7_20260710T055911Z-800` `SYKNNUE7` pairwise-MLP candidate and can also load compatible v7 and v8 nets from an external `EvalFile`. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
 
 The key training requirement is **factorisation**: a shared `768 → H` matrix is trained across all king buckets and merged into each bucket's residual weights at export time. V7 keeps that proven sample-sharing mechanism while changing the activation and dense architecture.
 
@@ -289,18 +290,24 @@ The key training requirement is **factorisation**: a shared `768 → H` matrix i
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For the v7 architecture, file format, research, and integer inference contract, see `specs/syknnue7_spec.md`. The v6 specification is retained for legacy-net and regression-test compatibility.
+For the v8 threat architecture and experiment contract, see `specs/syknnue8_spec.md`. The v7 specification defines the deployed PSQ-only contract.
 
 ### Training Pipeline
 
-Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. The registered v7 profile is a factorised H=1024 feature transformer, pairwise product pooling, eight material heads, and a selected `1024 -> 16 -> 32 -> 32 -> 1` nonlinear tail. The launcher holds out one SF shard for a final loss check, then automatically converts, exports, and bit-exactness-checks the trained net.
+Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. The default launcher profile is v8 T1024: the proven factorised H=1024 PSQ transformer plus frozen `full_threats_v1` inputs, pairwise product pooling, eight material heads, and a selected `1024 -> 16 -> 32 -> 32 -> 1` nonlinear tail. It holds out one SF shard, ranks every pilot checkpoint, then converts, exports, and bit-exactness-checks the trained net.
 
 ```powershell
-# Compile and exercise the full CUDA -> checkpoint -> SYKNNUE7 -> engine path.
-.\launch_training.ps1 -Smoke
+# Exercise the v8 pipeline with diagnostic random initialization.
+.\launch_training.ps1 -Smoke -AllowRandomV8Init
 
-# Launch the full v7 run.
-.\launch_training.ps1
+# Launch the 200-superbatch T1024 pilot from retained v7 float weights.
+.\launch_training.ps1 -WarmStart <v7-checkpoint-directory>
+
+# Continue through the broad 800-superbatch stage.
+.\launch_training.ps1 -Stage broad -Resume <v8-checkpoint-directory>
+
+# The old v7 profile remains available for controls.
+.\launch_training.ps1 -Profile v7 -Stage broad
 ```
 
 The ready-to-load `.sknnue` path is printed when training finishes. Resume an interrupted run with `-Resume <checkpoint-directory>`; the launcher derives the next superbatch from the checkpoint name.
@@ -316,14 +323,15 @@ Sykora can generate its own training data via the `gensfen` command:
 
 ### Exporting a Trained Net
 
-The launcher exports automatically. To repeat it manually, convert the final Bullet checkpoint to NPZ and then to SYKNNUE7:
+The launcher exports automatically. To repeat a v8 export manually, convert the final Bullet checkpoint to NPZ and then to SYKNNUE8:
 
 ```bash
 python utils/nnue/bullet/checkpoint_raw_to_npz.py \
   --input nnue/models/bullet/<run_id>/checkpoints/<checkpoint> \
+  --run-meta nnue/models/bullet/<run_id>/run_meta.json \
   --output checkpoint.npz
 
-python utils/nnue/bullet/export_npz_to_syk7.py \
+python utils/nnue/bullet/export_npz_to_syk8.py \
   --input checkpoint.npz \
   --output-net output.sknnue
 ```
