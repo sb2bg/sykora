@@ -1,0 +1,249 @@
+diff --git a/crates/acyclib/src/device/cpu/base.rs b/crates/acyclib/src/device/cpu/base.rs
+index a4c6d69..776c961 100644
+--- a/crates/acyclib/src/device/cpu/base.rs
++++ b/crates/acyclib/src/device/cpu/base.rs
+@@ -273,7 +273,18 @@ impl BaseOperations for CpuBuffer<f32> {
+     }
+ 
+     fn clip(&mut self, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
+-        for p in &mut self.buf[..size] {
++        self.clip_range(0, size, min, max)
++    }
++
++    fn clip_range(&mut self, offset: usize, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
++        let Some(end) = offset.checked_add(size) else {
++            return Err(CpuError);
++        };
++        let Some(values) = self.buf.get_mut(offset..end) else {
++            return Err(CpuError);
++        };
++
++        for p in values {
+             *p = p.clamp(min, max);
+         }
+ 
+diff --git a/crates/acyclib/src/device/operation/base.rs b/crates/acyclib/src/device/operation/base.rs
+index efb284d..d8c1043 100644
+--- a/crates/acyclib/src/device/operation/base.rs
++++ b/crates/acyclib/src/device/operation/base.rs
+@@ -119,6 +119,8 @@ pub trait BaseOperations {
+ 
+     fn clip(&mut self, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError>;
+ 
++    fn clip_range(&mut self, offset: usize, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError>;
++
+     fn adam(
+         &mut self,
+         config: &AdamConfig,
+diff --git a/crates/acyclib/src/device/tensor/dense.rs b/crates/acyclib/src/device/tensor/dense.rs
+index 029cbef..0b09273 100644
+--- a/crates/acyclib/src/device/tensor/dense.rs
++++ b/crates/acyclib/src/device/tensor/dense.rs
+@@ -58,6 +58,21 @@ impl<D: Device> DenseMatrix<D> {
+         Ok(())
+     }
+ 
++    pub fn clamp_range(
++        &mut self,
++        offset: usize,
++        size: usize,
++        min: f32,
++        max: f32,
++    ) -> Result<(), OperationError<D::DeviceError>> {
++        if offset.checked_add(size).is_none_or(|end| end > self.size()) {
++            return Err(OperationError::IndexOutOfBounds);
++        }
++
++        self.buf.clip_range(offset, size, min, max)?;
++        Ok(())
++    }
++
+     pub fn scale(&mut self, scale: f32) -> Result<(), OperationError<D::DeviceError>> {
+         self.buf.mul_scalar(self.size(), scale)?;
+         Ok(())
+@@ -232,3 +247,27 @@ pub fn read_from_byte_buffer(bytes: &[u8], old_format: bool) -> (Vec<f32>, Strin
+ 
+     (values, id, total_read)
+ }
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++
++    use crate::device::cpu::CpuThread;
++
++    use super::DenseMatrix;
++
++    #[test]
++    fn clamp_range_leaves_values_outside_the_range_unchanged() {
++        let mut matrix = DenseMatrix::<CpuThread>::zeroed(Arc::new(CpuThread), 7, None).unwrap();
++        matrix.load_from_slice(None, &[-2.0, -1.0, -0.4, 0.0, 0.4, 1.0, 2.0]).unwrap();
++
++        let min = i8::MIN as f32 / 255.0;
++        let max = i8::MAX as f32 / 255.0;
++        matrix.clamp_range(1, 5, min, max).unwrap();
++
++        let mut values = [0.0; 7];
++        matrix.write_to_slice(&mut values).unwrap();
++        assert_eq!(values, [-2.0, min, -0.4, 0.0, 0.4, max, 2.0]);
++        assert!(matrix.clamp_range(6, 2, min, max).is_err());
++    }
++}
+diff --git a/crates/acyclib/src/trainer/optimiser.rs b/crates/acyclib/src/trainer/optimiser.rs
+index 4ef9072..bc3bb95 100644
+--- a/crates/acyclib/src/trainer/optimiser.rs
++++ b/crates/acyclib/src/trainer/optimiser.rs
+@@ -42,10 +42,19 @@ pub struct Optimiser<D: Device, G: GraphLike<D>, S: OptimiserState<D>> {
+     phantom: PhantomData<D>,
+     pub graph: G,
+     pub state: HashMap<String, S>,
++    weight_clip_ranges: HashMap<String, Vec<WeightClipRange>>,
+     pre_update: Vec<Box<dyn AdditionalUpdate<D>>>,
+     post_update: Vec<Box<dyn AdditionalUpdate<D>>>,
+ }
+ 
++#[derive(Clone, Copy, Debug)]
++struct WeightClipRange {
++    offset: usize,
++    size: usize,
++    min: f32,
++    max: f32,
++}
++
+ pub trait AdditionalUpdate<D: Device> {
+     fn apply_update(&mut self, graph: &mut Graph<D>) -> Result<(), OperationError<D::DeviceError>>;
+ }
+@@ -69,7 +78,14 @@ impl<D: Device, G: GraphLike<D>, S: OptimiserState<D>> Optimiser<D, G, S> {
+             assert!(old.is_none());
+         }
+ 
+-        Ok(Self { phantom: PhantomData, graph, state, pre_update: Vec::new(), post_update: Vec::new() })
++        Ok(Self {
++            phantom: PhantomData,
++            graph,
++            state,
++            weight_clip_ranges: HashMap::new(),
++            pre_update: Vec::new(),
++            post_update: Vec::new(),
++        })
+     }
+ 
+     pub fn add_pre_update(&mut self, additional: impl AdditionalUpdate<D> + 'static) {
+@@ -95,7 +111,15 @@ impl<D: Device, G: GraphLike<D>, S: OptimiserState<D>> Optimiser<D, G, S> {
+             let grad_id = GraphNodeId::new(idx, GraphNodeIdTy::Gradients);
+             if let Ok(grads) = self.graph.primary().get(grad_id) {
+                 self.graph.reduce_sum_into_first(&self.graph.get_all(grad_id)?)?;
+-                single.update(&mut *weights.dense_mut(), &mut *grads.dense_mut(), gradient_factor, learning_rate)?;
++                {
++                    let mut weights = weights.dense_mut();
++                    single.update(&mut weights, &mut *grads.dense_mut(), gradient_factor, learning_rate)?;
++                    if let Some(ranges) = self.weight_clip_ranges.get(id) {
++                        for range in ranges {
++                            weights.clamp_range(range.offset, range.size, range.min, range.max)?;
++                        }
++                    }
++                }
+                 self.graph.scatter_first_into_rest(&self.graph.get_all(weight_id)?)?;
+             }
+         }
+@@ -119,6 +143,38 @@ impl<D: Device, G: GraphLike<D>, S: OptimiserState<D>> Optimiser<D, G, S> {
+         self.state.get_mut(id).unwrap().set_params(params);
+     }
+ 
++    pub fn add_clip_range_for_weight(&mut self, id: &str, offset: usize, size: usize, min: f32, max: f32) {
++        assert!(min.is_finite() && max.is_finite() && min <= max, "invalid clipping bounds for weight {id}");
++
++        let idx = self.graph.primary().weight_idx(id).unwrap_or_else(|| panic!("no weight with ID {id}"));
++        let weight_id = GraphNodeId::new(idx, GraphNodeIdTy::Values);
++        let weight_size = self.graph.primary().get(weight_id).unwrap().dense().size();
++        assert!(
++            offset.checked_add(size).is_some_and(|end| end <= weight_size),
++            "clipping range {offset}..{} exceeds weight {id} size {weight_size}",
++            offset.saturating_add(size)
++        );
++
++        self.weight_clip_ranges.entry(id.to_string()).or_default().push(WeightClipRange { offset, size, min, max });
++    }
++
++    pub fn apply_weight_clip_ranges(&mut self) -> Result<(), OperationError<D::DeviceError>> {
++        for (id, ranges) in &self.weight_clip_ranges {
++            let idx = self.graph.primary().weight_idx(id).unwrap();
++            let weight_id = GraphNodeId::new(idx, GraphNodeIdTy::Values);
++            let weights = self.graph.primary().get(weight_id)?;
++            {
++                let mut weights = weights.dense_mut();
++                for range in ranges {
++                    weights.clamp_range(range.offset, range.size, range.min, range.max)?;
++                }
++            }
++            self.graph.scatter_first_into_rest(&self.graph.get_all(weight_id)?)?;
++        }
++
++        Ok(())
++    }
++
+     pub fn set_params(&mut self, params: S::Params) {
+         for id in self.graph.primary().weight_ids() {
+             self.set_params_for_weight(&id, params.clone());
+diff --git a/crates/bullet_cuda_backend/src/device/base.rs b/crates/bullet_cuda_backend/src/device/base.rs
+index 76fdab2..429a0b3 100644
+--- a/crates/bullet_cuda_backend/src/device/base.rs
++++ b/crates/bullet_cuda_backend/src/device/base.rs
+@@ -394,6 +394,10 @@ impl BaseOperations for CudaBuffer<f32> {
+     }
+ 
+     fn clip(&mut self, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
++        self.clip_range(0, size, min, max)
++    }
++
++    fn clip_range(&mut self, offset: usize, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
+         let func = self.device.module().load_function("ClipKernel").map_err(CudaError::Driver)?;
+ 
+         unsafe {
+@@ -401,7 +405,7 @@ impl BaseOperations for CudaBuffer<f32> {
+                 .stream()
+                 .launch_builder(&func)
+                 .arg(&(size as i32))
+-                .arg(&mut self.buf.slice_mut(0..size))
++                .arg(&mut self.buf.slice_mut(offset..offset + size))
+                 .arg(&min)
+                 .arg(&max)
+                 .launch(CudaDevice::elementwise_launch_params(size, 1024))
+diff --git a/crates/bullet_hip_backend/src/dense/optimiser.rs b/crates/bullet_hip_backend/src/dense/optimiser.rs
+index c389677..e868065 100644
+--- a/crates/bullet_hip_backend/src/dense/optimiser.rs
++++ b/crates/bullet_hip_backend/src/dense/optimiser.rs
+@@ -42,12 +42,16 @@ pub fn adam(
+ }
+ 
+ pub fn clip(size: usize, params: &mut Buffer<f32>, min: f32, max: f32) -> Result<(), DeviceError> {
+-    if size > params.size() {
++    clip_range(0, size, params, min, max)
++}
++
++pub fn clip_range(offset: usize, size: usize, params: &mut Buffer<f32>, min: f32, max: f32) -> Result<(), DeviceError> {
++    if offset.checked_add(size).is_none_or(|end| end > params.size()) {
+         return Err(DeviceError::ExpectedIllegalAddressAccess);
+     }
+ 
+     unsafe {
+-        ops::clip(size, params.mut_ptr(), min, max);
++        ops::clip(size, params.mut_ptr().add(offset), min, max);
+     }
+ 
+     Ok(())
+diff --git a/crates/bullet_hip_backend/src/lib.rs b/crates/bullet_hip_backend/src/lib.rs
+index 2df2c6a..91e5108 100644
+--- a/crates/bullet_hip_backend/src/lib.rs
++++ b/crates/bullet_hip_backend/src/lib.rs
+@@ -269,6 +269,10 @@ impl BaseOperations for Buffer<f32> {
+     fn clip(&mut self, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
+         dense::clip(size, self, min, max)
+     }
++
++    fn clip_range(&mut self, offset: usize, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
++        dense::clip_range(offset, size, self, min, max)
++    }
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default)]

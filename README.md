@@ -311,6 +311,7 @@ Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. The defaul
 ```
 
 The ready-to-load `.sknnue` path is printed when training finishes. Resume an interrupted run with `-Resume <checkpoint-directory>`; the launcher derives the next superbatch from the checkpoint name.
+For v8, startup also constrains the loaded threat-weight rows to their exact signed-i8 export range before the first resumed batch, then preserves that range after every optimiser update. The bootstrap applies Sykora's pinned Bullet compatibility patch automatically, so an existing v8 checkpoint and optimiser state remain directly resumable.
 
 ### Self-Play Data Generation
 

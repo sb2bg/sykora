@@ -19,6 +19,7 @@ if str(THIS_DIR) not in sys.path:
 
 from bootstrap import (  # noqa: E402
     DEFAULT_BULLET_REPO,
+    PATCHES,
     PINNED_COMMIT,
     ensure_bullet_repo,
 )
@@ -233,7 +234,13 @@ def run_text(cmd: list[str], cwd: Path) -> str:
     return proc.stdout.strip()
 
 
-def git_snapshot(repo: Path, output_dir: Path, name: str) -> dict:
+def git_snapshot(
+    repo: Path,
+    output_dir: Path,
+    name: str,
+    *,
+    expected_diff: bytes | None = None,
+) -> dict:
     if not (repo / ".git").exists():
         return {"path": str(repo.resolve()), "is_git_repo": False}
 
@@ -249,12 +256,19 @@ def git_snapshot(repo: Path, output_dir: Path, name: str) -> dict:
     patch_path = output_dir / f"{name}.patch"
     if diff:
         patch_path.write_bytes(diff)
+    only_expected_diff = (
+        bool(status)
+        and expected_diff is not None
+        and diff == expected_diff
+        and all(not line.startswith("??") for line in status.splitlines())
+    )
 
     return {
         "path": str(repo.resolve()),
         "is_git_repo": True,
         "head": head,
         "dirty": bool(status),
+        "only_expected_diff": only_expected_diff,
         "status": status.splitlines(),
         "tracked_diff_sha256": diff_hash,
         "tracked_patch": str(patch_path.resolve()) if diff else "",
@@ -428,12 +442,23 @@ def main() -> int:
         ]
 
     repo_provenance = git_snapshot(REPO_ROOT, provenance_dir, "sykora")
-    bullet_provenance = git_snapshot(bullet_repo, provenance_dir, "bullet")
-    if args.require_clean_bullet and bullet_provenance.get("dirty"):
+    expected_bullet_diff = b"".join(patch.read_bytes() for patch in PATCHES)
+    bullet_provenance = git_snapshot(
+        bullet_repo,
+        provenance_dir,
+        "bullet",
+        expected_diff=expected_bullet_diff,
+    )
+    unexpected_bullet_diff = bullet_provenance.get("dirty") and not bullet_provenance.get(
+        "only_expected_diff"
+    )
+    if args.require_clean_bullet and unexpected_bullet_diff:
         print("Bullet checkout is dirty; see git status or omit --require-clean-bullet", file=sys.stderr)
         return 2
-    if bullet_provenance.get("dirty"):
+    if unexpected_bullet_diff:
         print("WARNING: Bullet checkout is dirty; the tracked diff is snapshotted in run metadata")
+    elif bullet_provenance.get("only_expected_diff"):
+        print("Applied configured Sykora Bullet compatibility patch")
 
     validation_sample_arg = args.validation_sample or args.validation_cache
     validation_sample = (
@@ -656,6 +681,8 @@ def main() -> int:
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "main.rs",
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "full_threats_v1.rs",
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "bin" / "sample_binpack.rs",
+        THIS_DIR / "bootstrap.py",
+        *PATCHES,
         REPO_ROOT / "src" / "nnue.zig",
         REPO_ROOT / "src" / "full_threats_v1.zig",
         REPO_ROOT / "specs" / "syknnue8_spec.md",

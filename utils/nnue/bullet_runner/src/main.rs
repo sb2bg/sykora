@@ -34,6 +34,8 @@ const BUCKET_LAYOUT_V3_10: [usize; 32] = [
 ];
 
 const FT_QUANT: i16 = 255;
+const THREAT_WEIGHT_MIN: f32 = i8::MIN as f32 / FT_QUANT as f32;
+const THREAT_WEIGHT_MAX: f32 = i8::MAX as f32 / FT_QUANT as f32;
 const POOL_QUANT: i32 = 128;
 const DENSE_QUANT_I16: i16 = 64;
 const DENSE_QUANT_I32: i32 = 64;
@@ -330,7 +332,15 @@ fn run_network<const O: usize>(
         ..Default::default()
     };
     trainer.optimiser.set_params_for_weight("l0w", ft_clipping);
-    if !uses_threats {
+    if uses_threats {
+        trainer.optimiser.add_clip_range_for_weight(
+            "l0w",
+            full_threats_v1::THREAT_OFFSET * hl_size,
+            full_threats_v1::FEATURE_COUNT * hl_size,
+            THREAT_WEIGHT_MIN,
+            THREAT_WEIGHT_MAX,
+        );
+    } else {
         trainer.optimiser.set_params_for_weight("l0f", ft_clipping);
     }
 
@@ -397,6 +407,18 @@ fn run_network<const O: usize>(
             .load_weights_from_file(path)
             .unwrap_or_else(|error| panic!("failed to load warm-start weights {path}: {error:?}"));
         println!("Warm-start weights: {path}");
+    }
+
+    if uses_threats {
+        trainer
+            .optimiser
+            .apply_weight_clip_ranges()
+            .unwrap_or_else(|error| {
+                panic!("failed to enforce threat-weight quantisation bounds: {error:?}")
+            });
+        println!(
+            "Threat weights constrained to [{THREAT_WEIGHT_MIN}, {THREAT_WEIGHT_MAX}] to prevent i8 export saturation"
+        );
     }
 
     println!("Architecture: {}", architecture.name());

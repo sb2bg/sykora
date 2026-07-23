@@ -12,10 +12,43 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BULLET_REPO = REPO_ROOT / "nnue" / "bullet_repo"
 DEFAULT_REMOTE = "https://github.com/jw1912/bullet.git"
 PINNED_COMMIT = "4e9317ffb07ee01b3ae5202d083526fc1d90fa2f"
+PATCHES = (
+    Path(__file__).resolve().parent / "patches" / "weight_clip_ranges.patch",
+)
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+
+
+def apply_patches(repo_path: Path) -> None:
+    for patch_path in PATCHES:
+        if not patch_path.is_file():
+            raise FileNotFoundError(f"Bullet patch not found: {patch_path}")
+
+        check = subprocess.run(
+            ["git", "apply", "--check", str(patch_path)],
+            cwd=repo_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if check.returncode == 0:
+            run_cmd(["git", "apply", str(patch_path)], cwd=repo_path)
+            continue
+
+        reverse_check = subprocess.run(
+            ["git", "apply", "--reverse", "--check", str(patch_path)],
+            cwd=repo_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_check.returncode != 0:
+            raise RuntimeError(
+                f"Bullet patch is neither applicable nor already applied: {patch_path}\n"
+                f"{check.stderr.strip()}"
+            )
 
 
 def ensure_bullet_repo(
@@ -31,6 +64,8 @@ def ensure_bullet_repo(
         repo_path.parent.mkdir(parents=True, exist_ok=True)
         run_cmd(["git", "clone", remote, str(repo_path)])
         run_cmd(["git", "checkout", pinned_commit], cwd=repo_path)
+
+    apply_patches(repo_path)
 
     if build_utils:
         bullet_utils = repo_path / "target" / "release" / "bullet-utils"
