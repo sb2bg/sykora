@@ -57,17 +57,38 @@ fn accumulatorsMatchWide(
     return true;
 }
 
+fn threatAccumulatorsMatch(
+    left: *const nnue.ThreatAccumulatorPair,
+    right: *const nnue.ThreatAccumulatorPair,
+    hidden_size: usize,
+) bool {
+    return std.mem.eql(i16, left.white.values[0..hidden_size], right.white.values[0..hidden_size]) and
+        std.mem.eql(i16, left.black.values[0..hidden_size], right.black.values[0..hidden_size]) and
+        std.mem.eql(u64, &left.color_sets, &right.color_sets) and
+        std.mem.eql(u64, &left.kind_sets, &right.kind_sets) and
+        std.mem.eql(u8, &left.piece_map, &right.piece_map);
+}
+
 /// Verify, for every legal move from `b`, that the incremental i16 update
 /// matches a full i16 recompute AND stays bit-identical to the i32 reference
 /// backend (both accumulator contents and final evals).
 fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
     const root_acc = nnue.initAccumulators(net, b);
     const root_wide = nnue.initAccumulatorsWide(net, b);
+    var root_threats: nnue.ThreatAccumulatorPair = undefined;
+    const has_threats = net.architecture == .pairwise_mlp_threats;
+    if (has_threats) root_threats = nnue.initThreatAccumulators(net, b);
     var moves = @import("bitboard.zig").MoveList.init();
     b.generateLegalMoves(&moves) catch return false;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
 
     if (!accumulatorsMatchWide(&root_acc, &root_wide, hidden_size)) return false;
+    if (has_threats and
+        nnue.evaluateFromCachedAccumulators(net, &root_acc, &root_threats, b) !=
+            nnue.evaluateFromAccumulators(net, &root_acc, b))
+    {
+        return false;
+    }
 
     for (moves.slice()) |move| {
         const undo = b.makeMoveWithUndoUnchecked(move);
@@ -108,11 +129,20 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
             null,
         );
         const full = nnue.initAccumulators(net, b);
-        const matches = std.mem.eql(i16, incremental.white[0..hidden_size], full.white[0..hidden_size]) and
+        var matches = std.mem.eql(i16, incremental.white[0..hidden_size], full.white[0..hidden_size]) and
             std.mem.eql(i16, incremental.black[0..hidden_size], full.black[0..hidden_size]) and
             accumulatorsMatchWide(&incremental, &incremental_wide, hidden_size) and
             nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &full, b) and
             nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &incremental_wide, b);
+        if (has_threats) {
+            var incremental_threats: nnue.ThreatAccumulatorPair = undefined;
+            nnue.updateThreatAccumulators(net, b, &root_threats, &incremental_threats);
+            const full_threats = nnue.initThreatAccumulators(net, b);
+            matches = matches and
+                threatAccumulatorsMatch(&incremental_threats, &full_threats, hidden_size) and
+                nnue.evaluateFromCachedAccumulators(net, &incremental, &incremental_threats, b) ==
+                    nnue.evaluateFromAccumulators(net, &incremental, b);
+        }
         b.unmakeMoveUnchecked(move, undo);
         if (!matches) return false;
     }

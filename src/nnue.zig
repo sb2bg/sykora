@@ -892,6 +892,22 @@ pub fn AccumulatorPairT(comptime T: type) type {
 pub const AccumulatorPair = AccumulatorPairT(i16);
 pub const AccumulatorPairWide = AccumulatorPairT(i32);
 
+/// V8 threat rows are kept separate from the PSQ accumulator because their
+/// quantization differs. At most 240 i8 rows are active, so the threat-only
+/// sum safely fits i16; it is widened when combined with the PSQ accumulator.
+/// Child updates derive changed rows from the move-local occupancy changes.
+pub const ThreatAccumulator = struct {
+    values: [MAX_HIDDEN_SIZE]i16,
+};
+
+pub const ThreatAccumulatorPair = struct {
+    white: ThreatAccumulator,
+    black: ThreatAccumulator,
+    color_sets: [2]u64,
+    kind_sets: [6]u64,
+    piece_map: full_threats_v1.PieceMap,
+};
+
 const AccumulatorRefreshCacheEntry = struct {
     values: [MAX_HIDDEN_SIZE]i16,
     color_sets: [2]u64,
@@ -914,6 +930,14 @@ pub const AccumulatorRefreshCache = struct {
 const SIMD_LANES = std.simd.suggestVectorLength(i16) orelse 8;
 const WeightVec = @Vector(SIMD_LANES, i16);
 const I32Vec = @Vector(SIMD_LANES, i32);
+const ThreatWeightVec = @Vector(SIMD_LANES, i8);
+
+comptime {
+    // Updates fuse no more than two additions before their paired removals.
+    if ((full_threats_v1.max_active + 2) * 128 > std.math.maxInt(i16)) {
+        @compileError("V8 threat-only accumulator no longer fits i16");
+    }
+}
 
 inline fn AccVecOf(comptime Slice: type) type {
     return @Vector(SIMD_LANES, std.meta.Elem(Slice));
@@ -969,6 +993,150 @@ inline fn applyFeatureSlice(comptime add: bool, dest: anytype, weights: []const 
         } else {
             dest[h] -= weights[h];
         }
+    }
+}
+
+inline fn applyThreatFeatureBatch(
+    net: *const Network,
+    destination: anytype,
+    additions: []const u16,
+    removals: []const u16,
+) void {
+    std.debug.assert(additions.len <= 2);
+    std.debug.assert(removals.len <= 2);
+    const hidden_size = destination.len;
+    const threat_weights = net.threat_weights orelse unreachable;
+    const DestVec = AccVecOf(@TypeOf(destination));
+    const Dest = std.meta.Elem(@TypeOf(destination));
+    var h: usize = 0;
+    while (h + SIMD_LANES <= hidden_size) : (h += SIMD_LANES) {
+        const destination_ptr: *align(1) DestVec = @ptrCast(&destination[h]);
+        var values = destination_ptr.*;
+        for (additions) |feature| {
+            const base = @as(usize, feature) * hidden_size + h;
+            const weight_ptr: *align(1) const ThreatWeightVec = @ptrCast(&threat_weights[base]);
+            values += @as(DestVec, @intCast(weight_ptr.*));
+        }
+        for (removals) |feature| {
+            const base = @as(usize, feature) * hidden_size + h;
+            const weight_ptr: *align(1) const ThreatWeightVec = @ptrCast(&threat_weights[base]);
+            values -= @as(DestVec, @intCast(weight_ptr.*));
+        }
+        destination_ptr.* = values;
+    }
+    while (h < hidden_size) : (h += 1) {
+        for (additions) |feature| {
+            destination[h] += @as(Dest, threat_weights[@as(usize, feature) * hidden_size + h]);
+        }
+        for (removals) |feature| {
+            destination[h] -= @as(Dest, threat_weights[@as(usize, feature) * hidden_size + h]);
+        }
+    }
+}
+
+fn applyThreatFeatureChanges(
+    net: *const Network,
+    destination: anytype,
+    additions: []const u16,
+    removals: []const u16,
+) void {
+    var addition_index: usize = 0;
+    var removal_index: usize = 0;
+    while (addition_index < additions.len or removal_index < removals.len) {
+        const addition_end = @min(addition_index + 2, additions.len);
+        const removal_end = @min(removal_index + 2, removals.len);
+        applyThreatFeatureBatch(
+            net,
+            destination,
+            additions[addition_index..addition_end],
+            removals[removal_index..removal_end],
+        );
+        addition_index = addition_end;
+        removal_index = removal_end;
+    }
+}
+
+fn applyThreatFeatureChangesFromPrev(
+    net: *const Network,
+    destination: []i16,
+    previous: []const i16,
+    additions: []const u16,
+    removals: []const u16,
+) void {
+    std.debug.assert(destination.len == previous.len);
+    const hidden_size = destination.len;
+    const threat_weights = net.threat_weights orelse unreachable;
+    const tile_registers = 16;
+    const tile_size = tile_registers * SIMD_LANES;
+    var offset: usize = 0;
+
+    while (offset + tile_size <= hidden_size) : (offset += tile_size) {
+        var accumulators: [tile_registers]WeightVec = undefined;
+        inline for (0..tile_registers) |register| {
+            const source: *align(1) const WeightVec = @ptrCast(&previous[offset + register * SIMD_LANES]);
+            accumulators[register] = source.*;
+        }
+
+        var addition_index: usize = 0;
+        var removal_index: usize = 0;
+        while (addition_index < additions.len and removal_index < removals.len) {
+            const addition_base = @as(usize, additions[addition_index]) * hidden_size + offset;
+            const removal_base = @as(usize, removals[removal_index]) * hidden_size + offset;
+            inline for (0..tile_registers) |register| {
+                const addition: *align(1) const ThreatWeightVec = @ptrCast(
+                    &threat_weights[addition_base + register * SIMD_LANES],
+                );
+                const removal: *align(1) const ThreatWeightVec = @ptrCast(
+                    &threat_weights[removal_base + register * SIMD_LANES],
+                );
+                accumulators[register] += @as(WeightVec, @intCast(addition.*));
+                accumulators[register] -= @as(WeightVec, @intCast(removal.*));
+            }
+            addition_index += 1;
+            removal_index += 1;
+        }
+        while (addition_index < additions.len) : (addition_index += 1) {
+            const base = @as(usize, additions[addition_index]) * hidden_size + offset;
+            inline for (0..tile_registers) |register| {
+                const weights: *align(1) const ThreatWeightVec = @ptrCast(
+                    &threat_weights[base + register * SIMD_LANES],
+                );
+                accumulators[register] += @as(WeightVec, @intCast(weights.*));
+            }
+        }
+        while (removal_index < removals.len) : (removal_index += 1) {
+            const base = @as(usize, removals[removal_index]) * hidden_size + offset;
+            inline for (0..tile_registers) |register| {
+                const weights: *align(1) const ThreatWeightVec = @ptrCast(
+                    &threat_weights[base + register * SIMD_LANES],
+                );
+                accumulators[register] -= @as(WeightVec, @intCast(weights.*));
+            }
+        }
+
+        inline for (0..tile_registers) |register| {
+            const target: *align(1) WeightVec = @ptrCast(&destination[offset + register * SIMD_LANES]);
+            target.* = accumulators[register];
+        }
+    }
+
+    while (offset < hidden_size) : (offset += 1) {
+        var value = previous[offset];
+        var addition_index: usize = 0;
+        var removal_index: usize = 0;
+        while (addition_index < additions.len and removal_index < removals.len) {
+            value += threat_weights[@as(usize, additions[addition_index]) * hidden_size + offset];
+            value -= threat_weights[@as(usize, removals[removal_index]) * hidden_size + offset];
+            addition_index += 1;
+            removal_index += 1;
+        }
+        while (addition_index < additions.len) : (addition_index += 1) {
+            value += threat_weights[@as(usize, additions[addition_index]) * hidden_size + offset];
+        }
+        while (removal_index < removals.len) : (removal_index += 1) {
+            value -= threat_weights[@as(usize, removals[removal_index]) * hidden_size + offset];
+        }
+        destination[offset] = value;
     }
 }
 
@@ -1549,46 +1717,17 @@ fn evaluatePairwiseMlpTail16x32(
     return @intCast(divRoundNearestSigned(sum * net.scale, q * q));
 }
 
-fn evaluatePairwiseMlpFromSlices(
+fn evaluatePairwiseMlpFromPooled(
     net: *const Network,
-    us_acc: anytype,
-    them_acc: anytype,
+    pooled: []const u8,
     b: *Board,
 ) i32 {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
-    const half = hidden_size / 2;
     const dense1_size: usize = @intCast(net.dense1_size);
     const dense2_size: usize = @intCast(net.dense2_size);
     const q: i64 = net.q;
     const pool_quant: i64 = net.pool_quant;
     const bucket = outputBucket(net, b);
-
-    const AccVec = AccVecOf(@TypeOf(us_acc));
-    var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
-    var index: usize = 0;
-    const pool_divisor: I32Vec = @splat(512);
-    while (index + SIMD_LANES <= half) : (index += SIMD_LANES) {
-        const us_a_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index]);
-        const us_b_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index + half]);
-        const them_a_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index]);
-        const them_b_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index + half]);
-        const us_output_ptr: *align(1) PoolVec = @ptrCast(&pooled[index]);
-        const them_output_ptr: *align(1) PoolVec = @ptrCast(&pooled[index + half]);
-        const us_a = clampVecToActivationRange(@intCast(us_a_ptr.*), net.q0);
-        const us_b = clampVecToActivationRange(@intCast(us_b_ptr.*), net.q0);
-        const them_a = clampVecToActivationRange(@intCast(them_a_ptr.*), net.q0);
-        const them_b = clampVecToActivationRange(@intCast(them_b_ptr.*), net.q0);
-        us_output_ptr.* = @intCast(@divTrunc(us_a * us_b, pool_divisor));
-        them_output_ptr.* = @intCast(@divTrunc(them_a * them_b, pool_divisor));
-    }
-    while (index < half) : (index += 1) {
-        const us_a = clampToActivationRange(us_acc[index], net.q0);
-        const us_b = clampToActivationRange(us_acc[index + half], net.q0);
-        const them_a = clampToActivationRange(them_acc[index], net.q0);
-        const them_b = clampToActivationRange(them_acc[index + half], net.q0);
-        pooled[index] = @intCast(@divTrunc(us_a * us_b, 512));
-        pooled[index + half] = @intCast(@divTrunc(them_a * them_b, 512));
-    }
 
     if (dense1_size == 16 and dense2_size == 32) {
         return evaluatePairwiseMlpTail16x32(net, pooled[0..hidden_size], bucket);
@@ -1633,6 +1772,119 @@ fn evaluatePairwiseMlpFromSlices(
     return @intCast(divRoundNearestSigned(sum * net.scale, q * q));
 }
 
+fn evaluatePairwiseMlpFromSlices(
+    net: *const Network,
+    us_acc: anytype,
+    them_acc: anytype,
+    b: *Board,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const half = hidden_size / 2;
+    const AccVec = AccVecOf(@TypeOf(us_acc));
+    var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
+    var index: usize = 0;
+    const pool_divisor: I32Vec = @splat(512);
+    while (index + SIMD_LANES <= half) : (index += SIMD_LANES) {
+        const us_a_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index]);
+        const us_b_ptr: *align(1) const AccVec = @ptrCast(&us_acc[index + half]);
+        const them_a_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index]);
+        const them_b_ptr: *align(1) const AccVec = @ptrCast(&them_acc[index + half]);
+        const us_output_ptr: *align(1) PoolVec = @ptrCast(&pooled[index]);
+        const them_output_ptr: *align(1) PoolVec = @ptrCast(&pooled[index + half]);
+        const us_a = clampVecToActivationRange(@intCast(us_a_ptr.*), net.q0);
+        const us_b = clampVecToActivationRange(@intCast(us_b_ptr.*), net.q0);
+        const them_a = clampVecToActivationRange(@intCast(them_a_ptr.*), net.q0);
+        const them_b = clampVecToActivationRange(@intCast(them_b_ptr.*), net.q0);
+        us_output_ptr.* = @intCast(@divTrunc(us_a * us_b, pool_divisor));
+        them_output_ptr.* = @intCast(@divTrunc(them_a * them_b, pool_divisor));
+    }
+    while (index < half) : (index += 1) {
+        const us_a = clampToActivationRange(us_acc[index], net.q0);
+        const us_b = clampToActivationRange(us_acc[index + half], net.q0);
+        const them_a = clampToActivationRange(them_acc[index], net.q0);
+        const them_b = clampToActivationRange(them_acc[index + half], net.q0);
+        pooled[index] = @intCast(@divTrunc(us_a * us_b, 512));
+        pooled[index + half] = @intCast(@divTrunc(them_a * them_b, 512));
+    }
+
+    return evaluatePairwiseMlpFromPooled(net, pooled[0..hidden_size], b);
+}
+
+/// Pairwise pooling for V8 without first materializing two widened combined
+/// accumulators. PSQ and threat sums remain compact i16 arrays and are widened
+/// only in the registers that feed the activation.
+fn evaluatePairwiseMlpFromSplitSlices(
+    net: *const Network,
+    us_psq: []const i16,
+    us_threat: []const i16,
+    them_psq: []const i16,
+    them_threat: []const i16,
+    b: *Board,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const half = hidden_size / 2;
+    std.debug.assert(us_psq.len == hidden_size);
+    std.debug.assert(us_threat.len == hidden_size);
+    std.debug.assert(them_psq.len == hidden_size);
+    std.debug.assert(them_threat.len == hidden_size);
+
+    var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
+    var index: usize = 0;
+    const pool_divisor: I32Vec = @splat(512);
+    while (index + SIMD_LANES <= half) : (index += SIMD_LANES) {
+        const us_psq_a: *align(1) const WeightVec = @ptrCast(&us_psq[index]);
+        const us_psq_b: *align(1) const WeightVec = @ptrCast(&us_psq[index + half]);
+        const us_threat_a: *align(1) const WeightVec = @ptrCast(&us_threat[index]);
+        const us_threat_b: *align(1) const WeightVec = @ptrCast(&us_threat[index + half]);
+        const them_psq_a: *align(1) const WeightVec = @ptrCast(&them_psq[index]);
+        const them_psq_b: *align(1) const WeightVec = @ptrCast(&them_psq[index + half]);
+        const them_threat_a: *align(1) const WeightVec = @ptrCast(&them_threat[index]);
+        const them_threat_b: *align(1) const WeightVec = @ptrCast(&them_threat[index + half]);
+        const us_output: *align(1) PoolVec = @ptrCast(&pooled[index]);
+        const them_output: *align(1) PoolVec = @ptrCast(&pooled[index + half]);
+
+        const us_a = clampVecToActivationRange(
+            @as(I32Vec, @intCast(us_psq_a.*)) + @as(I32Vec, @intCast(us_threat_a.*)),
+            net.q0,
+        );
+        const us_b = clampVecToActivationRange(
+            @as(I32Vec, @intCast(us_psq_b.*)) + @as(I32Vec, @intCast(us_threat_b.*)),
+            net.q0,
+        );
+        const them_a = clampVecToActivationRange(
+            @as(I32Vec, @intCast(them_psq_a.*)) + @as(I32Vec, @intCast(them_threat_a.*)),
+            net.q0,
+        );
+        const them_b = clampVecToActivationRange(
+            @as(I32Vec, @intCast(them_psq_b.*)) + @as(I32Vec, @intCast(them_threat_b.*)),
+            net.q0,
+        );
+        us_output.* = @intCast(@divTrunc(us_a * us_b, pool_divisor));
+        them_output.* = @intCast(@divTrunc(them_a * them_b, pool_divisor));
+    }
+    while (index < half) : (index += 1) {
+        const us_a = clampToActivationRange(
+            @as(i32, us_psq[index]) + @as(i32, us_threat[index]),
+            net.q0,
+        );
+        const us_b = clampToActivationRange(
+            @as(i32, us_psq[index + half]) + @as(i32, us_threat[index + half]),
+            net.q0,
+        );
+        const them_a = clampToActivationRange(
+            @as(i32, them_psq[index]) + @as(i32, them_threat[index]),
+            net.q0,
+        );
+        const them_b = clampToActivationRange(
+            @as(i32, them_psq[index + half]) + @as(i32, them_threat[index + half]),
+            net.q0,
+        );
+        pooled[index] = @intCast(@divTrunc(us_a * us_b, 512));
+        pooled[index + half] = @intCast(@divTrunc(them_a * them_b, 512));
+    }
+    return evaluatePairwiseMlpFromPooled(net, pooled[0..hidden_size], b);
+}
+
 fn evaluatePairwiseMlpFromAccumulators(
     net: *const Network,
     acc: anytype,
@@ -1645,21 +1897,105 @@ fn evaluatePairwiseMlpFromAccumulators(
     return evaluatePairwiseMlpFromSlices(net, us_acc, them_acc, b);
 }
 
-fn addThreatFeatures(
+/// Full initialization of the V8 threat sums at a search root.
+pub fn initThreatAccumulators(net: *const Network, b: *Board) ThreatAccumulatorPair {
+    std.debug.assert(net.architecture == .pairwise_mlp_threats);
+    var result = ThreatAccumulatorPair{
+        .white = .{
+            .values = [_]i16{0} ** MAX_HIDDEN_SIZE,
+        },
+        .black = .{
+            .values = [_]i16{0} ** MAX_HIDDEN_SIZE,
+        },
+        .color_sets = b.board.color_sets,
+        .kind_sets = b.board.kind_sets,
+        .piece_map = full_threats_v1.initPieceMap(&b.board),
+    };
+    var white_features: [full_threats_v1.max_active]u16 = undefined;
+    var black_features: [full_threats_v1.max_active]u16 = undefined;
+    const features = full_threats_v1.enumeratePair(
+        &b.board,
+        &white_features,
+        &black_features,
+    );
+
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    applyThreatFeatureChanges(net, result.white.values[0..hidden_size], features.white, &.{});
+    applyThreatFeatureChanges(net, result.black.values[0..hidden_size], features.black, &.{});
+    return result;
+}
+
+fn refreshThreatAccumulator(
     net: *const Network,
     b: *Board,
     perspective: piece.Color,
-    destination: []i32,
+    result: *ThreatAccumulator,
 ) void {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    @memset(result.values[0..hidden_size], 0);
     var feature_storage: [full_threats_v1.max_active]u16 = undefined;
     const features = full_threats_v1.enumerate(&b.board, perspective, &feature_storage);
-    const threat_weights = net.threat_weights orelse unreachable;
-    const hidden_size = destination.len;
-    for (features) |feature| {
-        const base = @as(usize, feature) * hidden_size;
-        const row = threat_weights[base .. base + hidden_size];
-        for (destination, row) |*value, weight| value.* += weight;
+    applyThreatFeatureChanges(net, result.values[0..hidden_size], features, &.{});
+}
+
+fn updateThreatAccumulator(
+    net: *const Network,
+    b: *Board,
+    perspective: piece.Color,
+    prev: *const ThreatAccumulator,
+    result: *ThreatAccumulator,
+    changes: full_threats_v1.PerspectiveChanges,
+) void {
+    if (changes.refresh) {
+        refreshThreatAccumulator(net, b, perspective, result);
+        return;
     }
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    applyThreatFeatureChangesFromPrev(
+        net,
+        result.values[0..hidden_size],
+        prev.values[0..hidden_size],
+        changes.added,
+        changes.removed,
+    );
+}
+
+/// Increment V8 threat sums from move-local changed attack relations.
+pub fn updateThreatAccumulators(
+    net: *const Network,
+    b: *Board,
+    prev: *const ThreatAccumulatorPair,
+    result: *ThreatAccumulatorPair,
+) void {
+    std.debug.assert(net.architecture == .pairwise_mlp_threats);
+    var old_state = b.board;
+    old_state.color_sets = prev.color_sets;
+    old_state.kind_sets = prev.kind_sets;
+    const new_piece_map = full_threats_v1.updatePieceMap(
+        &old_state,
+        &b.board,
+        &prev.piece_map,
+    );
+
+    var white_removed: [full_threats_v1.max_active]u16 = undefined;
+    var white_added: [full_threats_v1.max_active]u16 = undefined;
+    var black_removed: [full_threats_v1.max_active]u16 = undefined;
+    var black_added: [full_threats_v1.max_active]u16 = undefined;
+    const changes = full_threats_v1.changedIndicesPair(
+        &old_state,
+        &b.board,
+        &prev.piece_map,
+        &new_piece_map,
+        &white_removed,
+        &white_added,
+        &black_removed,
+        &black_added,
+    );
+    updateThreatAccumulator(net, b, .white, &prev.white, &result.white, changes.white);
+    updateThreatAccumulator(net, b, .black, &prev.black, &result.black, changes.black);
+    result.color_sets = b.board.color_sets;
+    result.kind_sets = b.board.kind_sets;
+    result.piece_map = new_piece_map;
 }
 
 fn evaluatePairwiseMlpThreatsFromAccumulators(
@@ -1676,13 +2012,46 @@ fn evaluatePairwiseMlpThreatsFromAccumulators(
     for (acc.black[0..hidden_size], resolved_black[0..hidden_size]) |value, *resolved| {
         resolved.* = value;
     }
-    addThreatFeatures(net, b, .white, resolved_white[0..hidden_size]);
-    addThreatFeatures(net, b, .black, resolved_black[0..hidden_size]);
+    var white_features: [full_threats_v1.max_active]u16 = undefined;
+    var black_features: [full_threats_v1.max_active]u16 = undefined;
+    const features = full_threats_v1.enumeratePair(&b.board, &white_features, &black_features);
+    applyThreatFeatureChanges(net, resolved_white[0..hidden_size], features.white, &.{});
+    applyThreatFeatureChanges(net, resolved_black[0..hidden_size], features.black, &.{});
 
     const stm_is_white = b.board.move == .white;
     const us_acc = if (stm_is_white) resolved_white[0..hidden_size] else resolved_black[0..hidden_size];
     const them_acc = if (stm_is_white) resolved_black[0..hidden_size] else resolved_white[0..hidden_size];
     return evaluatePairwiseMlpFromSlices(net, us_acc, them_acc, b);
+}
+
+/// Evaluate V8 using cached PSQ and threat accumulators.
+pub fn evaluateFromCachedAccumulators(
+    net: *const Network,
+    psq: anytype,
+    threats: *const ThreatAccumulatorPair,
+    b: *Board,
+) i32 {
+    std.debug.assert(net.architecture == .pairwise_mlp_threats);
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const stm_is_white = b.board.move == .white;
+    const us_psq = if (stm_is_white) psq.white[0..hidden_size] else psq.black[0..hidden_size];
+    const them_psq = if (stm_is_white) psq.black[0..hidden_size] else psq.white[0..hidden_size];
+    const us_threat = if (stm_is_white)
+        threats.white.values[0..hidden_size]
+    else
+        threats.black.values[0..hidden_size];
+    const them_threat = if (stm_is_white)
+        threats.black.values[0..hidden_size]
+    else
+        threats.white.values[0..hidden_size];
+    return evaluatePairwiseMlpFromSplitSlices(
+        net,
+        us_psq,
+        us_threat,
+        them_psq,
+        them_threat,
+        b,
+    );
 }
 
 /// Evaluate using pre-computed PSQ accumulators. V8 also resolves its

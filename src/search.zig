@@ -363,6 +363,7 @@ pub const SearchEngine = struct {
     tuning: SearchTuning,
     // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
     acc_stack: ?[]nnue.AccumulatorPair,
+    threat_acc_stack: ?[]nnue.ThreatAccumulatorPair,
     acc_refresh_cache: ?*nnue.AccumulatorRefreshCache,
     acc_ply: u32,
     acc_valid: [128]bool,
@@ -414,6 +415,7 @@ pub const SearchEngine = struct {
             .nnue_scale = nnue_scale,
             .tuning = .{},
             .acc_stack = null,
+            .threat_acc_stack = null,
             .acc_refresh_cache = null,
             .acc_ply = 0,
             .acc_valid = [_]bool{false} ** 128,
@@ -456,6 +458,12 @@ pub const SearchEngine = struct {
             const stack = self.allocator.alloc(nnue.AccumulatorPair, 128) catch return;
             self.acc_stack = stack;
             stack[0] = nnue.initAccumulators(self.nnue_net.?, self.board);
+            if (self.nnue_net.?.architecture == .pairwise_mlp_threats) {
+                if (self.allocator.alloc(nnue.ThreatAccumulatorPair, 128)) |threat_stack| {
+                    self.threat_acc_stack = threat_stack;
+                    threat_stack[0] = nnue.initThreatAccumulators(self.nnue_net.?, self.board);
+                } else |_| {}
+            }
             if (self.allocator.create(nnue.AccumulatorRefreshCache)) |cache| {
                 cache.initInPlace();
                 nnue.seedAccumulatorRefreshCache(self.nnue_net.?, self.board, &stack[0], cache);
@@ -468,6 +476,10 @@ pub const SearchEngine = struct {
     }
 
     fn deinitAccumulatorStack(self: *Self) void {
+        if (self.threat_acc_stack) |stack| {
+            self.allocator.free(stack);
+            self.threat_acc_stack = null;
+        }
         if (self.acc_refresh_cache) |cache| {
             self.allocator.destroy(cache);
             self.acc_refresh_cache = null;
@@ -502,6 +514,14 @@ pub const SearchEngine = struct {
             update.rook_to,
             self.acc_refresh_cache,
         );
+        if (self.threat_acc_stack) |threat_stack| {
+            nnue.updateThreatAccumulators(
+                self.nnue_net.?,
+                self.board,
+                &threat_stack[self.acc_ply - 1],
+                &threat_stack[self.acc_ply],
+            );
+        }
         self.acc_valid[self.acc_ply] = true;
     }
 
@@ -555,11 +575,15 @@ pub const SearchEngine = struct {
                 // Use incremental accumulators if available, otherwise full recompute
                 const nn_raw = if (self.acc_stack) |stack| blk: {
                     self.materializeCurrentAccumulator();
-                    break :blk nnue.evaluateFromAccumulators(
-                        net,
-                        &stack[self.acc_ply],
-                        self.board,
-                    );
+                    if (self.threat_acc_stack) |threat_stack| {
+                        break :blk nnue.evaluateFromCachedAccumulators(
+                            net,
+                            &stack[self.acc_ply],
+                            &threat_stack[self.acc_ply],
+                            self.board,
+                        );
+                    }
+                    break :blk nnue.evaluateFromAccumulators(net, &stack[self.acc_ply], self.board);
                 } else nnue.evaluate(net, self.board);
                 const nn = @divTrunc(nn_raw * self.nnue_scale, 100);
                 if (self.nnue_blend >= 100) {
