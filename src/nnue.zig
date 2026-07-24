@@ -860,6 +860,39 @@ inline fn divRoundNearestSigned(x: i64, d: i64) i64 {
         -@divTrunc((-x) + @divTrunc(d, 2), d);
 }
 
+inline fn divRoundNearestNonNegPow2(x: i64, comptime shift: u6) i64 {
+    std.debug.assert(x >= 0);
+    return (x + (@as(i64, 1) << (shift - 1))) >> shift;
+}
+
+inline fn divRoundNearestSignedPow2(x: i64, comptime shift: u6) i64 {
+    const half = @as(i64, 1) << (shift - 1);
+    return if (x >= 0)
+        (x + half) >> shift
+    else
+        -((-x + half) >> shift);
+}
+
+test "power-of-two rounding matches reference division" {
+    var value: i64 = -100_000;
+    while (value <= 100_000) : (value += 1) {
+        try std.testing.expectEqual(
+            divRoundNearestSigned(value, 64),
+            divRoundNearestSignedPow2(value, 6),
+        );
+        try std.testing.expectEqual(
+            divRoundNearestSigned(value, 128),
+            divRoundNearestSignedPow2(value, 7),
+        );
+        if (value >= 0) {
+            try std.testing.expectEqual(
+                divRoundNearestNonNeg(value, 64),
+                divRoundNearestNonNegPow2(value, 6),
+            );
+        }
+    }
+}
+
 // ─── Incremental Accumulator Infrastructure ───
 
 /// Production accumulators are i16 (`AccumulatorPair`); the loader proves
@@ -1645,11 +1678,10 @@ pub fn updateAccumulators(
 }
 
 inline fn outputBucket(net: *const Network, b: *Board) usize {
-    const output_buckets: usize = net.output_bucket_count;
+    std.debug.assert(net.output_bucket_count == 8);
     const piece_count = @popCount(b.board.occupied()); // includes kings, 2..32
-    const divisor = (32 + output_buckets - 1) / output_buckets;
-    const non_king_count = if (piece_count >= 2) piece_count - 2 else 0;
-    return @min(non_king_count / divisor, output_buckets - 1);
+    std.debug.assert(piece_count >= 2);
+    return @min((piece_count - 2) >> 2, 7);
 }
 
 const V7Dense1Vec = @Vector(16, i32);
@@ -1657,40 +1689,24 @@ const V7Dense2Vec = @Vector(32, i32);
 const V7Dense2WeightVec = @Vector(32, i8);
 const PoolVec = @Vector(SIMD_LANES, u8);
 
-fn evaluatePairwiseMlpTail16x32(
+fn finishPairwiseMlpTail16x32(
     net: *const Network,
-    pooled: []const u8,
+    l1_sums: V7Dense1Vec,
     bucket: usize,
 ) i32 {
-    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    // Keep q loaded from the net: Zig/LLVM 0.15.2 miscompiles the squared
+    // activation clamp in ReleaseFast when this is replaced with constant Q.
     const q: i64 = net.q;
-    const pool_quant: i64 = net.pool_quant;
-    const l1_biases = net.l1_biases;
-    const l1_weights = net.l1_weights_grouped orelse unreachable;
     const l2_biases = net.l2_biases;
     const l2_weights = net.l2_weights;
     const output_biases = net.output_biases;
     const output_weights = net.output_weights;
 
-    const l1_bias_ptr: *align(1) const V7Dense1Vec = @ptrCast(&l1_biases[bucket * 16]);
-    var l1_sums = l1_bias_ptr.*;
-    const groups = hidden_size / 4;
-    for (0..groups) |group| {
-        const inputs = nnue_dot.splatGroup(@ptrCast(&pooled[group * 4]));
-        var output: usize = 0;
-        while (output < 16) : (output += nnue_dot.output_lanes) {
-            const weight_index = ((bucket * groups + group) * 16 + output) * 4;
-            const weight_ptr: *align(1) const nnue_dot.I8Vec = @ptrCast(&l1_weights[weight_index]);
-            const sum_ptr: *align(1) nnue_dot.I32Vec = @ptrCast(&l1_sums[output]);
-            sum_ptr.* = nnue_dot.dotAdd(sum_ptr.*, inputs, weight_ptr.*);
-        }
-    }
-
     var dense1_activated: [32]i32 = undefined;
     for (0..16) |output| {
-        const value = divRoundNearestSigned(l1_sums[output], pool_quant);
+        const value = divRoundNearestSignedPow2(l1_sums[output], 7);
         dense1_activated[output] = @intCast(@min(@max(value, 0), q));
-        const squared = divRoundNearestNonNeg(value * value, q);
+        const squared = divRoundNearestNonNegPow2(value * value, 6);
         dense1_activated[16 + output] = @intCast(@min(squared, q));
     }
 
@@ -1705,16 +1721,60 @@ fn evaluatePairwiseMlpTail16x32(
 
     var dense2_activated: [32]i32 = undefined;
     for (0..32) |output| {
-        const value = divRoundNearestSigned(l2_sums[output], q);
+        const value = divRoundNearestSignedPow2(l2_sums[output], 6);
         const clipped = @min(@max(value, 0), q);
-        dense2_activated[output] = @intCast(divRoundNearestNonNeg(clipped * clipped, q));
+        dense2_activated[output] = @intCast(divRoundNearestNonNegPow2(clipped * clipped, 6));
     }
 
     const activation_vec: V7Dense2Vec = dense2_activated;
     const output_weight_ptr: *align(1) const V7Dense2WeightVec = @ptrCast(&output_weights[bucket * 32]);
     const products = activation_vec * @as(V7Dense2Vec, @intCast(output_weight_ptr.*));
     const sum = @as(i64, output_biases[bucket]) + @as(i64, @reduce(.Add, products));
-    return @intCast(divRoundNearestSigned(sum * net.scale, q * q));
+    return @intCast(divRoundNearestSignedPow2(sum * SCALE, 12));
+}
+
+inline fn accumulatePairwiseL1Group(
+    net: *const Network,
+    bucket: usize,
+    group: usize,
+    pooled: *align(1) const [4]u8,
+    l1_sums: *V7Dense1Vec,
+) void {
+    const groups = @as(usize, net.ft_hidden_size) / 4;
+    const inputs = nnue_dot.splatGroup(pooled);
+    var output: usize = 0;
+    while (output < 16) : (output += nnue_dot.output_lanes) {
+        const weight_index = ((bucket * groups + group) * 16 + output) * 4;
+        const weight_ptr: *align(1) const nnue_dot.I8Vec = @ptrCast(
+            &(net.l1_weights_grouped orelse unreachable)[weight_index],
+        );
+        const sum_ptr: *align(1) nnue_dot.I32Vec = @ptrCast(&l1_sums[output]);
+        sum_ptr.* = nnue_dot.dotAdd(sum_ptr.*, inputs, weight_ptr.*);
+    }
+}
+
+fn evaluatePairwiseMlpTail16x32(
+    net: *const Network,
+    pooled: []const u8,
+    bucket: usize,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const l1_biases = net.l1_biases;
+
+    const l1_bias_ptr: *align(1) const V7Dense1Vec = @ptrCast(&l1_biases[bucket * 16]);
+    var l1_sums = l1_bias_ptr.*;
+    const groups = hidden_size / 4;
+    for (0..groups) |group| {
+        accumulatePairwiseL1Group(
+            net,
+            bucket,
+            group,
+            @ptrCast(&pooled[group * 4]),
+            &l1_sums,
+        );
+    }
+
+    return finishPairwiseMlpTail16x32(net, l1_sums, bucket);
 }
 
 fn evaluatePairwiseMlpFromPooled(
@@ -1810,6 +1870,82 @@ fn evaluatePairwiseMlpFromSlices(
     return evaluatePairwiseMlpFromPooled(net, pooled[0..hidden_size], b);
 }
 
+inline fn poolSplitAccumulatorBlock(
+    net: *const Network,
+    psq: []const i16,
+    threat: []const i16,
+    offset: usize,
+    half: usize,
+) PoolVec {
+    const psq_a: *align(1) const WeightVec = @ptrCast(&psq[offset]);
+    const psq_b: *align(1) const WeightVec = @ptrCast(&psq[offset + half]);
+    const threat_a: *align(1) const WeightVec = @ptrCast(&threat[offset]);
+    const threat_b: *align(1) const WeightVec = @ptrCast(&threat[offset + half]);
+    const a = clampVecToActivationRange(
+        @as(I32Vec, @intCast(psq_a.*)) + @as(I32Vec, @intCast(threat_a.*)),
+        net.q0,
+    );
+    const b = clampVecToActivationRange(
+        @as(I32Vec, @intCast(psq_b.*)) + @as(I32Vec, @intCast(threat_b.*)),
+        net.q0,
+    );
+    const divisor: I32Vec = @splat(512);
+    return @intCast(@divTrunc(a * b, divisor));
+}
+
+fn evaluatePairwiseMlpTail16x32FromSplit(
+    net: *const Network,
+    us_psq: []const i16,
+    us_threat: []const i16,
+    them_psq: []const i16,
+    them_threat: []const i16,
+    b: *Board,
+) i32 {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    const half = hidden_size / 2;
+    std.debug.assert(half % SIMD_LANES == 0);
+    std.debug.assert(SIMD_LANES % 4 == 0);
+    const bucket = outputBucket(net, b);
+    const l1_bias_ptr: *align(1) const V7Dense1Vec = @ptrCast(&net.l1_biases[bucket * 16]);
+    var l1_sums = l1_bias_ptr.*;
+
+    var offset: usize = 0;
+    while (offset < half) : (offset += SIMD_LANES) {
+        const us_pooled: [SIMD_LANES]u8 = poolSplitAccumulatorBlock(
+            net,
+            us_psq,
+            us_threat,
+            offset,
+            half,
+        );
+        const them_pooled: [SIMD_LANES]u8 = poolSplitAccumulatorBlock(
+            net,
+            them_psq,
+            them_threat,
+            offset,
+            half,
+        );
+        inline for (0..SIMD_LANES / 4) |group_in_block| {
+            const lane = group_in_block * 4;
+            accumulatePairwiseL1Group(
+                net,
+                bucket,
+                (offset + lane) / 4,
+                @ptrCast(&us_pooled[lane]),
+                &l1_sums,
+            );
+            accumulatePairwiseL1Group(
+                net,
+                bucket,
+                (half + offset + lane) / 4,
+                @ptrCast(&them_pooled[lane]),
+                &l1_sums,
+            );
+        }
+    }
+    return finishPairwiseMlpTail16x32(net, l1_sums, bucket);
+}
+
 /// Pairwise pooling for V8 without first materializing two widened combined
 /// accumulators. PSQ and threat sums remain compact i16 arrays and are widened
 /// only in the registers that feed the activation.
@@ -1827,6 +1963,19 @@ fn evaluatePairwiseMlpFromSplitSlices(
     std.debug.assert(us_threat.len == hidden_size);
     std.debug.assert(them_psq.len == hidden_size);
     std.debug.assert(them_threat.len == hidden_size);
+    if (net.dense1_size == 16 and
+        net.dense2_size == 32 and
+        half % SIMD_LANES == 0)
+    {
+        return evaluatePairwiseMlpTail16x32FromSplit(
+            net,
+            us_psq,
+            us_threat,
+            them_psq,
+            them_threat,
+            b,
+        );
+    }
 
     var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
     var index: usize = 0;
