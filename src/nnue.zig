@@ -1777,69 +1777,6 @@ fn evaluatePairwiseMlpTail16x32(
     return finishPairwiseMlpTail16x32(net, l1_sums, bucket);
 }
 
-inline fn poolAccumulatorBlock(
-    net: *const Network,
-    acc: anytype,
-    offset: usize,
-    half: usize,
-) PoolVec {
-    const AccVec = AccVecOf(@TypeOf(acc));
-    const a_ptr: *align(1) const AccVec = @ptrCast(&acc[offset]);
-    const b_ptr: *align(1) const AccVec = @ptrCast(&acc[offset + half]);
-    const a = clampVecToActivationRange(@intCast(a_ptr.*), net.q0);
-    const b = clampVecToActivationRange(@intCast(b_ptr.*), net.q0);
-    return @intCast(@divTrunc(a * b, @as(I32Vec, @splat(512))));
-}
-
-fn evaluatePairwiseMlpTail16x32FromSlices(
-    net: *const Network,
-    us_acc: anytype,
-    them_acc: anytype,
-    b: *Board,
-) i32 {
-    const hidden_size: usize = @intCast(net.ft_hidden_size);
-    const half = hidden_size / 2;
-    std.debug.assert(half % SIMD_LANES == 0);
-    std.debug.assert(SIMD_LANES % 4 == 0);
-    const bucket = outputBucket(net, b);
-    const l1_bias_ptr: *align(1) const V7Dense1Vec = @ptrCast(&net.l1_biases[bucket * 16]);
-    var l1_sums = l1_bias_ptr.*;
-
-    var offset: usize = 0;
-    while (offset < half) : (offset += SIMD_LANES) {
-        const us_pooled: [SIMD_LANES]u8 = poolAccumulatorBlock(
-            net,
-            us_acc,
-            offset,
-            half,
-        );
-        const them_pooled: [SIMD_LANES]u8 = poolAccumulatorBlock(
-            net,
-            them_acc,
-            offset,
-            half,
-        );
-        inline for (0..SIMD_LANES / 4) |group_in_block| {
-            const lane = group_in_block * 4;
-            accumulatePairwiseL1Group(
-                net,
-                bucket,
-                (offset + lane) / 4,
-                @ptrCast(&us_pooled[lane]),
-                &l1_sums,
-            );
-            accumulatePairwiseL1Group(
-                net,
-                bucket,
-                (half + offset + lane) / 4,
-                @ptrCast(&them_pooled[lane]),
-                &l1_sums,
-            );
-        }
-    }
-    return finishPairwiseMlpTail16x32(net, l1_sums, bucket);
-}
-
 fn evaluatePairwiseMlpFromPooled(
     net: *const Network,
     pooled: []const u8,
@@ -1904,13 +1841,6 @@ fn evaluatePairwiseMlpFromSlices(
     const hidden_size: usize = @intCast(net.ft_hidden_size);
     const half = hidden_size / 2;
     const AccVec = AccVecOf(@TypeOf(us_acc));
-    if (net.dense1_size == 16 and
-        net.dense2_size == 32 and
-        half % SIMD_LANES == 0)
-    {
-        return evaluatePairwiseMlpTail16x32FromSlices(net, us_acc, them_acc, b);
-    }
-
     var pooled: [MAX_HIDDEN_SIZE]u8 = undefined;
     var index: usize = 0;
     const pool_divisor: I32Vec = @splat(512);
