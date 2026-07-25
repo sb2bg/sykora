@@ -52,6 +52,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
 
     const prior_count = self.position_hash_count;
 
+    self.tt.setConcurrent(self.num_threads > 1);
     self.tt.nextAge();
 
     const num_helpers = self.num_threads - 1;

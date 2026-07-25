@@ -46,13 +46,16 @@ pub const TranspositionTable = struct {
 
     buckets: []TTBucket,
     num_buckets: usize,
+    bucket_divisor_reciprocal: u64,
     current_age: u8,
     allocator: std.mem.Allocator,
     locks: [LOCK_STRIPES]std.Thread.Mutex,
+    concurrent: bool,
 
     pub fn init(allocator: std.mem.Allocator, size_mb: usize) !Self {
         const bucket_size = @sizeOf(TTBucket);
         const num_buckets = (size_mb * 1024 * 1024) / bucket_size;
+        const bucket_divisor_reciprocal = divisorReciprocal(@intCast(num_buckets));
         const buckets = try allocator.alloc(TTBucket, num_buckets);
 
         for (buckets) |*bucket| {
@@ -62,9 +65,11 @@ pub const TranspositionTable = struct {
         return Self{
             .buckets = buckets,
             .num_buckets = num_buckets,
+            .bucket_divisor_reciprocal = bucket_divisor_reciprocal,
             .current_age = 0,
             .allocator = allocator,
             .locks = [_]std.Thread.Mutex{std.Thread.Mutex{}} ** LOCK_STRIPES,
+            .concurrent = false,
         };
     }
 
@@ -83,6 +88,12 @@ pub const TranspositionTable = struct {
         self.current_age +%= 1;
     }
 
+    /// Enable mutex protection when multiple search workers share the table.
+    /// Single-threaded searches avoid paying for synchronization they do not need.
+    pub fn setConcurrent(self: *Self, concurrent: bool) void {
+        self.concurrent = concurrent;
+    }
+
     pub fn resize(self: *Self, new_size_mb: usize) !void {
         self.allocator.free(self.buckets);
         const bucket_size = @sizeOf(TTBucket);
@@ -93,11 +104,16 @@ pub const TranspositionTable = struct {
         }
         self.buckets = buckets;
         self.num_buckets = num_buckets;
+        self.bucket_divisor_reciprocal = divisorReciprocal(@intCast(num_buckets));
         self.current_age = 0;
     }
 
     inline fn bucketIndex(self: *Self, hash: u64) usize {
-        return @as(usize, @intCast(hash % @as(u64, @intCast(self.num_buckets))));
+        return @intCast(fastModulo(
+            hash,
+            @intCast(self.num_buckets),
+            self.bucket_divisor_reciprocal,
+        ));
     }
 
     inline fn lockForBucket(self: *Self, idx: usize) *std.Thread.Mutex {
@@ -106,11 +122,18 @@ pub const TranspositionTable = struct {
 
     pub fn probe(self: *Self, hash: u64) ?TTEntry {
         const idx = self.bucketIndex(hash);
+        if (!self.concurrent) {
+            return probeBucket(&self.buckets[idx], hash);
+        }
+
         const mutex = self.lockForBucket(idx);
         mutex.lock();
         defer mutex.unlock();
 
-        const bucket = &self.buckets[idx];
+        return probeBucket(&self.buckets[idx], hash);
+    }
+
+    inline fn probeBucket(bucket: *const TTBucket, hash: u64) ?TTEntry {
         for (&bucket.entries) |entry| {
             if (entry.hash == hash) {
                 return entry;
@@ -121,12 +144,27 @@ pub const TranspositionTable = struct {
 
     pub fn store(self: *Self, hash: u64, depth: u8, score: i32, bound: TTEntryBound, best_move: Move) void {
         const idx = self.bucketIndex(hash);
+        if (!self.concurrent) {
+            self.storeInBucket(&self.buckets[idx], hash, depth, score, bound, best_move);
+            return;
+        }
+
         const mutex = self.lockForBucket(idx);
         mutex.lock();
         defer mutex.unlock();
 
-        const bucket = &self.buckets[idx];
+        self.storeInBucket(&self.buckets[idx], hash, depth, score, bound, best_move);
+    }
 
+    inline fn storeInBucket(
+        self: *Self,
+        bucket: *TTBucket,
+        hash: u64,
+        depth: u8,
+        score: i32,
+        bound: TTEntryBound,
+        best_move: Move,
+    ) void {
         // Check if this hash already exists in the bucket — always update same-hash entry
         for (&bucket.entries) |*entry| {
             if (entry.hash == hash) {
@@ -171,3 +209,61 @@ pub const TranspositionTable = struct {
         return score;
     }
 };
+
+inline fn divisorReciprocal(divisor: u64) u64 {
+    if (divisor <= 1) return 0;
+    return @intCast((@as(u128, 1) << 64) / divisor);
+}
+
+inline fn fastModulo(value: u64, divisor: u64, reciprocal: u64) u64 {
+    if (divisor == 1) return 0;
+
+    const quotient: u64 = @truncate((@as(u128, value) * reciprocal) >> 64);
+    var remainder = value - quotient * divisor;
+    if (remainder >= divisor) remainder -= divisor;
+    return remainder;
+}
+
+test "fast modulo matches integer remainder" {
+    const divisors = [_]u64{
+        1,
+        2,
+        3,
+        7,
+        64,
+        97,
+        10_922,
+        1_398_101,
+        std.math.maxInt(u32),
+        std.math.maxInt(u64) - 1,
+        std.math.maxInt(u64),
+    };
+    const values = [_]u64{
+        0,
+        1,
+        2,
+        63,
+        64,
+        65,
+        std.math.maxInt(u32),
+        std.math.maxInt(u64) / 2,
+        std.math.maxInt(u64) - 1,
+        std.math.maxInt(u64),
+    };
+
+    for (divisors) |divisor| {
+        const reciprocal = divisorReciprocal(divisor);
+        for (values) |value| {
+            try std.testing.expectEqual(value % divisor, fastModulo(value, divisor, reciprocal));
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x5A17_C0DE);
+    const random = prng.random();
+    for (0..10_000) |_| {
+        const divisor = random.intRangeAtMost(u64, 1, std.math.maxInt(u32));
+        const value = random.int(u64);
+        const reciprocal = divisorReciprocal(divisor);
+        try std.testing.expectEqual(value % divisor, fastModulo(value, divisor, reciprocal));
+    }
+}
