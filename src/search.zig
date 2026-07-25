@@ -49,6 +49,7 @@ pub const SearchOptions = struct {
     binc: ?u64 = null,
     moves_to_go: ?u64 = null,
     depth: ?u64 = null,
+    nodes: ?u64 = null,
     start_depth: u32 = 1,
     /// Absolute start of the GUI's `go` command, including worker setup.
     start_time: ?std.time.Instant = null,
@@ -336,6 +337,7 @@ pub const SearchEngine = struct {
     board: *Board,
     allocator: std.mem.Allocator,
     stop_search: *std.atomic.Value(bool),
+    shared_nodes: ?*std.atomic.Value(u64),
     uci_output: ?std.fs.File,
     root_best_move: Move,
     root_move_nodes: [ROOT_MOVE_BUCKETS]usize,
@@ -373,12 +375,14 @@ pub const SearchEngine = struct {
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
     search_start: std.time.Instant,
     hard_deadline_ns: ?u64,
+    node_limit: ?u64,
     stop_check_countdown: u32,
 
     pub fn init(
         board_ptr: *Board,
         allocator: std.mem.Allocator,
         stop_search: *std.atomic.Value(bool),
+        shared_nodes: ?*std.atomic.Value(u64),
         tt: *TranspositionTable,
         use_nnue: bool,
         nnue_net: ?*const nnue.Network,
@@ -393,6 +397,7 @@ pub const SearchEngine = struct {
             .board = board_ptr,
             .allocator = allocator,
             .stop_search = stop_search,
+            .shared_nodes = shared_nodes,
             .uci_output = null,
             .root_best_move = Move.init(0, 0, null),
             .root_move_nodes = [_]usize{0} ** ROOT_MOVE_BUCKETS,
@@ -425,6 +430,7 @@ pub const SearchEngine = struct {
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
             .search_start = std.time.Instant.now() catch unreachable,
             .hard_deadline_ns = null,
+            .node_limit = null,
             .stop_check_countdown = 0,
         };
     }
@@ -650,6 +656,31 @@ pub const SearchEngine = struct {
         return false;
     }
 
+    inline fn recordNode(self: *Self) bool {
+        if (self.node_limit) |limit| {
+            if (self.shared_nodes) |shared_nodes| {
+                var current = shared_nodes.load(.monotonic);
+                while (current < limit) {
+                    if (shared_nodes.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+                        current = observed;
+                    } else {
+                        self.nodes_searched += 1;
+                        return true;
+                    }
+                }
+            } else if (self.nodes_searched < limit) {
+                self.nodes_searched += 1;
+                return true;
+            }
+
+            self.stop_search.store(true, .monotonic);
+            return false;
+        }
+
+        self.nodes_searched += 1;
+        return true;
+    }
+
     /// Run a search and return the best move
     pub fn search(self: *Self, options: SearchOptions) anyerror!SearchResult {
         const start_time = options.start_time orelse (std.time.Instant.now() catch unreachable);
@@ -678,6 +709,7 @@ pub const SearchEngine = struct {
             std.math.mul(u64, budget.hard_ms, std.time.ns_per_ms) catch std.math.maxInt(u64)
         else
             null;
+        self.node_limit = options.nodes;
         self.stop_check_countdown = 0;
 
         // Generate legal moves
@@ -1461,6 +1493,8 @@ pub const SearchEngine = struct {
                 }
             }
 
+            if (!self.recordNode()) return 0;
+
             // Make move
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
@@ -1470,7 +1504,6 @@ pub const SearchEngine = struct {
             if (ply < MAX_PLY and moving_piece != null) {
                 self.continuation_keys[ply] = self.moveContinuationKey(move, move_color, moving_piece.?);
             }
-            self.nodes_searched += 1;
             const gives_check = self.board.isInCheck(self.board.board.move);
 
             // Add position to history for repetition detection
@@ -1569,6 +1602,8 @@ pub const SearchEngine = struct {
                 self.continuation_keys[ply] = old_continuation_key;
             }
             self.history_count = old_hist_count; // Restore history count
+
+            if (self.stop_search.load(.monotonic)) return 0;
 
             if (ply == 0) {
                 self.root_move_nodes[rootMoveBucket(move)] +|= self.nodes_searched - root_nodes_before;
@@ -1736,7 +1771,7 @@ pub const SearchEngine = struct {
             return 0;
         }
 
-        self.nodes_searched += 1;
+        if (!self.recordNode()) return 0;
         self.seldepth = @max(self.seldepth, ply);
 
         // Check if we're in check - if so, we must search all evasions (not just captures)
@@ -1863,6 +1898,8 @@ pub const SearchEngine = struct {
             // Unmake move
             self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
+
+            if (self.stop_search.load(.monotonic)) return 0;
 
             if (score >= beta) {
                 self.storeQuiescenceResult(score, original_alpha, beta, ply, move);

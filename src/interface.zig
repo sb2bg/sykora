@@ -30,6 +30,7 @@ pub const Uci = struct {
     debug: bool,
     options: Options,
     stop_search: std.atomic.Value(bool),
+    search_nodes: std.atomic.Value(u64),
     board: Board,
     allocator: std.mem.Allocator,
     search_thread: ?std.Thread,
@@ -65,6 +66,7 @@ pub const Uci = struct {
             .board = Board.startpos(),
             .allocator = allocator,
             .stop_search = stop_search,
+            .search_nodes = std.atomic.Value(u64).init(0),
             .search_thread = null,
             .best_move = board.Move.init(0, 0, null), // null move
             .log_file = null,
