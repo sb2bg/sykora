@@ -464,12 +464,10 @@ pub const SearchEngine = struct {
             const stack = self.allocator.alloc(nnue.AccumulatorPair, 128) catch return;
             self.acc_stack = stack;
             stack[0] = nnue.initAccumulators(self.nnue_net.?, self.board);
-            if (self.nnue_net.?.architecture == .pairwise_mlp_threats) {
-                if (self.allocator.alloc(nnue.ThreatAccumulatorPair, 128)) |threat_stack| {
-                    self.threat_acc_stack = threat_stack;
-                    threat_stack[0] = nnue.initThreatAccumulators(self.nnue_net.?, self.board);
-                } else |_| {}
-            }
+            if (self.allocator.alloc(nnue.ThreatAccumulatorPair, 128)) |threat_stack| {
+                self.threat_acc_stack = threat_stack;
+                threat_stack[0] = nnue.initThreatAccumulators(self.nnue_net.?, self.board);
+            } else |_| {}
             if (self.allocator.create(nnue.AccumulatorRefreshCache)) |cache| {
                 cache.initInPlace();
                 nnue.seedAccumulatorRefreshCache(self.nnue_net.?, self.board, &stack[0], cache);

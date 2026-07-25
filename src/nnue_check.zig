@@ -75,17 +75,14 @@ fn threatAccumulatorsMatch(
 fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
     const root_acc = nnue.initAccumulators(net, b);
     const root_wide = nnue.initAccumulatorsWide(net, b);
-    var root_threats: nnue.ThreatAccumulatorPair = undefined;
-    const has_threats = net.architecture == .pairwise_mlp_threats;
-    if (has_threats) root_threats = nnue.initThreatAccumulators(net, b);
+    const root_threats = nnue.initThreatAccumulators(net, b);
     var moves = @import("bitboard.zig").MoveList.init();
     b.generateLegalMoves(&moves) catch return false;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
 
     if (!accumulatorsMatchWide(&root_acc, &root_wide, hidden_size)) return false;
-    if (has_threats and
-        nnue.evaluateFromCachedAccumulators(net, &root_acc, &root_threats, b) !=
-            nnue.evaluateFromAccumulators(net, &root_acc, b))
+    if (nnue.evaluateFromCachedAccumulators(net, &root_acc, &root_threats, b) !=
+        nnue.evaluateFromAccumulators(net, &root_acc, b))
     {
         return false;
     }
@@ -134,15 +131,13 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
             accumulatorsMatchWide(&incremental, &incremental_wide, hidden_size) and
             nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &full, b) and
             nnue.evaluateFromAccumulators(net, &incremental, b) == nnue.evaluateFromAccumulators(net, &incremental_wide, b);
-        if (has_threats) {
-            var incremental_threats: nnue.ThreatAccumulatorPair = undefined;
-            nnue.updateThreatAccumulators(net, b, &root_threats, &incremental_threats);
-            const full_threats = nnue.initThreatAccumulators(net, b);
-            matches = matches and
-                threatAccumulatorsMatch(&incremental_threats, &full_threats, hidden_size) and
-                nnue.evaluateFromCachedAccumulators(net, &incremental, &incremental_threats, b) ==
-                    nnue.evaluateFromAccumulators(net, &incremental, b);
-        }
+        var incremental_threats: nnue.ThreatAccumulatorPair = undefined;
+        nnue.updateThreatAccumulators(net, b, &root_threats, &incremental_threats);
+        const full_threats = nnue.initThreatAccumulators(net, b);
+        matches = matches and
+            threatAccumulatorsMatch(&incremental_threats, &full_threats, hidden_size) and
+            nnue.evaluateFromCachedAccumulators(net, &incremental, &incremental_threats, b) ==
+                nnue.evaluateFromAccumulators(net, &incremental, b);
         b.unmakeMoveUnchecked(move, undo);
         if (!matches) return false;
     }

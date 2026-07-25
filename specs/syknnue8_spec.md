@@ -1,8 +1,8 @@
 # SYKNNUE8 Threat-Input Architecture and Experiment Spec
 
-Status: T1024/T768 training and sectioned-format support implemented on main;
-the runtime currently uses the required scalar reference threat path while
-incremental/lazy SIMD optimisation remains follow-up work
+Status: final T1024 promoted and embedded; incremental threat accumulation and
+the fused SIMD pooling/dense path are deployed, and SYKNNUE7 runtime loading is
+retired
 
 Research date: 2026-07-14
 
@@ -10,6 +10,10 @@ Research date: 2026-07-14
 
 `SYKNNUE8` should add full threat inputs to the proven v7 graph. The first v8
 experiment must change only the input feature set:
+
+Deployment note: references below to retaining v7 loading describe the
+original experiment plan. Historical v7 comparisons now use the tagged
+pre-v8 engine rather than the promoted runtime.
 
 ```text
 10 mirrored king buckets × 768 PSQ features, i16 weights
@@ -96,7 +100,7 @@ V8 must:
 6. distinguish evaluation quality from runtime cost with fixed-node and
    clock-time tests;
 7. support warm-start training from the retained v7 float checkpoint;
-8. retain v7 loading for regression matches.
+8. retain a tagged pre-v8 engine for historical regression matches.
 
 ### 3.2 Non-goals for the first candidate
 
@@ -621,7 +625,8 @@ Before self-play, all of the following must pass:
 10. null moves leaving feature state unchanged;
 11. scalar i32, optimised accumulator, Python/reference float, and exported
     integer inference agreement under their declared contracts;
-12. v7 regression loading and evaluation.
+12. retired v7 files are rejected, with historical evaluation covered by the
+    tagged pre-v8 engine.
 
 Threat-set differential tests must compare the feature IDs themselves, not
 only the final score. Score equality can hide cancelling update bugs.
@@ -715,7 +720,7 @@ V8 is eligible to become the default only when:
 - it is confirmed at LTC;
 - its raw NPS, tree efficiency, depth, and update costs are recorded rather
   than inferred from file size;
-- v7 remains loadable for regression tests;
+- v7 regression tests remain reproducible with the tagged pre-v8 engine;
 - the final embedded file has complete architecture, data, trainer, mapping,
   checkpoint, exporter, and test provenance.
 

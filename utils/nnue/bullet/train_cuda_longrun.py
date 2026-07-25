@@ -133,19 +133,19 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--architecture",
-        choices=["pairwise-linear", "pairwise-mlp"],
+        choices=["pairwise-mlp"],
         default="pairwise-mlp",
-        help="Network graph to train",
+        help="SYKNNUE8 network graph",
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk7", "syk8"],
-        default="syk7",
+        choices=["syk8"],
+        default="syk8",
         help="Checkpoint architecture family",
     )
     parser.add_argument("--hidden", type=int, default=1024, help="FT width")
-    parser.add_argument("--dense1", type=int, default=16, help="First v7 dense width")
-    parser.add_argument("--dense2", type=int, default=32, help="Second v7 dense width")
+    parser.add_argument("--dense1", type=int, default=16, help="First dense width")
+    parser.add_argument("--dense2", type=int, default=32, help="Second dense width")
     parser.add_argument(
         "--bucket-layout", choices=["v3_10"], default="v3_10", help="Input bucket layout"
     )
@@ -333,33 +333,20 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--wdl must be in [0, 1]")
     if args.resume and args.warm_start:
         raise ValueError("--resume and --warm-start are mutually exclusive")
-    if args.warm_start and args.network_format != "syk8":
-        raise ValueError("--warm-start is only supported for syk8 T1024")
-    if args.allow_random_v8_init and args.network_format != "syk8":
-        raise ValueError("--allow-random-v8-init is only valid for syk8")
     if args.allow_random_v8_init and (args.resume or args.warm_start):
         raise ValueError("--allow-random-v8-init cannot be combined with resume or warm start")
-    if args.architecture == "pairwise-linear" and args.network_format != "syk7":
-        raise ValueError("pairwise-linear must use --network-format syk7")
-    if args.architecture == "pairwise-mlp" and args.network_format not in {"syk7", "syk8"}:
-        raise ValueError("pairwise-mlp must use --network-format syk7 or syk8")
-    if args.network_format == "syk8":
-        if args.architecture != "pairwise-mlp":
-            raise ValueError("syk8 requires --architecture pairwise-mlp")
-        if args.hidden not in {768, 1024}:
-            raise ValueError("syk8 registered widths are --hidden 1024 (T1024) and 768 (T768)")
-        if args.dense1 != 16 or args.dense2 != 32 or args.output_buckets != 8:
-            raise ValueError("syk8 requires --dense1 16 --dense2 32 --output-buckets 8")
-        if not args.resume and not args.warm_start and not args.allow_random_v8_init:
-            raise ValueError(
-                "syk8 requires --warm-start/--resume, or --allow-random-v8-init for diagnostics"
-            )
-        if args.hidden == 768 and args.warm_start:
-            raise ValueError("T768 cannot use the exact H=1024 v7 warm start")
+    if args.hidden not in {768, 1024}:
+        raise ValueError("syk8 registered widths are --hidden 1024 (T1024) and 768 (T768)")
+    if args.dense1 != 16 or args.dense2 != 32 or args.output_buckets != 8:
+        raise ValueError("syk8 requires --dense1 16 --dense2 32 --output-buckets 8")
+    if not args.resume and not args.warm_start and not args.allow_random_v8_init:
+        raise ValueError(
+            "syk8 requires --warm-start/--resume, or --allow-random-v8-init for diagnostics"
+        )
+    if args.hidden == 768 and args.warm_start:
+        raise ValueError("T768 cannot use the exact H=1024 v7 warm start")
     if args.hidden % 2:
         raise ValueError("pairwise architectures require an even --hidden")
-    if args.export_after and args.architecture == "pairwise-linear":
-        raise ValueError("pairwise-linear is an ablation and has no deployable exporter")
     if args.parity_engine and not args.export_after:
         raise ValueError("--parity-engine requires --export-after")
     if args.export_best_validation and (not args.export_after or not args.validate_after):
@@ -641,19 +628,15 @@ def main() -> int:
         "--output",
         str(final_npz),
     ]
-    exporter_name = {
-        "syk7": "export_npz_to_syk7.py",
-        "syk8": "export_npz_to_syk8.py",
-    }[args.network_format]
     export_cmd = [
         sys.executable,
-        str(THIS_DIR / exporter_name),
+        str(THIS_DIR / "export_npz_to_syk8.py"),
         "--input",
         str(final_npz),
         "--output-net",
         str(final_net),
     ]
-    if args.network_format == "syk8" and args.allow_random_v8_init:
+    if args.allow_random_v8_init:
         export_cmd.append("--allow-clipping")
     parity_cmd: list[str] = []
     if args.parity_engine:
@@ -690,7 +673,6 @@ def main() -> int:
         REPO_ROOT / "utils" / "nnue" / "common.py",
         THIS_DIR / "checkpoint_raw_to_npz.py",
         THIS_DIR / "validate_checkpoints.py",
-        THIS_DIR / "export_npz_to_syk7.py",
         THIS_DIR / "export_npz_to_syk8.py",
         THIS_DIR / "warm_start_v8.py",
         REPO_ROOT / "utils" / "nnue" / "full_threats_v1.py",
@@ -751,7 +733,7 @@ def main() -> int:
             "dense1": args.dense1,
             "dense2": args.dense2,
             "factorised": True,
-            "factorisation_mode": "virtual_sparse" if args.network_format == "syk8" else "separate_tensor",
+            "factorisation_mode": "virtual_sparse",
             "output_bucket_count": args.output_buckets,
             "output_bucket_scheme": "single" if args.output_buckets == 1 else "material_popcount",
         },
@@ -783,19 +765,18 @@ def main() -> int:
             "final_net": str(final_net) if args.export_after else "",
         },
     }
-    if args.network_format == "syk8":
-        meta["network"].update(
-            {
-                "architecture_id": "pairwise_mlp_threats",
-                "feature_set": "mirrored_psq_full_threats_v1",
-                "psq_feature_count": 768 * (max(meta["network"]["bucket_layout_64"]) + 1),
-                "threat_feature_count": 60_720,
-                "threat_scheme_id": 1,
-                "threat_packing_sha256": "964591edbe856c9f90694dcbfabe42d58b011a469e3275a8aaa9e4249b21988a",
-                "threat_storage": "i8",
-                "resolved_accumulator": "i32",
-            }
-        )
+    meta["network"].update(
+        {
+            "architecture_id": "pairwise_mlp_threats",
+            "feature_set": "mirrored_psq_full_threats_v1",
+            "psq_feature_count": 768 * (max(meta["network"]["bucket_layout_64"]) + 1),
+            "threat_feature_count": 60_720,
+            "threat_scheme_id": 1,
+            "threat_packing_sha256": "964591edbe856c9f90694dcbfabe42d58b011a469e3275a8aaa9e4249b21988a",
+            "threat_storage": "i8",
+            "resolved_accumulator": "i32",
+        }
+    )
     meta_path = run_dir / "run_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 

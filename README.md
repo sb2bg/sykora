@@ -92,9 +92,9 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 <summary><b>Evaluation</b>: NNUE (default) with classical fallback</summary>
 
 - **NNUE evaluation** (default, embedded in binary):
-  - Embedded `SYKNNUE7` pairwise MLP: factorised mirrored king-bucketed sparse inputs (10 buckets), H=1024 feature transformer, and eight material heads
-  - External `SYKNNUE8` T1024/T768 support: the v7 graph plus frozen `full_threats_v1` inputs
-  - Pairwise product pooling with a CReLU/CSReLU dense tail; PSQ accumulation is incremental, while v8 threats currently use the correctness-first scalar reference path
+  - Embedded `SYKNNUE8` T1024: factorised mirrored king-bucketed sparse inputs (10 buckets), H=1024 feature transformer, `full_threats_v1`, and eight material heads
+  - External `SYKNNUE8` T1024/T768 support through `EvalFile`
+  - Incremental PSQ and threat accumulation with pairwise product pooling fused into the CReLU/CSReLU dense tail
   - Factorised training: shared `768 → H` factoriser merged into per-bucket weights at export
   - Trained on Stockfish binpack data via the Bullet trainer
   - Blendable with classical eval via `NnueBlend` (default: `100` = pure NNUE)
@@ -278,9 +278,9 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora embeds the `v7_20260710T055911Z-800` `SYKNNUE7` pairwise-MLP candidate and can also load compatible v7 and v8 nets from an external `EvalFile`. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
+Sykora embeds the final `v8_t1024_broad_20260724T205147Z` `SYKNNUE8` threat-aware pairwise-MLP network. External `EvalFile` overrides must also use the registered SYKNNUE8 T1024 or T768 format. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
 
-The key training requirement is **factorisation**: a shared `768 → H` matrix is trained across all king buckets and merged into each bucket's residual weights at export time. V7 keeps that proven sample-sharing mechanism while changing the activation and dense architecture.
+The key training requirement is **factorisation**: a shared `768 → H` PSQ matrix is trained across all king buckets and merged into each bucket's residual weights at export time. V8 preserves that sample-sharing mechanism and adds the frozen `full_threats_v1` vocabulary.
 
 ### Runtime
 
@@ -290,7 +290,7 @@ The key training requirement is **factorisation**: a shared `768 → H` matrix i
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For the v8 threat architecture and experiment contract, see `specs/syknnue8_spec.md`. The v7 specification defines the deployed PSQ-only contract.
+For the deployed threat architecture and experiment contract, see `specs/syknnue8_spec.md`. The v7 specification is retained as historical design documentation.
 
 ### Training Pipeline
 
@@ -305,9 +305,6 @@ Training uses the [Bullet](https://github.com/jw1912/bullet) trainer. The defaul
 
 # Continue through the broad 800-superbatch stage.
 .\launch_training.ps1 -Stage broad -Resume <v8-checkpoint-directory>
-
-# The old v7 profile remains available for controls.
-.\launch_training.ps1 -Profile v7 -Stage broad
 ```
 
 The ready-to-load `.sknnue` path is printed when training finishes. Resume an interrupted run with `-Resume <checkpoint-directory>`; the launcher derives the next superbatch from the checkpoint name.

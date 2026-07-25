@@ -6,6 +6,17 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+### Changed
+
+- Promoted the final `v8_t1024_broad_20260724T205147Z` SYKNNUE8 network to
+  the embedded default.
+- Made the deployment and training pipelines SYKNNUE8-only.
+
+### Removed
+
+- Removed SYKNNUE7 runtime loading, evaluation branches, container readers and
+  writers, active training profiles, and exporter/gating scripts.
+
 ## [3.1] - 2026-07-14
 
 ### Changed

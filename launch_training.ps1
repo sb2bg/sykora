@@ -1,4 +1,4 @@
-# Train, export, and verify Sykora's registered SYKNNUE8 or legacy v7 network.
+# Train, export, and verify Sykora's registered SYKNNUE8 network.
 #
 # First v8 pipeline check (random init is diagnostic-only):
 #   .\launch_training.ps1 -Smoke -AllowRandomV8Init
@@ -9,7 +9,7 @@
 param(
     [switch]$Smoke,
     [switch]$DryRun,
-    [ValidateSet("v8-t1024", "v8-t768", "v7")]
+    [ValidateSet("v8-t1024", "v8-t768")]
     [string]$Profile = "v8-t1024",
     [ValidateSet("pilot", "broad")]
     [string]$Stage = "pilot",
@@ -82,7 +82,7 @@ $trainingDatasets = Resolve-Binpacks $trainBinpacks
 $validationDatasets = Resolve-Binpacks $validationBinpacks
 
 # --- Registered network profile and training stage ---
-$networkFormat = if ($Profile -eq "v7") { "syk7" } else { "syk8" }
+$networkFormat = "syk8"
 $hidden = if ($Profile -eq "v8-t768") { 768 } else { 1024 }
 $dense1 = 16
 $dense2 = 32
@@ -99,7 +99,7 @@ if ($Smoke) {
     $saveRate = 1
     $validationPositions = 16384
 }
-$lrFinalSuperbatch = if ($networkFormat -eq "syk8") { 800 } else { $endSuperbatch }
+$lrFinalSuperbatch = 800
 
 if ($Resume -and $WarmStart) {
     Write-Error "-Resume and -WarmStart are mutually exclusive"
@@ -109,11 +109,7 @@ if ($AllowRandomV8Init -and ($Resume -or $WarmStart)) {
     Write-Error "-AllowRandomV8Init cannot be combined with -Resume or -WarmStart"
     exit 2
 }
-if ($AllowRandomV8Init -and $networkFormat -ne "syk8") {
-    Write-Error "-AllowRandomV8Init is only valid for a v8 profile"
-    exit 2
-}
-if ($networkFormat -eq "syk8" -and -not $Resume -and -not $WarmStart -and -not $AllowRandomV8Init) {
+if (-not $Resume -and -not $WarmStart -and -not $AllowRandomV8Init) {
     Write-Error "v8 requires -WarmStart/-Resume (or -AllowRandomV8Init for a smoke diagnostic)"
     exit 2
 }
@@ -147,7 +143,7 @@ Write-Host "  Sykora $($networkFormat.ToUpper()) training"
 Write-Host "============================================"
 Write-Host "Run ID:        $runId"
 Write-Host "Profile:       $Profile ($Stage)"
-Write-Host "Architecture:  factorised pairwise-MLP$(if ($networkFormat -eq 'syk8') { ' + full_threats_v1' })"
+Write-Host "Architecture:  factorised pairwise-MLP + full_threats_v1"
 Write-Host "Shape:         H=$hidden, $hidden -> $dense1 -> $($dense1 * 2) -> $dense2 -> 1"
 Write-Host "Output heads:  $outputBuckets material buckets"
 Write-Host "Superbatches:  $StartSuperbatch -> $endSuperbatch"
@@ -189,9 +185,7 @@ $arguments = @(
     "--lr-final-superbatch", $lrFinalSuperbatch,
     "--export-after"
 )
-if ($networkFormat -eq "syk8") {
-    $arguments += @("--validate-all-checkpoints", "--export-best-validation")
-}
+$arguments += @("--validate-all-checkpoints", "--export-best-validation")
 if ($Resume) {
     $arguments += @("--resume", $Resume)
 }

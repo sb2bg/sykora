@@ -88,7 +88,7 @@ inline fn armDotAdd(sum: I32Vec, inputs: U8Vec, weights: I8Vec) I32Vec {
 
 /// Add four packed u8 x i8 products to each i32 output lane.
 ///
-/// V7 pooled activations are in [0, 127], so the signed ARM dot-product path
+/// Pooled activations are in [0, 127], so the signed ARM dot-product path
 /// is exact after bitcasting them to i8. On AVX2, every adjacent pair is also
 /// bounded within i16, so the saturating maddubs intermediate cannot saturate.
 pub inline fn dotAdd(sum: I32Vec, inputs: U8Vec, weights: I8Vec) I32Vec {
