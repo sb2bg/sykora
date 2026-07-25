@@ -1402,6 +1402,66 @@ const Dense1Vec = @Vector(16, i32);
 const Dense2Vec = @Vector(32, i32);
 const Dense2WeightVec = @Vector(32, i8);
 const PoolVec = @Vector(SIMD_LANES, u8);
+const ActivationInputVec = @Vector(4, i32);
+const ActivationWideVec = @Vector(4, i64);
+const ActivationShiftVec = @Vector(4, u6);
+const ActivationInputShiftVec = @Vector(4, u5);
+
+inline fn divRoundNearestSignedPow2Vec(
+    values: ActivationWideVec,
+    comptime shift: u6,
+) ActivationWideVec {
+    const zero: ActivationWideVec = @splat(0);
+    const one: ActivationWideVec = @splat(1);
+    const half: ActivationWideVec = @splat(@as(i64, 1) << (shift - 1));
+    const negative_adjustment = @select(i64, values < zero, one, zero);
+    return (values + half - negative_adjustment) >>
+        @as(ActivationShiftVec, @splat(shift));
+}
+
+inline fn divRoundNearestNonNegPow2InputVec(
+    values: ActivationInputVec,
+    comptime shift: u6,
+) ActivationInputVec {
+    const half: ActivationInputVec = @splat(@as(i32, 1) << (shift - 1));
+    return (values + half) >>
+        @as(ActivationInputShiftVec, @splat(@intCast(shift)));
+}
+
+test "vector activation rounding matches scalar reference" {
+    const batches = [_]ActivationWideVec{
+        .{ std.math.minInt(i32), -100_000, -65, -64 },
+        .{ -63, -1, 0, 1 },
+        .{ 63, 64, 65, 100_000 },
+        .{ std.math.maxInt(i32), -4097, 4095, 4096 },
+    };
+    inline for ([_]u6{ 6, 7 }) |shift| {
+        for (batches) |values| {
+            const rounded = divRoundNearestSignedPow2Vec(values, shift);
+            for (0..4) |lane| {
+                try std.testing.expectEqual(
+                    divRoundNearestSignedPow2(values[lane], shift),
+                    rounded[lane],
+                );
+            }
+        }
+    }
+
+    var value: i64 = -100_000;
+    while (value <= 100_000) : (value += 1) {
+        const reference = @min(
+            divRoundNearestNonNegPow2(value * value, 6),
+            Q,
+        );
+        const clamped: i32 = @intCast(@min(@max(value, -Q), Q));
+        const input: ActivationInputVec = @splat(clamped * clamped);
+        const optimized = @min(
+            divRoundNearestNonNegPow2InputVec(input, 6),
+            @as(ActivationInputVec, @splat(Q)),
+        );
+        try std.testing.expectEqual(reference, optimized[0]);
+    }
+}
 
 fn finishPairwiseMlpTail16x32(
     net: *const Network,
@@ -1417,11 +1477,33 @@ fn finishPairwiseMlpTail16x32(
     const output_weights = net.output_weights;
 
     var dense1_activated: [32]i32 = undefined;
-    for (0..16) |output| {
-        const value = divRoundNearestSignedPow2(l1_sums[output], 7);
-        dense1_activated[output] = @intCast(@min(@max(value, 0), q));
-        const squared = divRoundNearestNonNegPow2(value * value, 6);
-        dense1_activated[16 + output] = @intCast(@min(squared, q));
+    inline for (0..4) |block| {
+        const base = block * 4;
+        const input = ActivationInputVec{
+            l1_sums[base],
+            l1_sums[base + 1],
+            l1_sums[base + 2],
+            l1_sums[base + 3],
+        };
+        const value = divRoundNearestSignedPow2Vec(@intCast(input), 7);
+        const zero: ActivationWideVec = @splat(0);
+        const max_value: ActivationWideVec = @splat(q);
+        const linear: ActivationInputVec = @intCast(@min(@max(value, zero), max_value));
+        // q is format-fixed at 64. Once |value| reaches q, the rounded square
+        // is already at least q, so clamping before the multiply is exact and
+        // keeps the square in efficient i32 vector lanes.
+        const square_input: ActivationInputVec = @intCast(@min(
+            @max(value, -max_value),
+            max_value,
+        ));
+        const squared = @min(
+            divRoundNearestNonNegPow2InputVec(square_input * square_input, 6),
+            @as(ActivationInputVec, @splat(@intCast(q))),
+        );
+        inline for (0..4) |lane| {
+            dense1_activated[base + lane] = linear[lane];
+            dense1_activated[16 + base + lane] = squared[lane];
+        }
     }
 
     const l2_bias_ptr: *align(1) const Dense2Vec = @ptrCast(&l2_biases[bucket * 32]);
@@ -1433,16 +1515,31 @@ fn finishPairwiseMlpTail16x32(
         l2_sums += input_vec * @as(Dense2Vec, @intCast(weight_ptr.*));
     }
 
-    var dense2_activated: [32]i32 = undefined;
-    for (0..32) |output| {
-        const value = divRoundNearestSignedPow2(l2_sums[output], 6);
-        const clipped = @min(@max(value, 0), q);
-        dense2_activated[output] = @intCast(divRoundNearestNonNegPow2(clipped * clipped, 6));
+    var dense2_activated: Dense2Vec = undefined;
+    inline for (0..8) |block| {
+        const base = block * 4;
+        const input = ActivationInputVec{
+            l2_sums[base],
+            l2_sums[base + 1],
+            l2_sums[base + 2],
+            l2_sums[base + 3],
+        };
+        const value = divRoundNearestSignedPow2Vec(@intCast(input), 6);
+        const zero: ActivationWideVec = @splat(0);
+        const max_value: ActivationWideVec = @splat(q);
+        const clipped = @min(@max(value, zero), max_value);
+        const clipped_narrow: ActivationInputVec = @intCast(clipped);
+        const activated = divRoundNearestNonNegPow2InputVec(
+            clipped_narrow * clipped_narrow,
+            6,
+        );
+        inline for (0..4) |lane| {
+            dense2_activated[base + lane] = activated[lane];
+        }
     }
 
-    const activation_vec: Dense2Vec = dense2_activated;
     const output_weight_ptr: *align(1) const Dense2WeightVec = @ptrCast(&output_weights[bucket * 32]);
-    const products = activation_vec * @as(Dense2Vec, @intCast(output_weight_ptr.*));
+    const products = dense2_activated * @as(Dense2Vec, @intCast(output_weight_ptr.*));
     const sum = @as(i64, output_biases[bucket]) + @as(i64, @reduce(.Add, products));
     return @intCast(divRoundNearestSignedPow2(sum * SCALE, 12));
 }
