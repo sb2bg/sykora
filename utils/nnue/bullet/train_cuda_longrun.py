@@ -611,6 +611,8 @@ def main() -> int:
         str(run_dir / "run_meta.json"),
         "--output",
         str(run_dir / "validation_results.json"),
+        "--max-positions",
+        str(args.validation_positions),
     ]
     if not args.validate_all_checkpoints:
         validation_cmd.append("--final-only")

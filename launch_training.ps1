@@ -1,22 +1,34 @@
 # Train, export, and verify Sykora's registered SYKNNUE8 network.
 #
+# Dataset roots use this layout:
+#   <root>\train\*.binpack       (or *.data)
+#   <root>\validation\*.binpack  (or one *.data validation sample)
+#
 # First v8 pipeline check (random init is diagnostic-only):
-#   .\launch_training.ps1 -Smoke -AllowRandomV8Init
+#   .\launch_training.ps1 -DataDir D:\nnue-data\smoke -Smoke -AllowRandomV8Init
 #
 # T1024 pilot from the retained v7 full-precision checkpoint:
-#   .\launch_training.ps1 -WarmStart <v7-checkpoint-directory>
+#   .\launch_training.ps1 -DataDir D:\nnue-data\broad -WarmStart <v7-checkpoint-directory>
+#
+# Lower-learning-rate fine-tune from a full-precision v8 checkpoint:
+#   .\launch_training.ps1 -Stage finetune -DataDir D:\nnue-data\finetune -Resume <v8-checkpoint-directory>
 
 param(
     [switch]$Smoke,
     [switch]$DryRun,
     [ValidateSet("v8-t1024", "v8-t768")]
     [string]$Profile = "v8-t1024",
-    [ValidateSet("pilot", "broad")]
+    [ValidateSet("pilot", "broad", "finetune")]
     [string]$Stage = "pilot",
+    [string]$DataDir = "",
     [string]$Resume = "",
     [string]$WarmStart = "",
     [switch]$AllowRandomV8Init,
-    [int]$StartSuperbatch = 0
+    [int]$StartSuperbatch = 0,
+    [int]$Superbatches = 0,
+    [double]$Wdl = 0.75,
+    [double]$LrStart = 0.0,
+    [double]$LrFinal = 0.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,40 +58,75 @@ if (-not $venvActivate) {
 }
 & $venvActivate
 
-# --- Stockfish pretraining data ---
-$dataDir = "$PSScriptRoot\nnue\data\binpack"
-$trainBinpacks = @(
-    "test80-2023-06-jun-2tb7p.min-v2.v6.binpack",
-    "test80-2023-07-jul-2tb7p.min-v2.v6.binpack",
-    "test80-2023-09-sep-2tb7p.min-v2.v6.binpack",
-    "test80-2023-10-oct-2tb7p.min-v2.v6.binpack",
-    "test80-2023-11-nov-2tb7p.min-v2.v6.binpack",
-    "test80-2023-12-dec-2tb7p.min-v2.v6.binpack",
-    "test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
-    "test80-2024-02-feb-2tb7p.min-v2.v6.binpack",
-    "test80-2024-03-mar-2tb7p.min-v2.v6.binpack",
-    "test80-2024-04-apr-2tb7p.min-v2.v6.binpack",
-    "test80-2024-05-may-2tb7p.min-v2.v6.binpack"
-)
-$validationBinpacks = @(
-    "test80-2024-06-jun-2tb7p.min-v2.v6.binpack"
-)
-
-function Resolve-Binpacks([string[]]$Names) {
-    $resolved = @()
-    foreach ($name in $Names) {
-        $path = Join-Path $dataDir $name
-        if (-not (Test-Path $path)) {
-            Write-Error "Missing: $path`nDecompress with: zstd -d `"$path.zst`""
-            exit 1
-        }
-        $resolved += (Resolve-Path $path).Path
-    }
-    return $resolved
+# --- Source-agnostic local training data ---
+if (-not $DataDir) {
+    Write-Error (
+        "-DataDir is required. Expected <root>\train and <root>\validation " +
+        "subdirectories containing .binpack or .data files."
+    )
+    exit 2
+}
+if (-not (Test-Path -LiteralPath $DataDir -PathType Container)) {
+    Write-Error "Dataset root does not exist: $DataDir"
+    exit 1
 }
 
-$trainingDatasets = Resolve-Binpacks $trainBinpacks
-$validationDatasets = Resolve-Binpacks $validationBinpacks
+$dataRoot = (Resolve-Path -LiteralPath $DataDir).Path
+$trainingDataDir = Join-Path $dataRoot "train"
+$validationDataDir = Join-Path $dataRoot "validation"
+foreach ($requiredDir in @($trainingDataDir, $validationDataDir)) {
+    if (-not (Test-Path -LiteralPath $requiredDir -PathType Container)) {
+        Write-Error "Missing dataset directory: $requiredDir"
+        exit 1
+    }
+}
+
+function Get-DatasetFiles([string]$Directory, [string]$Role) {
+    $files = @(
+        Get-ChildItem -LiteralPath $Directory -Recurse -File |
+            Where-Object { $_.Extension -in @(".binpack", ".data") } |
+            Sort-Object FullName
+    )
+    if ($files.Count -eq 0) {
+        $compressed = @(
+            Get-ChildItem -LiteralPath $Directory -Recurse -File -Filter "*.zst"
+        )
+        $hint = if ($compressed.Count -gt 0) {
+            " Decompress the .zst files first."
+        } else {
+            ""
+        }
+        Write-Error "No .binpack or .data files found for $Role under $Directory.$hint"
+        exit 1
+    }
+
+    $extensions = @($files | ForEach-Object { $_.Extension.ToLowerInvariant() } | Select-Object -Unique)
+    if ($extensions.Count -ne 1) {
+        Write-Error "$Role data mixes .binpack and .data files under $Directory"
+        exit 2
+    }
+    return $files
+}
+
+$trainingFiles = @(Get-DatasetFiles $trainingDataDir "training")
+$validationFiles = @(Get-DatasetFiles $validationDataDir "validation")
+$trainingExtension = $trainingFiles[0].Extension.ToLowerInvariant()
+$validationExtension = $validationFiles[0].Extension.ToLowerInvariant()
+if ($trainingExtension -ne $validationExtension) {
+    Write-Error (
+        "Training and validation formats differ: " +
+        "$trainingExtension versus $validationExtension"
+    )
+    exit 2
+}
+if ($trainingExtension -eq ".data" -and $validationFiles.Count -ne 1) {
+    Write-Error "BulletFormat validation requires exactly one .data file under $validationDataDir"
+    exit 2
+}
+
+$dataFormat = if ($trainingExtension -eq ".binpack") { "binpack" } else { "bullet" }
+$trainingDatasets = @($trainingFiles | ForEach-Object { $_.FullName })
+$validationDatasets = @($validationFiles | ForEach-Object { $_.FullName })
 
 # --- Registered network profile and training stage ---
 $networkFormat = "syk8"
@@ -87,19 +134,10 @@ $hidden = if ($Profile -eq "v8-t768") { 768 } else { 1024 }
 $dense1 = 16
 $dense2 = 32
 $outputBuckets = 8
-$endSuperbatch = if ($Stage -eq "pilot") { 200 } else { 800 }
 $batchSize = 16384
 $batchesPerSuperbatch = 6104
-$saveRate = if ($Stage -eq "pilot") { 10 } else { 25 }
+$saveRate = if ($Stage -eq "broad") { 25 } else { 10 }
 $validationPositions = 262144
-if ($Smoke) {
-    $endSuperbatch = 2
-    $batchSize = 4096
-    $batchesPerSuperbatch = 16
-    $saveRate = 1
-    $validationPositions = 16384
-}
-$lrFinalSuperbatch = 800
 
 if ($Resume -and $WarmStart) {
     Write-Error "-Resume and -WarmStart are mutually exclusive"
@@ -117,21 +155,111 @@ if ($Profile -ne "v8-t1024" -and $WarmStart) {
     Write-Error "-WarmStart is only valid for the v8-t1024 profile"
     exit 2
 }
+if ($Stage -eq "finetune" -and -not $Resume) {
+    Write-Error "The finetune stage requires -Resume with a full-precision v8 checkpoint"
+    exit 2
+}
+if ($Superbatches -lt 0) {
+    Write-Error "-Superbatches cannot be negative"
+    exit 2
+}
+if ($Wdl -lt 0.0 -or $Wdl -gt 1.0) {
+    Write-Error "-Wdl must be in [0, 1]"
+    exit 2
+}
+if ($LrStart -lt 0.0 -or $LrFinal -lt 0.0) {
+    Write-Error "Learning rates cannot be negative"
+    exit 2
+}
 
-$validationCache = Join-Path $dataDir "validation\t80_2024_06_v3filter_$validationPositions.data"
 if ($StartSuperbatch -le 0) {
     $StartSuperbatch = 1
     if ($Resume) {
         $resumeName = Split-Path ($Resume -replace '[\\/]+$', '') -Leaf
         if ($resumeName -match '-(\d+)$') {
             $StartSuperbatch = [int]$Matches[1] + 1
+        } elseif ($Stage -eq "finetune") {
+            Write-Error (
+                "Cannot infer the resumed superbatch from checkpoint '$resumeName'. " +
+                "Use -StartSuperbatch explicitly."
+            )
+            exit 2
         }
     }
 }
+
+if ($Smoke) {
+    $endSuperbatch = $StartSuperbatch + 1
+    $batchSize = 4096
+    $batchesPerSuperbatch = 16
+    $saveRate = 1
+    $validationPositions = 16384
+} elseif ($Superbatches -gt 0) {
+    $endSuperbatch = $StartSuperbatch + $Superbatches - 1
+} elseif ($Stage -eq "pilot") {
+    $endSuperbatch = 200
+} elseif ($Stage -eq "broad") {
+    $endSuperbatch = 800
+} else {
+    $endSuperbatch = $StartSuperbatch + 199
+}
+
 if ($StartSuperbatch -gt $endSuperbatch) {
     Write-Error "Start superbatch $StartSuperbatch exceeds end $endSuperbatch"
     exit 2
 }
+
+$effectiveLrStart = if ($LrStart -gt 0.0) {
+    $LrStart
+} elseif ($Stage -eq "finetune") {
+    0.0001
+} else {
+    0.001
+}
+$effectiveLrFinal = if ($LrFinal -gt 0.0) {
+    $LrFinal
+} elseif ($Stage -eq "finetune") {
+    0.00001
+} else {
+    $effectiveLrStart * [Math]::Pow(0.3, 5)
+}
+if ($effectiveLrFinal -gt $effectiveLrStart) {
+    Write-Error "Final learning rate cannot exceed the starting learning rate"
+    exit 2
+}
+$lrOriginSuperbatch = if ($Stage -eq "finetune") { $StartSuperbatch } else { 1 }
+$lrFinalSuperbatch = if ($Stage -eq "finetune") {
+    $endSuperbatch
+} else {
+    [Math]::Max(800, $endSuperbatch)
+}
+
+$validationCache = ""
+if ($dataFormat -eq "binpack") {
+    $validationManifest = (
+        $validationFiles |
+            ForEach-Object {
+                "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)"
+            }
+    ) -join "`n"
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $manifestBytes = [System.Text.Encoding]::UTF8.GetBytes($validationManifest)
+        $validationHash = (
+            [System.BitConverter]::ToString($sha256.ComputeHash($manifestBytes)) -replace "-", ""
+        ).Substring(0, 12).ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+    $cacheDir = Join-Path $PSScriptRoot "nnue\data\validation"
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    $validationCache = Join-Path $cacheDir "validation_${validationHash}_$validationPositions.data"
+}
+
+$invariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+$wdlArgument = $Wdl.ToString("R", $invariantCulture)
+$lrStartArgument = $effectiveLrStart.ToString("R", $invariantCulture)
+$lrFinalArgument = $effectiveLrFinal.ToString("R", $invariantCulture)
 
 $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
 $profileTag = $Profile -replace '-', '_'
@@ -148,22 +276,23 @@ Write-Host "Shape:         H=$hidden, $hidden -> $dense1 -> $($dense1 * 2) -> $d
 Write-Host "Output heads:  $outputBuckets material buckets"
 Write-Host "Superbatches:  $StartSuperbatch -> $endSuperbatch"
 Write-Host "Batch shape:   $batchSize x $batchesPerSuperbatch"
+Write-Host "Data root:     $dataRoot"
+Write-Host "Data format:   $dataFormat"
 Write-Host "Train shards:  $($trainingDatasets.Count)"
-Write-Host "Held out:      $($validationDatasets.Count) shard, $validationPositions positions"
+Write-Host "Held out:      $($validationDatasets.Count) shard(s), $validationPositions positions"
+Write-Host "WDL:           $wdlArgument"
+Write-Host "Learning rate: $lrStartArgument -> $lrFinalArgument"
 Write-Host "============================================"
 
 $arguments = @(
     "$PSScriptRoot\utils\nnue\bullet\train_cuda_longrun.py",
     "--dataset"
 ) + $trainingDatasets + @(
-    "--validation-dataset"
-) + $validationDatasets + @(
-    "--validation-cache", $validationCache,
     "--validation-positions", $validationPositions,
     "--bullet-repo", "$PSScriptRoot\nnue\bullet_repo",
     "--output-root", "$PSScriptRoot\nnue\models\bullet",
     "--run-id", $runId,
-    "--data-format", "binpack",
+    "--data-format", $dataFormat,
     "--binpack-buffer-mb", 12288,
     "--binpack-threads", 6,
     "--validation-buffer-mb", 512,
@@ -180,11 +309,22 @@ $arguments = @(
     "--batches-per-superbatch", $batchesPerSuperbatch,
     "--save-rate", $saveRate,
     "--threads", 8,
-    "--wdl", 0.75,
-    "--lr-start", 0.001,
+    "--wdl", $wdlArgument,
+    "--lr-start", $lrStartArgument,
+    "--lr-final", $lrFinalArgument,
+    "--lr-origin-superbatch", $lrOriginSuperbatch,
     "--lr-final-superbatch", $lrFinalSuperbatch,
     "--export-after"
 )
+if ($dataFormat -eq "binpack") {
+    $arguments += @(
+        "--validation-dataset"
+    ) + $validationDatasets + @(
+        "--validation-cache", $validationCache
+    )
+} else {
+    $arguments += @("--validation-sample", $validationDatasets[0])
+}
 $arguments += @("--validate-all-checkpoints", "--export-best-validation")
 if ($Resume) {
     $arguments += @("--resume", $Resume)
