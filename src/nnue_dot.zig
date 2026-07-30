@@ -24,6 +24,7 @@ pub const I32Vec = @Vector(output_lanes, i32);
 
 /// Repeat one four-byte activation group once for each output lane.
 pub inline fn splatGroup(group: *align(1) const [4]u8) U8Vec {
+    @setEvalBranchQuota(10_000);
     var result: U8Vec = undefined;
     inline for (0..output_lanes) |output| {
         inline for (0..4) |lane| {
