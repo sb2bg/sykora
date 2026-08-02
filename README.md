@@ -33,6 +33,17 @@ Engine is compatible with any UCI GUI (Arena, Cutechess, etc.)
 
 ## Strength
 
+### Sykora 4.0 release validation
+
+The complete Sykora 4.0 engine passed a direct OpenBench SPRT against the
+Sykora 3.1 release at **+158.22 Elo** over 760 games, with a 95% confidence
+interval of **+140.81 to +176.40 Elo** ([test 29](https://bench.sbognar.com/test/29/)).
+An architecture-controlled test measured SYKNNUE8 at **+141.77 Elo** against
+the matched SYKNNUE7 evaluator despite its higher evaluation cost
+([test 28](https://bench.sbognar.com/test/28/)).
+
+### CCRL
+
 Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entries:
 
 | Version               | CCRL Rating | Rank  | Elo vs `0.1.0` |

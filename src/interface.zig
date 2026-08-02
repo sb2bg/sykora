@@ -20,7 +20,7 @@ const option_handlers = @import("option_handlers.zig");
 
 const name = "Sykora";
 const author = "Sullivan Bognar";
-const version = "3.1";
+const version = "4.0";
 
 pub const Uci = struct {
     const Self = @This();

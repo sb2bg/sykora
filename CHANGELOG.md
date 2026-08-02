@@ -6,11 +6,34 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+## [4.0] - 2026-08-02
+
+### Added
+
+- Added the `SYKNNUE8` threat-aware pairwise-MLP evaluator with incremental
+  piece-square and full-threat accumulators, ten mirrored king buckets, and
+  eight material output heads.
+- Added conservative tactical ProbCut and quiet-move SEE pruning to the
+  accepted search stack.
+- Added OpenBench workload, deterministic benchmark, and SPSA integration for
+  reproducible distributed search testing.
+
 ### Changed
 
 - Promoted the final `v8_t1024_broad_20260724T205147Z` SYKNNUE8 network to
   the embedded default.
 - Made the deployment and training pipelines SYKNNUE8-only.
+- Adopted the accepted search defaults `LMRScale=134`,
+  `LMRHistoryScale=95`, `LMPMoveScale=96`, and `HistoryMaxBonus=490`.
+- Optimized NNUE threat accumulation, pooling, transposition-table access, and
+  shared search hot paths.
+- Added a configurable NNUE fine-tuning stage to the training pipeline.
+
+### Fixed
+
+- Enforced exact fixed-node limits across the main and helper search threads.
+- Raised the NNUE SIMD compile-time branch quota so optimized Zen 4 worker
+  builds compile reliably with Zig 0.15.2.
 
 ### Removed
 
@@ -113,7 +136,8 @@ This changelog was reconstructed from the tagged release history and the commits
 - Fixed castling, en passant, capture handling, move legality edge cases, transposition-table scoring issues, and early search stability problems.
 - Fixed cleanup and shutdown behavior around search threads, bot sessions, and Zig `0.16` compatibility.
 
-[Unreleased]: https://github.com/sb2bg/sykora/compare/v3.1...HEAD
+[Unreleased]: https://github.com/sb2bg/sykora/compare/v4.0...HEAD
+[4.0]: https://github.com/sb2bg/sykora/compare/v3.1...v4.0
 [3.1]: https://github.com/sb2bg/sykora/compare/v3.0...v3.1
 [3.0]: https://github.com/sb2bg/sykora/compare/v0.2.2...v3.0
 [0.2.2]: https://github.com/sb2bg/sykora/compare/v0.2.1...v0.2.2
