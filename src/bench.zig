@@ -40,6 +40,7 @@ pub fn run(allocator: std.mem.Allocator) BenchError!void {
             &board,
             allocator,
             &stop_flag,
+            null,
             &tt,
             true,
             &network,
