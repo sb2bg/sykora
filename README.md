@@ -8,7 +8,7 @@
 
 Magic bitboards, alpha-beta with modern pruning and reductions, Lazy SMP, embedded NNUE trained via [Bullet](https://github.com/jw1912/bullet).
 
-[![Sykora CCRL badge](https://ccrl-badges.vercel.app/badge?engine=Sykora&list=blitz&showList=false&showRank=true)](<https://computerchess.org.uk/ccrl/404/cgi/engine_details.cgi?match_length=30&print=Details+(text)&eng=Sykora%200.2.2%2064-bit#Sykora_0_2_2_64-bit>)
+[![Sykora CCRL badge](https://ccrl-badges.vercel.app/badge?engine=Sykora&list=4015&showList=false&showRank=true)](https://computerchess.org.uk/4040/cgi/engine_details.cgi?match_length=30&each_game=0&print=Details&each_game=0&eng=Sykora%203.1%2064-bit#Sykora_3_1_64-bit)
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
@@ -33,13 +33,17 @@ Engine is compatible with any UCI GUI (Arena, Cutechess, etc.)
 
 ### CCRL
 
-Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entries:
+Sykora is tested on the CCRL [Blitz](https://computerchess.org.uk/404/) and [40/15](https://computerchess.org.uk/4040/) lists. Current entries:
 
-| Version               | CCRL Rating | Rank  | Elo vs `0.1.0` |
-| --------------------- | ----------- | ----- | -------------- |
-| `Sykora 0.2.2 64-bit` | `3240`      | `163` | `+872`         |
-| `Sykora 0.2.1 64-bit` | N/A         | N/A   | N/A            |
-| `Sykora 0.1.0 64-bit` | `2368`      | `423` | baseline       |
+| Version               | CCRL Blitz | CCRL 40/15 | Elo Improvement |
+| --------------------- | ---------- | ---------- | --------------- |
+| `Sykora 3.1 64-bit`   | -          | `3350`\*   | -               |
+| `Sykora 3.0 64-bit`   | `3264`     | -          | `+896`          |
+| `Sykora 0.2.2 64-bit` | `3240`     | `3234`     | `+872`          |
+| `Sykora 0.2.1 64-bit` | -          | -          | -               |
+| `Sykora 0.1.0 64-bit` | `2368`     | -          | baseline        |
+
+\* The `3.1` 40/15 rating is its first CCRL score (19 games) and is provisional.
 
 ## Features
 
