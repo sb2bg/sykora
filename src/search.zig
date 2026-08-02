@@ -78,10 +78,10 @@ pub const SearchResult = struct {
 /// Percentage fields are fixed-point integers where 100 represents 1.00.
 /// Defaults track the latest accepted SPSA candidate.
 pub const SearchTuning = struct {
-    lmr_scale_pct: i32 = 109,
-    lmr_history_scale_pct: i32 = 101,
-    lmp_move_scale_pct: i32 = 94,
-    history_max_bonus: u32 = 380,
+    lmr_scale_pct: i32 = 134,
+    lmr_history_scale_pct: i32 = 95,
+    lmp_move_scale_pct: i32 = 96,
+    history_max_bonus: u32 = 490,
 };
 
 const MAX_PLY = 64;
