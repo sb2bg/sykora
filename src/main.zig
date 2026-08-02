@@ -5,6 +5,7 @@ const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
 const gensfen = @import("gensfen.zig");
 const nnue_check = @import("nnue_check.zig");
+const bench = @import("bench.zig");
 
 pub fn main() void {
     tryMain() catch |err| {
@@ -12,6 +13,7 @@ pub fn main() void {
         switch (err) {
             error.GensfenError => {},
             error.NnueCheckError => std.process.exit(1),
+            error.BenchFailed => std.process.exit(1),
             else => {
                 std.log.err("\t|> {s}\n", .{uciErr.getErrorDescriptor(@errorCast(err))});
             },
@@ -19,7 +21,7 @@ pub fn main() void {
     };
 }
 
-const MainError = UciError || error{GensfenError} || nnue_check.NnueCheckError;
+const MainError = UciError || error{GensfenError} || nnue_check.NnueCheckError || bench.BenchError;
 
 fn tryMain() MainError!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -37,6 +39,9 @@ fn tryMain() MainError!void {
         }
         if (std.mem.eql(u8, args[1], "nnuecheck")) {
             return runNnueCheckFromSlice(args[2..], allocator);
+        }
+        if (std.mem.eql(u8, args[1], "bench")) {
+            return bench.run(allocator);
         }
         // "uci" or unrecognized → fall through to UCI mode
     }
