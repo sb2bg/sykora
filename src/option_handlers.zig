@@ -76,10 +76,10 @@ pub fn registerOptions(uci: *Uci) !void {
 
     // OpenBench parameter names must be single whitespace-free tokens. Scale
     // options are fixed-point integers where 100 represents logical 1.00.
-    try registerSpin(uci, "LMRScale", "109", 50, 200, handleLmrScaleChange);
-    try registerSpin(uci, "LMRHistoryScale", "101", 0, 300, handleLmrHistoryScaleChange);
-    try registerSpin(uci, "LMPMoveScale", "94", 50, 200, handleLmpMoveScaleChange);
-    try registerSpin(uci, "HistoryMaxBonus", "380", 50, 1600, handleHistoryMaxBonusChange);
+    try registerSpin(uci, "LMRScale", "134", 50, 200, handleLmrScaleChange);
+    try registerSpin(uci, "LMRHistoryScale", "95", 0, 300, handleLmrHistoryScaleChange);
+    try registerSpin(uci, "LMPMoveScale", "96", 50, 200, handleLmpMoveScaleChange);
+    try registerSpin(uci, "HistoryMaxBonus", "490", 50, 1600, handleHistoryMaxBonusChange);
 }
 
 fn registerSpin(
