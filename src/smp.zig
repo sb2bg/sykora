@@ -45,12 +45,14 @@ pub fn terminateSearch(self: *Uci) !void {
 
 pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.Instant) UciError!void {
     try self.writeInfoString("search thread started", .{});
+    self.search_nodes.store(0, .monotonic);
 
     const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
     const use_nnue_for_search = self.use_nnue and net_ptr != null;
 
     const prior_count = self.position_hash_count;
 
+    self.tt.setConcurrent(self.num_threads > 1);
     self.tt.nextAge();
 
     const num_helpers = self.num_threads - 1;
@@ -80,6 +82,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         &search_board,
         self.allocator,
         &self.stop_search,
+        &self.search_nodes,
         &self.tt,
         use_nnue_for_search,
         net_ptr,
@@ -105,6 +108,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         .binc = go_opts.binc,
         .moves_to_go = go_opts.moves_to_go,
         .depth = go_opts.depth,
+        .nodes = go_opts.nodes,
         .start_time = start_time,
         .move_overhead = self.move_overhead_ms,
     };
@@ -125,8 +129,12 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
     }
 
     var total_nodes = result.nodes;
-    for (0..num_helpers) |i| {
-        total_nodes += self.helper_results[i].nodes;
+    if (go_opts.nodes != null) {
+        total_nodes = @intCast(self.search_nodes.load(.monotonic));
+    } else {
+        for (0..num_helpers) |i| {
+            total_nodes += self.helper_results[i].nodes;
+        }
     }
 
     try self.writeInfoString("search thread stopped, total nodes {d}", .{total_nodes});
@@ -147,6 +155,7 @@ fn helperSearch(
         &helper_board,
         self.allocator,
         &self.stop_search,
+        &self.search_nodes,
         &self.tt,
         use_nnue_for_search,
         net_ptr,
@@ -178,6 +187,7 @@ fn helperSearch(
         .binc = go_opts.binc,
         .moves_to_go = go_opts.moves_to_go,
         .depth = go_opts.depth,
+        .nodes = go_opts.nodes,
         .start_depth = start_depth,
         .start_time = start_time,
         .move_overhead = self.move_overhead_ms,
