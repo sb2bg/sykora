@@ -31,16 +31,6 @@ zig build -Doptimize=ReleaseFast
 
 Engine is compatible with any UCI GUI (Arena, Cutechess, etc.)
 
-## Strength
-
-### Sykora 4.0 release validation
-
-The complete Sykora 4.0 engine passed a direct OpenBench SPRT against the
-Sykora 3.1 release at **+158.22 Elo** over 760 games, with a 95% confidence
-interval of **+140.81 to +176.40 Elo**.
-An architecture-controlled test measured SYKNNUE8 at **+141.77 Elo** against
-the matched SYKNNUE7 evaluator despite its higher evaluation cost.
-
 ### CCRL
 
 Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entries:
@@ -153,20 +143,20 @@ Sykora is tested by [CCRL](https://computerchess.org.uk/ccrl/404/). Current entr
 
 ## UCI Options
 
-| Option           | Type   | Default   | Description                                                |
-| ---------------- | ------ | --------- | ---------------------------------------------------------- |
-| `Debug Log File` | string | `<empty>` | Path for debug logging                                     |
-| `UseNNUE`        | bool   | `true`    | Enable NNUE evaluation (embedded net loads automatically)  |
-| `EvalFile`       | string | `<empty>` | Path to external `.sknnue` file (overrides embedded net)   |
-| `NnueBlend`      | int    | `100`     | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
-| `NnueScale`      | int    | `100`     | NNUE output scaling factor (10..400)                       |
-| `Threads`        | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
-| `Hash`           | int    | `128`     | Transposition table size in MB (1..4096)                   |
-| `Move Overhead`  | int    | `30`      | Clock reserve in milliseconds (0..5000)                    |
-| `LMRScale`       | int    | `134`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
-| `LMRHistoryScale`| int    | `95`      | Fixed-point LMR history influence (100 = 1.00)             |
-| `LMPMoveScale`   | int    | `96`      | Fixed-point LMP move-count scale (100 = 1.00)              |
-| `HistoryMaxBonus`| int    | `490`     | Maximum quiet/continuation history update                  |
+| Option            | Type   | Default   | Description                                                |
+| ----------------- | ------ | --------- | ---------------------------------------------------------- |
+| `Debug Log File`  | string | `<empty>` | Path for debug logging                                     |
+| `UseNNUE`         | bool   | `true`    | Enable NNUE evaluation (embedded net loads automatically)  |
+| `EvalFile`        | string | `<empty>` | Path to external `.sknnue` file (overrides embedded net)   |
+| `NnueBlend`       | int    | `100`     | NNUE/classical blend (0 = classical only, 100 = pure NNUE) |
+| `NnueScale`       | int    | `100`     | NNUE output scaling factor (10..400)                       |
+| `Threads`         | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
+| `Hash`            | int    | `128`     | Transposition table size in MB (1..4096)                   |
+| `Move Overhead`   | int    | `30`      | Clock reserve in milliseconds (0..5000)                    |
+| `LMRScale`        | int    | `134`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
+| `LMRHistoryScale` | int    | `95`      | Fixed-point LMR history influence (100 = 1.00)             |
+| `LMPMoveScale`    | int    | `96`      | Fixed-point LMP move-count scale (100 = 1.00)              |
+| `HistoryMaxBonus` | int    | `490`     | Maximum quiet/continuation history update                  |
 
 The activation function (ReLU or SCReLU) is auto-detected from the network file header.
 
