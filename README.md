@@ -37,7 +37,7 @@ Sykora is tested on the CCRL [Blitz](https://computerchess.org.uk/404/) and [40/
 
 | Version               | CCRL Blitz | CCRL 40/15 | Elo Improvement |
 | --------------------- | ---------- | ---------- | --------------- |
-| `Sykora 4.0 64-bit`   | -          | -          | -               |
+| `Sykora 4.0 64-bit`   | `3400` (estimated) | -          | -               |
 | `Sykora 3.1 64-bit`   | -          | -          | -               |
 | `Sykora 3.0 64-bit`   | `3264`     | -          | `+896`          |
 | `Sykora 0.2.2 64-bit` | `3240`     | `3234`     | `+872`          |
