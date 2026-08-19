@@ -20,6 +20,8 @@ pub fn build(b: *std.Build) void {
         "Install an OpenBench-named executable at the selected prefix",
     );
 
+    const pie = b.option(bool, "pie", "Build a position-independent executable");
+
     const exe = b.addExecutable(.{
         .name = "sykora",
         .root_module = b.createModule(.{
@@ -28,6 +30,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.pie = pie;
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
