@@ -78,11 +78,15 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
     }
 
     var search_board = self.board;
+    const shared_node_counter: ?*std.atomic.Value(u64) = if (self.num_threads > 1)
+        &self.search_nodes
+    else
+        null;
     var search_engine = SearchEngine.init(
         &search_board,
         self.allocator,
         &self.stop_search,
-        &self.search_nodes,
+        shared_node_counter,
         &self.tt,
         use_nnue_for_search,
         net_ptr,
@@ -129,7 +133,7 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
     }
 
     var total_nodes = result.nodes;
-    if (go_opts.nodes != null) {
+    if (go_opts.nodes != null and num_helpers > 0) {
         total_nodes = @intCast(self.search_nodes.load(.monotonic));
     } else {
         for (0..num_helpers) |i| {
@@ -137,7 +141,12 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         }
     }
 
-    try self.writeInfoString("search thread stopped, total nodes {d}", .{total_nodes});
+    const total_time_ms: usize = @intCast(@max(elapsedMs(start_time), 1));
+    const total_nps_wide = (@as(u128, total_nodes) * 1000) / total_time_ms;
+    const total_nps: usize = @intCast(@min(total_nps_wide, std.math.maxInt(usize)));
+    // Publish the aggregate after helpers join so GUIs and benchmark tools do
+    // not mistake the main worker's last iteration count for total SMP work.
+    try self.writeStdout("info nodes {d} time {d} nps {d}", .{ total_nodes, total_time_ms, total_nps });
     try self.writeStdout("bestmove {f}", .{self.best_move});
 }
 

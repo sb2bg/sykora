@@ -318,6 +318,7 @@ pub const SearchEngine = struct {
         tt_score: ?i32,
         tt_depth: u32,
         tt_bound: ?TTEntryBound,
+        static_eval: ?i32,
     };
 
     const SingularResult = struct {
@@ -1029,19 +1030,21 @@ pub const SearchEngine = struct {
     ) TtProbeResult {
         var tt_move: ?Move = null;
         if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
+            const tt_static_eval = entry.staticEval();
             if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
                 tt_move = entry.best_move;
             }
 
             if (!is_pv_node and entry.depth >= search_depth) {
                 const tt_score = scoreFromTT(entry.score, ply);
-                switch (entry.bound) {
+                switch (entry.bound()) {
                     .exact => return .{
                         .tt_move = tt_move,
                         .cutoff = tt_score,
                         .tt_score = tt_score,
                         .tt_depth = entry.depth,
-                        .tt_bound = entry.bound,
+                        .tt_bound = entry.bound(),
+                        .static_eval = tt_static_eval,
                     },
                     .lower_bound => {
                         if (tt_score >= beta_adj) return .{
@@ -1049,7 +1052,8 @@ pub const SearchEngine = struct {
                             .cutoff = tt_score,
                             .tt_score = tt_score,
                             .tt_depth = entry.depth,
-                            .tt_bound = entry.bound,
+                            .tt_bound = entry.bound(),
+                            .static_eval = tt_static_eval,
                         };
                     },
                     .upper_bound => {
@@ -1058,7 +1062,8 @@ pub const SearchEngine = struct {
                             .cutoff = tt_score,
                             .tt_score = tt_score,
                             .tt_depth = entry.depth,
-                            .tt_bound = entry.bound,
+                            .tt_bound = entry.bound(),
+                            .static_eval = tt_static_eval,
                         };
                     },
                 }
@@ -1070,7 +1075,8 @@ pub const SearchEngine = struct {
                 .cutoff = null,
                 .tt_score = tt_score,
                 .tt_depth = entry.depth,
-                .tt_bound = entry.bound,
+                .tt_bound = entry.bound(),
+                .static_eval = tt_static_eval,
             };
         }
 
@@ -1080,6 +1086,7 @@ pub const SearchEngine = struct {
             .tt_score = null,
             .tt_depth = 0,
             .tt_bound = null,
+            .static_eval = null,
         };
     }
 
@@ -1189,8 +1196,12 @@ pub const SearchEngine = struct {
         is_pv_node: bool,
         alpha: i32,
         beta_adj: i32,
+        cached_static_eval: ?i32,
     ) StaticEvalContext {
-        const static_eval = if (!in_check) self.evaluatePosition() else -INF;
+        const static_eval = if (!in_check)
+            cached_static_eval orelse self.evaluatePosition()
+        else
+            -INF;
         const improving = blk: {
             if (in_check or ply < 2 or ply >= STATIC_EVAL_STACK_SIZE) {
                 break :blk false;
@@ -1451,6 +1462,7 @@ pub const SearchEngine = struct {
         search_depth: u32,
         ply: u32,
         best_move: ?Move,
+        static_eval: ?i32,
     ) void {
         const bound: TTEntryBound = if (best_score <= original_alpha)
             .upper_bound
@@ -1465,6 +1477,7 @@ pub const SearchEngine = struct {
             score_to_store,
             bound,
             best_move orelse Move.init(0, 0, null),
+            static_eval,
         );
     }
 
@@ -1475,6 +1488,7 @@ pub const SearchEngine = struct {
         beta: i32,
         ply: u32,
         best_move: ?Move,
+        static_eval: ?i32,
     ) void {
         const bound: TTEntryBound = if (best_score <= original_alpha)
             .upper_bound
@@ -1489,6 +1503,7 @@ pub const SearchEngine = struct {
             score_to_store,
             bound,
             best_move orelse Move.init(0, 0, null),
+            static_eval,
         );
     }
 
@@ -1555,7 +1570,15 @@ pub const SearchEngine = struct {
         }
         const singular_extension = singular.extension;
 
-        const eval_ctx = self.computeStaticEvalContext(in_check, ply, search_depth, is_pv_node, alpha, beta_adj);
+        const eval_ctx = self.computeStaticEvalContext(
+            in_check,
+            ply,
+            search_depth,
+            is_pv_node,
+            alpha,
+            beta_adj,
+            tt_probe.static_eval,
+        );
         const static_eval = eval_ctx.static_eval;
         const improving = eval_ctx.improving;
         const futile = eval_ctx.futile;
@@ -1859,7 +1882,15 @@ pub const SearchEngine = struct {
             }
         }
 
-        self.storeAlphaBetaResult(best_score, original_alpha, beta_adj, search_depth, ply, best_move);
+        self.storeAlphaBetaResult(
+            best_score,
+            original_alpha,
+            beta_adj,
+            search_depth,
+            ply,
+            best_move,
+            if (in_check) null else static_eval,
+        );
 
         return best_score;
     }
@@ -1981,15 +2012,17 @@ pub const SearchEngine = struct {
         const original_alpha = alpha_in;
         const is_pv_node = (beta - alpha_in) > 1;
         var tt_move: ?Move = null;
+        var tt_static_eval: ?i32 = null;
 
         if (self.tt.probe(self.board.zobrist_hasher.zobrist_hash)) |entry| {
+            tt_static_eval = entry.staticEval();
             if (entry.best_move.from() != 0 or entry.best_move.to() != 0) {
                 tt_move = entry.best_move;
             }
 
             if (!is_pv_node) {
                 const tt_score = scoreFromTT(entry.score, ply);
-                switch (entry.bound) {
+                switch (entry.bound()) {
                     .exact => return tt_score,
                     .lower_bound => {
                         if (tt_score >= beta) return tt_score;
@@ -2004,10 +2037,10 @@ pub const SearchEngine = struct {
         // Stand pat - but only when not in check
         var stand_pat: i32 = -INF;
         if (!in_check) {
-            stand_pat = self.evaluatePosition();
+            stand_pat = tt_static_eval orelse self.evaluatePosition();
 
             if (stand_pat >= beta) {
-                self.storeQuiescenceResult(stand_pat, original_alpha, beta, ply, tt_move);
+                self.storeQuiescenceResult(stand_pat, original_alpha, beta, ply, tt_move, stand_pat);
                 return beta;
             }
             if (alpha < stand_pat) {
@@ -2102,7 +2135,14 @@ pub const SearchEngine = struct {
             if (self.stop_search.load(.monotonic)) return 0;
 
             if (score >= beta) {
-                self.storeQuiescenceResult(score, original_alpha, beta, ply, move);
+                self.storeQuiescenceResult(
+                    score,
+                    original_alpha,
+                    beta,
+                    ply,
+                    move,
+                    if (in_check) null else stand_pat,
+                );
                 return beta;
             }
             if (score > alpha) {
@@ -2111,7 +2151,14 @@ pub const SearchEngine = struct {
             }
         }
 
-        self.storeQuiescenceResult(alpha, original_alpha, beta, ply, best_move);
+        self.storeQuiescenceResult(
+            alpha,
+            original_alpha,
+            beta,
+            ply,
+            best_move,
+            if (in_check) null else stand_pat,
+        );
         return alpha;
     }
 
