@@ -79,10 +79,14 @@ pub const SearchResult = struct {
 /// Percentage fields are fixed-point integers where 100 represents 1.00.
 /// Defaults track the latest accepted SPSA candidate.
 pub const SearchTuning = struct {
-    lmr_scale_pct: i32 = 134,
+    lmr_scale_pct: i32 = 140,
     lmr_history_scale_pct: i32 = 95,
-    lmp_move_scale_pct: i32 = 96,
+    lmr_full_depth_moves: u32 = 3,
+    lmp_move_scale_pct: i32 = 90,
     history_max_bonus: u32 = 490,
+    /// 0 disables check extensions, 1 extends every checked node, and 2 only
+    /// extends checked PV nodes.
+    check_extension_mode: u32 = 2,
 };
 
 const MAX_PLY = 64;
@@ -256,7 +260,6 @@ inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
 // Pre-computed fixed-point LMR table. Keeping two decimal places lets the
 // runtime scale option make useful sub-integer changes before final rounding.
 const LMR_MIN_DEPTH: u32 = 3;
-const LMR_FULL_DEPTH_MOVES: u32 = 4;
 const LMR_TABLE_MAX_DEPTH = 64;
 const LMR_TABLE_MAX_MOVES = 64;
 const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
@@ -300,7 +303,6 @@ const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
 
 // Reverse futility pruning parameters
 const REVERSE_FUTILITY_MARGIN_PER_PLY: i32 = 100;
-
 // Razoring parameters
 const RAZOR_MARGIN: i32 = 500;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
@@ -1179,6 +1181,12 @@ pub const SearchEngine = struct {
                 if (beaters >= SINGULAR_MULTICUT_MIN_BEATERS and tt_bound == .lower_bound and tt_score >= beta_adj) {
                     return .{ .extension = 0, .cutoff = beta_adj };
                 }
+                // One beater already rules out an extension. Keep searching
+                // only when a second beater could produce the multi-cut above.
+                const can_multicut = tt_bound == .lower_bound and tt_score >= beta_adj;
+                if (!can_multicut or beaters >= SINGULAR_MULTICUT_MIN_BEATERS) {
+                    break;
+                }
             }
         }
 
@@ -1543,13 +1551,15 @@ pub const SearchEngine = struct {
 
         const original_alpha = alpha;
 
+        const is_pv_node = (beta_adj - alpha) > 1;
+
         // Check extension - extend search when in check (with ply cap to prevent seldepth explosion)
         var search_depth = depth;
-        if (in_check and ply < 2 * depth + 8) {
+        const extend_check = self.tuning.check_extension_mode == 1 or
+            (self.tuning.check_extension_mode == 2 and is_pv_node);
+        if (extend_check and in_check and ply < 2 * depth + 8) {
             search_depth += 1;
         }
-
-        const is_pv_node = (beta_adj - alpha) > 1;
 
         const tt_probe = self.probeTransposition(search_depth, ply, is_pv_node, alpha, beta_adj);
         if (tt_probe.cutoff) |tt_score| {
@@ -1565,9 +1575,7 @@ pub const SearchEngine = struct {
             in_check,
             beta_adj,
         );
-        if (singular.cutoff) |score| {
-            return score;
-        }
+        if (singular.cutoff) |score| return score;
         const singular_extension = singular.extension;
 
         const eval_ctx = self.computeStaticEvalContext(
@@ -1654,8 +1662,11 @@ pub const SearchEngine = struct {
                 }
             }
 
+            var quiet_history_score: ?i32 = null;
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
+                const is_killer = self.killer_moves.isKiller(move, ply);
+                const is_counter_move = if (counter_move) |counter| movesEqual(move, counter) else false;
                 const improving_lmp_bonus: u32 = if (improving) LMP_IMPROVING_BONUS else 0;
                 const quiet_lmp_limit = addLmpQuietMoveBonus(
                     lmpQuietMoveLimit(search_depth, self.tuning.lmp_move_scale_pct),
@@ -1668,19 +1679,19 @@ pub const SearchEngine = struct {
                     search_depth <= LMP_MAX_DEPTH and
                     moves_searched > 0 and
                     quiets_seen > quiet_lmp_limit and
-                    !self.killer_moves.isKiller(move, ply) and
-                    self.quietHeuristicScore(move, color, ply) <= 0)
+                    !is_killer)
                 {
-                    continue;
+                    const history_score = self.quietHeuristicScore(move, color, ply);
+                    quiet_history_score = history_score;
+                    if (history_score <= 0) continue;
                 }
 
                 // Quiet SEE pruning: trim late moves that leave material hanging.
-                const is_counter_move = if (counter_move) |counter| movesEqual(move, counter) else false;
                 if (!is_pv_node and
                     !in_check and
                     moves_searched > 0 and
                     search_depth <= QUIET_SEE_PRUNE_MAX_DEPTH and
-                    !self.killer_moves.isKiller(move, ply) and
+                    !is_killer and
                     !is_counter_move and
                     !self.moveGivesCheck(move))
                 {
@@ -1748,7 +1759,7 @@ pub const SearchEngine = struct {
             var score: i32 = undefined;
 
             // Late Move Reductions (LMR) — logarithmic formula with history modulation
-            if (moves_searched >= LMR_FULL_DEPTH_MOVES and
+            if (moves_searched >= self.tuning.lmr_full_depth_moves and
                 search_depth >= LMR_MIN_DEPTH and
                 !in_check and
                 !is_capture and
@@ -1765,9 +1776,9 @@ pub const SearchEngine = struct {
                 ));
 
                 // History modulation: good history reduces less, bad history reduces more
-                const hist_score = self.quietHeuristicScore(move, color, ply);
+                const history_score = quiet_history_score orelse self.quietHeuristicScore(move, color, ply);
                 reduction -= @intCast(@divTrunc(
-                    @as(i64, hist_score) * @as(i64, self.tuning.lmr_history_scale_pct),
+                    @as(i64, history_score) * @as(i64, self.tuning.lmr_history_scale_pct),
                     819_200,
                 ));
 
@@ -1791,7 +1802,6 @@ pub const SearchEngine = struct {
                 if (is_pv_node) {
                     reduction -= 1;
                 }
-
                 // Clamp reduction: at least 1, at most depth-2 (leave at least 1 ply)
                 const r: u32 = @intCast(@max(1, @min(reduction, @as(i32, @intCast(next_depth)) - 1)));
 
