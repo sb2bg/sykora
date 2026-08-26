@@ -98,6 +98,7 @@ def prepare_features(
     output_buckets: int,
     *,
     with_threats: bool,
+    with_p3: bool,
 ):
     import numpy as np
     import chess
@@ -116,6 +117,10 @@ def prepare_features(
         if with_threats
         else None
     )
+    stm_pawns = np.full((count, 32), -1, dtype=np.int32) if with_p3 else None
+    ntm_pawns = np.full((count, 32), -1, dtype=np.int32) if with_p3 else None
+    stm_context = np.full((count, 32), -1, dtype=np.int32) if with_p3 else None
+    ntm_context = np.full((count, 32), -1, dtype=np.int32) if with_p3 else None
 
     for row, position in enumerate(data):
         occ = int(position["occ"])
@@ -126,6 +131,8 @@ def prepare_features(
         own_offset = 768 * bucket_layout[own_king]
         opp_offset = 768 * bucket_layout[opp_king]
         ordinal = 0
+        pawn_ordinal = 0
+        context_ordinal = 0
         remaining = occ
         while remaining:
             lsb = remaining & -remaining
@@ -136,8 +143,28 @@ def prepare_features(
             piece_offset = (piece & 7) * 64
             stm_base = (384 if colour else 0) + piece_offset + square
             ntm_base = (0 if colour else 384) + piece_offset + (square ^ 56)
-            stm[row, ordinal] = own_offset + (stm_base ^ own_flip)
-            ntm[row, ordinal] = opp_offset + (ntm_base ^ opp_flip)
+            stm_factor = stm_base ^ own_flip
+            ntm_factor = ntm_base ^ opp_flip
+            stm[row, ordinal] = own_offset + stm_factor
+            ntm[row, ordinal] = opp_offset + ntm_factor
+            if with_p3:
+                kind = piece & 7
+                stm_colour = stm_factor // 384
+                ntm_colour = ntm_factor // 384
+                stm_square = stm_factor % 64
+                ntm_square = ntm_factor % 64
+                if kind == 0:
+                    stm_pawns[row, pawn_ordinal] = stm_colour * 64 + stm_square
+                    ntm_pawns[row, pawn_ordinal] = ntm_colour * 64 + ntm_square
+                    pawn_ordinal += 1
+                else:
+                    stm_context[row, context_ordinal] = (
+                        (stm_colour * 5 + (kind - 1)) * 64 + stm_square
+                    )
+                    ntm_context[row, context_ordinal] = (
+                        (ntm_colour * 5 + (kind - 1)) * 64 + ntm_square
+                    )
+                    context_ordinal += 1
             ordinal += 1
             remaining ^= lsb
         if output_buckets > 1:
@@ -164,13 +191,67 @@ def prepare_features(
         stm_threats = stm_threats[:, :max_active]
         ntm_threats = ntm_threats[:, :max_active]
 
-    return stm, ntm, stm_threats, ntm_threats, buckets
+    if with_p3:
+        max_pawns = max(
+            int(np.count_nonzero(stm_pawns >= 0, axis=1).max()),
+            int(np.count_nonzero(ntm_pawns >= 0, axis=1).max()),
+        )
+        max_context = max(
+            int(np.count_nonzero(stm_context >= 0, axis=1).max()),
+            int(np.count_nonzero(ntm_context >= 0, axis=1).max()),
+        )
+        stm_pawns = stm_pawns[:, :max_pawns]
+        ntm_pawns = ntm_pawns[:, :max_pawns]
+        stm_context = stm_context[:, :max_context]
+        ntm_context = ntm_context[:, :max_context]
+
+    return (
+        stm,
+        ntm,
+        stm_threats,
+        ntm_threats,
+        stm_pawns,
+        ntm_pawns,
+        stm_context,
+        ntm_context,
+        buckets,
+    )
 
 
 def sigmoid(values):
     import numpy as np
 
     return 1.0 / (1.0 + np.exp(-np.clip(values, -80.0, 80.0)))
+
+
+def p3_moments(pawn_idx, context_idx, pawn_weights, context_weights):
+    import numpy as np
+
+    rank = pawn_weights.shape[1]
+    padded_pawns = np.concatenate(
+        (pawn_weights, np.zeros((1, rank), dtype=np.float32)), axis=0
+    )
+    padded_context = np.concatenate(
+        (context_weights, np.zeros((1, rank), dtype=np.float32)), axis=0
+    )
+    pawn_sentinel = pawn_weights.shape[0]
+    context_sentinel = context_weights.shape[0]
+    pawn_safe = np.where(pawn_idx >= 0, pawn_idx, pawn_sentinel)
+    context_safe = np.where(context_idx >= 0, context_idx, context_sentinel)
+    pawn_values = padded_pawns[pawn_safe]
+
+    file_sums = np.zeros((pawn_idx.shape[0], 8, rank), dtype=np.float32)
+    file_squares = np.zeros_like(file_sums)
+    for file in range(8):
+        mask = ((pawn_idx >= 0) & ((pawn_idx % 64) % 8 == file))[..., None]
+        values = np.where(mask, pawn_values, 0.0)
+        file_sums[:, file] = values.sum(axis=1, dtype=np.float32)
+        file_squares[:, file] = (values * values).sum(axis=1, dtype=np.float32)
+
+    same = 0.5 * (file_sums * file_sums - file_squares).sum(axis=1, dtype=np.float32)
+    adjacent = (file_sums[:, :-1] * file_sums[:, 1:]).sum(axis=1, dtype=np.float32)
+    context = padded_context[context_safe].sum(axis=1, dtype=np.float32)
+    return np.concatenate((same * context, adjacent * context), axis=1)
 
 
 def forward_batch(
@@ -183,6 +264,10 @@ def forward_batch(
     stm_threat_idx,
     ntm_threat_idx,
     padded_threat_weights,
+    stm_pawn_idx,
+    ntm_pawn_idx,
+    stm_context_idx,
+    ntm_context_idx,
     buckets,
 ):
     import numpy as np
@@ -214,12 +299,21 @@ def forward_batch(
         weights = np.asarray(ckpt["out_weights"], dtype=np.float32)[buckets]
         biases = np.asarray(ckpt["out_bias"], dtype=np.float32)[buckets]
         return np.einsum("bi,bi->b", pooled, weights, optimize=True) + biases
-    if architecture != "pairwise-mlp":
+    if architecture not in {"pairwise-mlp", "pairwise-mlp-p3"}:
         raise ValueError(f"unsupported architecture in NPZ: {architecture}")
 
     l1w = np.asarray(ckpt["l1_weights"], dtype=np.float32)[buckets]
     l1b = np.asarray(ckpt["l1_bias"], dtype=np.float32)[buckets]
     z1 = np.einsum("bi,bij->bj", pooled, l1w, optimize=True) + l1b
+    if architecture == "pairwise-mlp-p3":
+        pawn_weights = np.asarray(ckpt["p3_pawn_weights"], dtype=np.float32)
+        context_weights = np.asarray(ckpt["p3_context_weights"], dtype=np.float32)
+        stm_tri = p3_moments(stm_pawn_idx, stm_context_idx, pawn_weights, context_weights)
+        ntm_tri = p3_moments(ntm_pawn_idx, ntm_context_idx, pawn_weights, context_weights)
+        tri = np.concatenate((stm_tri, ntm_tri), axis=1)
+        p3_l1w = np.asarray(ckpt["p3_l1_weights"], dtype=np.float32)[buckets]
+        p3_l1b = np.asarray(ckpt["p3_l1_bias"], dtype=np.float32)[buckets]
+        z1 += np.einsum("bi,bij->bj", tri, p3_l1w, optimize=True) + p3_l1b
     dual = np.concatenate((np.clip(z1, 0.0, 1.0), np.clip(z1 * z1, 0.0, 1.0)), axis=1)
     l2w = np.asarray(ckpt["l2_weights"], dtype=np.float32)[buckets]
     l2b = np.asarray(ckpt["l2_bias"], dtype=np.float32)[buckets]
@@ -237,6 +331,10 @@ def validate_npz(
     ntm,
     stm_threats,
     ntm_threats,
+    stm_pawns,
+    ntm_pawns,
+    stm_context,
+    ntm_context,
     buckets,
     wdl: float,
     batch_size: int,
@@ -277,6 +375,10 @@ def validate_npz(
                     stm_threats[start:end] if stm_threats is not None else None,
                     ntm_threats[start:end] if ntm_threats is not None else None,
                     padded_threat_weights,
+                    stm_pawns[start:end] if stm_pawns is not None else None,
+                    ntm_pawns[start:end] if ntm_pawns is not None else None,
+                    stm_context[start:end] if stm_context is not None else None,
+                    ntm_context[start:end] if ntm_context is not None else None,
                     buckets[start:end],
                 )
             )
@@ -327,21 +429,34 @@ def main() -> int:
 
     run_meta = json.loads(run_meta_path.read_text())
     output_buckets = int(run_meta["network"]["output_bucket_count"])
-    with_threats = run_meta["network"].get("format") == "syk8"
+    architecture = run_meta["network"].get("architecture", "pairwise-mlp")
+    with_threats = run_meta["network"].get("format") in {"syk8", "syk9"}
+    with_p3 = architecture == "pairwise-mlp-p3"
     bucket_layout = [int(value) for value in run_meta["network"]["bucket_layout_64"]]
     wdl = float(run_meta["training"]["wdl"])
     data = load_validation(validation_path, args.max_positions)
     print(f"Preparing features for {data.size:,} held-out positions...")
-    stm, ntm, stm_threats, ntm_threats, buckets = prepare_features(
+    (
+        stm,
+        ntm,
+        stm_threats,
+        ntm_threats,
+        stm_pawns,
+        ntm_pawns,
+        stm_context,
+        ntm_context,
+        buckets,
+    ) = prepare_features(
         data,
         bucket_layout,
         output_buckets,
         with_threats=with_threats,
+        with_p3=with_p3,
     )
     validation_batch_size = min(args.batch_size, 64) if with_threats else args.batch_size
     if validation_batch_size != args.batch_size:
         print(
-            f"Capping v8 validation batch size at {validation_batch_size} to bound threat-gather memory"
+            f"Capping threat-input validation batch size at {validation_batch_size} to bound gather memory"
         )
 
     checkpoints = sorted(
@@ -382,6 +497,10 @@ def main() -> int:
                 ntm,
                 stm_threats,
                 ntm_threats,
+                stm_pawns,
+                ntm_pawns,
+                stm_context,
+                ntm_context,
                 buckets,
                 wdl,
                 validation_batch_size,

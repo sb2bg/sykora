@@ -89,7 +89,7 @@ const MAX_PLY = 64;
 const MAX_KILLER_MOVES = 2;
 const ROOT_MOVE_BUCKETS = 64 * 64;
 const STATIC_EVAL_STACK_SIZE = MAX_PLY;
-const EVAL_CACHE_SIZE = 16384; // Must be power-of-two for fast masking.
+const EVAL_CACHE_SIZE = 262144; // Must be power-of-two for fast masking.
 const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
 const SEE_CAPTURE_SCALE: i32 = 128;
 
@@ -375,6 +375,10 @@ pub const SearchEngine = struct {
     // Incremental NNUE accumulator stack (heap-allocated when NNUE is active)
     acc_stack: ?[]nnue.AccumulatorPair,
     threat_acc_stack: ?[]nnue.ThreatAccumulatorPair,
+    p3_pawn_acc_stack: ?[]nnue.P3PawnAccumulatorPair,
+    p3_context_acc_stack: ?[]nnue.P3ContextAccumulatorPair,
+    p3_pawn_source_ply: [128]u8,
+    p3_context_source_ply: [128]u8,
     acc_refresh_cache: ?*nnue.AccumulatorRefreshCache,
     acc_ply: u32,
     acc_valid: [128]bool,
@@ -430,6 +434,10 @@ pub const SearchEngine = struct {
             .tuning = .{},
             .acc_stack = null,
             .threat_acc_stack = null,
+            .p3_pawn_acc_stack = null,
+            .p3_context_acc_stack = null,
+            .p3_pawn_source_ply = [_]u8{0} ** 128,
+            .p3_context_source_ply = [_]u8{0} ** 128,
             .acc_refresh_cache = null,
             .acc_ply = 0,
             .acc_valid = [_]bool{false} ** 128,
@@ -477,6 +485,19 @@ pub const SearchEngine = struct {
                 self.threat_acc_stack = threat_stack;
                 threat_stack[0] = nnue.initThreatAccumulators(self.nnue_net.?, self.board);
             } else |_| {}
+            if (self.nnue_net.?.hasP3()) {
+                if (self.allocator.alloc(nnue.P3PawnAccumulatorPair, 128)) |pawn_stack| {
+                    if (self.allocator.alloc(nnue.P3ContextAccumulatorPair, 128)) |context_stack| {
+                        const root = nnue.initP3Accumulators(self.nnue_net.?, self.board);
+                        self.p3_pawn_acc_stack = pawn_stack;
+                        self.p3_context_acc_stack = context_stack;
+                        pawn_stack[0] = root.pawns;
+                        context_stack[0] = root.contexts;
+                    } else |_| {
+                        self.allocator.free(pawn_stack);
+                    }
+                } else |_| {}
+            }
             if (self.allocator.create(nnue.AccumulatorRefreshCache)) |cache| {
                 cache.initInPlace();
                 nnue.seedAccumulatorRefreshCache(self.nnue_net.?, self.board, &stack[0], cache);
@@ -489,6 +510,14 @@ pub const SearchEngine = struct {
     }
 
     fn deinitAccumulatorStack(self: *Self) void {
+        if (self.p3_context_acc_stack) |stack| {
+            self.allocator.free(stack);
+            self.p3_context_acc_stack = null;
+        }
+        if (self.p3_pawn_acc_stack) |stack| {
+            self.allocator.free(stack);
+            self.p3_pawn_acc_stack = null;
+        }
         if (self.threat_acc_stack) |stack| {
             self.allocator.free(stack);
             self.threat_acc_stack = null;
@@ -534,6 +563,62 @@ pub const SearchEngine = struct {
                 &threat_stack[self.acc_ply - 1],
                 &threat_stack[self.acc_ply],
             );
+        }
+        if (self.p3_pawn_acc_stack) |pawn_stack| {
+            const context_stack = self.p3_context_acc_stack.?;
+            const ply: usize = self.acc_ply;
+            const parent_ply = ply - 1;
+            const prev_pawn_source: usize = self.p3_pawn_source_ply[parent_ply];
+            const prev_context_source: usize = self.p3_context_source_ply[parent_ply];
+            self.p3_pawn_source_ply[ply] = @intCast(prev_pawn_source);
+            self.p3_context_source_ply[ply] = @intCast(prev_context_source);
+
+            if (nnue.p3MoveChangesPawns(
+                update.from_sq,
+                update.to_sq,
+                update.moved_piece,
+                update.moved_color,
+                update.captured_piece,
+            )) {
+                nnue.updateP3PawnAccumulators(
+                    self.nnue_net.?,
+                    self.board,
+                    &pawn_stack[prev_pawn_source],
+                    &pawn_stack[ply],
+                    update.from_sq,
+                    update.to_sq,
+                    update.moved_piece,
+                    update.moved_color,
+                    update.captured_piece,
+                    update.capture_sq,
+                    update.promotion,
+                    update.rook_from,
+                    update.rook_to,
+                );
+                self.p3_pawn_source_ply[ply] = @intCast(ply);
+            }
+            if (nnue.p3MoveChangesContext(
+                update.moved_piece,
+                update.captured_piece,
+                update.promotion,
+            )) {
+                nnue.updateP3ContextAccumulators(
+                    self.nnue_net.?,
+                    self.board,
+                    &context_stack[prev_context_source],
+                    &context_stack[ply],
+                    update.from_sq,
+                    update.to_sq,
+                    update.moved_piece,
+                    update.moved_color,
+                    update.captured_piece,
+                    update.capture_sq,
+                    update.promotion,
+                    update.rook_from,
+                    update.rook_to,
+                );
+                self.p3_context_source_ply[ply] = @intCast(ply);
+            }
         }
         self.acc_valid[self.acc_ply] = true;
     }
@@ -589,10 +674,23 @@ pub const SearchEngine = struct {
                 const nn_raw = if (self.acc_stack) |stack| blk: {
                     self.materializeCurrentAccumulator();
                     if (self.threat_acc_stack) |threat_stack| {
+                        const p3_pawns = if (self.p3_pawn_acc_stack) |p3_stack|
+                            &p3_stack[self.p3_pawn_source_ply[self.acc_ply]]
+                        else
+                            null;
+                        const p3_contexts = if (self.p3_context_acc_stack) |p3_stack|
+                            &p3_stack[self.p3_context_source_ply[self.acc_ply]]
+                        else
+                            null;
+                        if (net.hasP3() and (p3_pawns == null or p3_contexts == null)) {
+                            break :blk nnue.evaluateFromAccumulators(net, &stack[self.acc_ply], self.board);
+                        }
                         break :blk nnue.evaluateFromCachedAccumulators(
                             net,
                             &stack[self.acc_ply],
                             &threat_stack[self.acc_ply],
+                            p3_pawns,
+                            p3_contexts,
                             self.board,
                         );
                     }

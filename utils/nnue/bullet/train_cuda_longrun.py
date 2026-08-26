@@ -133,17 +133,23 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--architecture",
-        choices=["pairwise-mlp"],
+        choices=["pairwise-mlp", "pairwise-mlp-p3"],
         default="pairwise-mlp",
-        help="SYKNNUE8 network graph",
+        help="Sykora NNUE network graph",
     )
     parser.add_argument(
         "--network-format",
-        choices=["syk8"],
+        choices=["syk8", "syk9"],
         default="syk8",
         help="Checkpoint architecture family",
     )
     parser.add_argument("--hidden", type=int, default=1024, help="FT width")
+    parser.add_argument("--p3-rank", type=int, default=32, help="P3 adapter rank")
+    parser.add_argument(
+        "--p3-freeze-base",
+        action="store_true",
+        help="Stop gradients through the warm-started FT and first material affine",
+    )
     parser.add_argument("--dense1", type=int, default=16, help="First dense width")
     parser.add_argument("--dense2", type=int, default=32, help="Second dense width")
     parser.add_argument(
@@ -196,7 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warm-start",
         default="",
-        help="Full-precision v7 checkpoint used to initialise a zero-threat T1024 run",
+        help="Full-precision predecessor checkpoint used to initialise a new graph",
     )
     parser.add_argument(
         "--allow-random-v8-init",
@@ -256,10 +262,14 @@ def git_snapshot(
     patch_path = output_dir / f"{name}.patch"
     if diff:
         patch_path.write_bytes(diff)
+    def canonical_diff_sections(value: bytes) -> list[bytes]:
+        marker = b"diff --git "
+        return sorted(marker + part for part in value.split(marker)[1:])
+
     only_expected_diff = (
         bool(status)
         and expected_diff is not None
-        and diff == expected_diff
+        and canonical_diff_sections(diff) == canonical_diff_sections(expected_diff)
         and all(not line.startswith("??") for line in status.splitlines())
     )
 
@@ -336,17 +346,24 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.allow_random_v8_init and (args.resume or args.warm_start):
         raise ValueError("--allow-random-v8-init cannot be combined with resume or warm start")
     if args.hidden not in {768, 1024}:
-        raise ValueError("syk8 registered widths are --hidden 1024 (T1024) and 768 (T768)")
+        raise ValueError("registered widths are --hidden 1024 (T1024) and 768 (T768)")
     if args.dense1 != 16 or args.dense2 != 32 or args.output_buckets != 8:
-        raise ValueError("syk8 requires --dense1 16 --dense2 32 --output-buckets 8")
+        raise ValueError("Sykora NNUE requires --dense1 16 --dense2 32 --output-buckets 8")
     if not args.resume and not args.warm_start and not args.allow_random_v8_init:
         raise ValueError(
-            "syk8 requires --warm-start/--resume, or --allow-random-v8-init for diagnostics"
+            "training requires --warm-start/--resume, or --allow-random-v8-init for diagnostics"
         )
     if args.hidden == 768 and args.warm_start:
         raise ValueError("T768 cannot use the exact H=1024 v7 warm start")
     if args.hidden % 2:
         raise ValueError("pairwise architectures require an even --hidden")
+    is_p3 = args.architecture == "pairwise-mlp-p3"
+    if (args.network_format == "syk9") != is_p3:
+        raise ValueError("syk9 requires pairwise-mlp-p3; the v8 graph must use syk8")
+    if is_p3 and (args.hidden != 1024 or args.p3_rank != 32):
+        raise ValueError("P3-ANOVA is registered as H=1024, R=32")
+    if args.p3_freeze_base and not is_p3:
+        raise ValueError("--p3-freeze-base is only valid for pairwise-mlp-p3")
     if args.parity_engine and not args.export_after:
         raise ValueError("--parity-engine requires --export-after")
     if args.export_best_validation and (not args.export_after or not args.validate_after):
@@ -417,9 +434,10 @@ def main() -> int:
         warm_dir = run_dir / "warm_start"
         warm_start_weights = warm_dir / "weights.bin"
         warm_start_report = warm_dir / "verification.json"
+        warm_start_script = "warm_start_p3.py" if args.architecture == "pairwise-mlp-p3" else "warm_start_v8.py"
         warm_start_cmd = [
             sys.executable,
-            str(THIS_DIR / "warm_start_v8.py"),
+            str(THIS_DIR / warm_start_script),
             "--source",
             str(warm_source),
             "--output",
@@ -520,6 +538,8 @@ def main() -> int:
             "SYK_DATASET": dataset_str,
             "SYK_ARCHITECTURE": args.architecture,
             "SYK_HIDDEN": str(args.hidden),
+            "SYK_P3_RANK": str(args.p3_rank),
+            "SYK_P3_FREEZE_BASE": "1" if args.p3_freeze_base else "0",
             "SYK_DENSE1": str(args.dense1),
             "SYK_DENSE2": str(args.dense2),
             "SYK_NETWORK_FORMAT": args.network_format,
@@ -572,6 +592,7 @@ def main() -> int:
                 "dense1": args.dense1,
                 "dense2": args.dense2,
                 "output_bucket_count": args.output_buckets,
+                "p3_rank": args.p3_rank if args.architecture == "pairwise-mlp-p3" else None,
             }
             mismatches = {
                 key: (previous.get(key), value)
@@ -630,9 +651,12 @@ def main() -> int:
         "--output",
         str(final_npz),
     ]
+    exporter = THIS_DIR / (
+        "export_npz_to_syk9.py" if args.network_format == "syk9" else "export_npz_to_syk8.py"
+    )
     export_cmd = [
         sys.executable,
-        str(THIS_DIR / "export_npz_to_syk8.py"),
+        str(exporter),
         "--input",
         str(final_npz),
         "--output-net",
@@ -665,18 +689,25 @@ def main() -> int:
     tool_sources = [
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "main.rs",
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "full_threats_v1.rs",
+        REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "p3_inputs.rs",
+        bullet_repo / "crates" / "acyclib" / "src" / "graph" / "ir" / "operation" / "p3.rs",
+        bullet_repo / "crates" / "acyclib" / "src" / "device" / "cpu" / "p3.rs",
+        bullet_repo / "crates" / "bullet_cuda_backend" / "src" / "ops" / "p3.rs",
         REPO_ROOT / "utils" / "nnue" / "bullet_runner" / "src" / "bin" / "sample_binpack.rs",
         THIS_DIR / "bootstrap.py",
         *PATCHES,
         REPO_ROOT / "src" / "nnue.zig",
         REPO_ROOT / "src" / "full_threats_v1.zig",
         REPO_ROOT / "specs" / "syknnue8_spec.md",
+        REPO_ROOT / "specs" / "syknnue9_p3_spec.md",
         Path(__file__).resolve(),
         REPO_ROOT / "utils" / "nnue" / "common.py",
         THIS_DIR / "checkpoint_raw_to_npz.py",
         THIS_DIR / "validate_checkpoints.py",
         THIS_DIR / "export_npz_to_syk8.py",
+        THIS_DIR / "export_npz_to_syk9.py",
         THIS_DIR / "warm_start_v8.py",
+        THIS_DIR / "warm_start_p3.py",
         REPO_ROOT / "utils" / "nnue" / "full_threats_v1.py",
         REPO_ROOT / "utils" / "nnue" / "full_threats_v1.bin",
         REPO_ROOT / "utils" / "nnue" / "full_threats_v1_manifest.json",
@@ -738,6 +769,7 @@ def main() -> int:
             "factorisation_mode": "virtual_sparse",
             "output_bucket_count": args.output_buckets,
             "output_bucket_scheme": "single" if args.output_buckets == 1 else "material_popcount",
+            "p3_rank": args.p3_rank if args.architecture == "pairwise-mlp-p3" else None,
         },
         "training": {
             "start_superbatch": args.start_superbatch,
@@ -758,6 +790,7 @@ def main() -> int:
             "backend": args.backend,
             "rng_seed": None,
             "rng_note": "Pinned Bullet uses entropy-seeded initialisation and shuffle RNGs",
+            "p3_freeze_base": args.p3_freeze_base,
         },
         "env": {key: value for key, value in env.items() if key.startswith("SYK_")},
         "artifacts": {
@@ -769,14 +802,35 @@ def main() -> int:
     }
     meta["network"].update(
         {
-            "architecture_id": "pairwise_mlp_threats",
-            "feature_set": "mirrored_psq_full_threats_v1",
+            "architecture_id": (
+                "pairwise_mlp_threats_p3_anova" if args.architecture == "pairwise-mlp-p3" else "pairwise_mlp_threats"
+            ),
+            "feature_set": (
+                "mirrored_psq_full_threats_v1_p3_anova_r32"
+                if args.architecture == "pairwise-mlp-p3"
+                else "mirrored_psq_full_threats_v1"
+            ),
             "psq_feature_count": 768 * (max(meta["network"]["bucket_layout_64"]) + 1),
             "threat_feature_count": 60_720,
             "threat_scheme_id": 1,
             "threat_packing_sha256": "964591edbe856c9f90694dcbfabe42d58b011a469e3275a8aaa9e4249b21988a",
             "threat_storage": "i8",
             "resolved_accumulator": "i32",
+            "p3": (
+                {
+                    "stage": "moment_factorised",
+                    "rank": args.p3_rank,
+                    "pawn_feature_count": 128,
+                    "legal_pawn_feature_count": 96,
+                    "context_feature_count": 640,
+                    "pair_moments": ["same_file_distinct", "adjacent_file"],
+                    "operation": "P3Anova",
+                    "signed_unclipped": True,
+                    "injection": "pre_dual_activation_z1",
+                }
+                if args.architecture == "pairwise-mlp-p3"
+                else None
+            ),
         }
     )
     meta_path = run_dir / "run_meta.json"

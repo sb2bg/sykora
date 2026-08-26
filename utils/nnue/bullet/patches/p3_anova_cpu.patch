@@ -1,0 +1,348 @@
+diff --git a/crates/acyclib/src/device/cpu/p3.rs b/crates/acyclib/src/device/cpu/p3.rs
+new file mode 100644
+index 0000000..c372c34
+--- /dev/null
++++ b/crates/acyclib/src/device/cpu/p3.rs
+@@ -0,0 +1,342 @@
++#![allow(clippy::too_many_arguments)]
++
++use crate::device::{DeviceBuffer, OperationError, OperationResult, cpu::CpuThread, operation::P3AnovaOps};
++
++fn pawn_file(identity: usize) -> usize {
++    (identity % 64) % 8
++}
++
++fn p3_forward_position(
++    rank: usize,
++    pawn_offset: usize,
++    pawn_count: usize,
++    context_offset: usize,
++    context_count: usize,
++    pawn_weights: &[f32],
++    context_weights: &[f32],
++    indices: &[i32],
++    output: &mut [f32],
++) {
++    for r in 0..rank {
++        let mut sums = [0.0_f32; 8];
++        let mut squares = [0.0_f32; 8];
++        let mut context = 0.0_f32;
++
++        for &index in indices {
++            let Ok(index) = usize::try_from(index) else {
++                break;
++            };
++            if (pawn_offset..pawn_offset + pawn_count).contains(&index) {
++                let identity = index - pawn_offset;
++                let value = pawn_weights[identity * rank + r];
++                let file = pawn_file(identity);
++                sums[file] += value;
++                squares[file] += value * value;
++            } else if (context_offset..context_offset + context_count).contains(&index) {
++                context += context_weights[(index - context_offset) * rank + r];
++            } else {
++                break;
++            }
++        }
++
++        let mut same = 0.0_f32;
++        let mut adjacent = 0.0_f32;
++        for file in 0..8 {
++            same += 0.5 * (sums[file] * sums[file] - squares[file]);
++            if file < 7 {
++                adjacent += sums[file] * sums[file + 1];
++            }
++        }
++        output[r] = same * context;
++        output[rank + r] = adjacent * context;
++    }
++}
++
++fn p3_backward_position(
++    rank: usize,
++    pawn_offset: usize,
++    pawn_count: usize,
++    context_offset: usize,
++    context_count: usize,
++    pawn_weights: &[f32],
++    context_weights: &[f32],
++    indices: &[i32],
++    output_grads: &[f32],
++    pawn_grads: &mut [f32],
++    context_grads: &mut [f32],
++) {
++    for r in 0..rank {
++        let mut sums = [0.0_f32; 8];
++        let mut squares = [0.0_f32; 8];
++        let mut context = 0.0_f32;
++
++        for &index in indices {
++            let Ok(index) = usize::try_from(index) else {
++                break;
++            };
++            if (pawn_offset..pawn_offset + pawn_count).contains(&index) {
++                let identity = index - pawn_offset;
++                let value = pawn_weights[identity * rank + r];
++                let file = pawn_file(identity);
++                sums[file] += value;
++                squares[file] += value * value;
++            } else if (context_offset..context_offset + context_count).contains(&index) {
++                context += context_weights[(index - context_offset) * rank + r];
++            } else {
++                break;
++            }
++        }
++
++        let mut same = 0.0_f32;
++        let mut adjacent = 0.0_f32;
++        for file in 0..8 {
++            same += 0.5 * (sums[file] * sums[file] - squares[file]);
++            if file < 7 {
++                adjacent += sums[file] * sums[file + 1];
++            }
++        }
++
++        let d_same = output_grads[r] * context;
++        let d_adjacent = output_grads[rank + r] * context;
++        let d_context = output_grads[r] * same + output_grads[rank + r] * adjacent;
++
++        for &index in indices {
++            let Ok(index) = usize::try_from(index) else {
++                break;
++            };
++            if (pawn_offset..pawn_offset + pawn_count).contains(&index) {
++                let identity = index - pawn_offset;
++                let file = pawn_file(identity);
++                let value = pawn_weights[identity * rank + r];
++                let neighbours =
++                    if file == 0 { 0.0 } else { sums[file - 1] } + if file == 7 { 0.0 } else { sums[file + 1] };
++                pawn_grads[identity * rank + r] += d_same * (sums[file] - value) + d_adjacent * neighbours;
++            } else if (context_offset..context_offset + context_count).contains(&index) {
++                context_grads[(index - context_offset) * rank + r] += d_context;
++            } else {
++                break;
++            }
++        }
++    }
++}
++
++impl P3AnovaOps for CpuThread {
++    fn p3_anova(
++        batch_size: usize,
++        nnz: usize,
++        rank: usize,
++        pawn_offset: usize,
++        pawn_count: usize,
++        context_offset: usize,
++        context_count: usize,
++        pawn_weights: &Self::BufferF32,
++        context_weights: &Self::BufferF32,
++        indices: &Self::BufferI32,
++        output: &mut Self::BufferF32,
++    ) -> OperationResult<Self::DeviceError> {
++        if pawn_weights.size() < pawn_count * rank
++            || context_weights.size() < context_count * rank
++            || indices.size() < batch_size * nnz
++            || output.size() < batch_size * 2 * rank
++        {
++            return Err(OperationError::IndexOutOfBounds);
++        }
++
++        for loc in 0..batch_size {
++            p3_forward_position(
++                rank,
++                pawn_offset,
++                pawn_count,
++                context_offset,
++                context_count,
++                &pawn_weights.buf,
++                &context_weights.buf,
++                &indices.buf[loc * nnz..(loc + 1) * nnz],
++                &mut output.buf[loc * 2 * rank..(loc + 1) * 2 * rank],
++            );
++        }
++        Ok(())
++    }
++
++    fn backprop_p3_anova(
++        batch_size: usize,
++        nnz: usize,
++        rank: usize,
++        pawn_offset: usize,
++        pawn_count: usize,
++        context_offset: usize,
++        context_count: usize,
++        pawn_weights: &Self::BufferF32,
++        context_weights: &Self::BufferF32,
++        indices: &Self::BufferI32,
++        output_grads: &Self::BufferF32,
++        pawn_weight_grads: &mut Self::BufferF32,
++        context_weight_grads: &mut Self::BufferF32,
++    ) -> OperationResult<Self::DeviceError> {
++        if pawn_weights.size() < pawn_count * rank
++            || context_weights.size() < context_count * rank
++            || indices.size() < batch_size * nnz
++            || output_grads.size() < batch_size * 2 * rank
++            || pawn_weight_grads.size() < pawn_count * rank
++            || context_weight_grads.size() < context_count * rank
++        {
++            return Err(OperationError::IndexOutOfBounds);
++        }
++
++        for loc in 0..batch_size {
++            p3_backward_position(
++                rank,
++                pawn_offset,
++                pawn_count,
++                context_offset,
++                context_count,
++                &pawn_weights.buf,
++                &context_weights.buf,
++                &indices.buf[loc * nnz..(loc + 1) * nnz],
++                &output_grads.buf[loc * 2 * rank..(loc + 1) * 2 * rank],
++                &mut pawn_weight_grads.buf,
++                &mut context_weight_grads.buf,
++            );
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const RANK: usize = 2;
++    const PAWN_OFFSET: usize = 100;
++    const PAWN_COUNT: usize = 128;
++    const CONTEXT_OFFSET: usize = 228;
++    const CONTEXT_COUNT: usize = 4;
++
++    fn objective(pawns: &[f32], context: &[f32], indices: &[i32], output_grads: &[f32]) -> f32 {
++        let mut output = [0.0; 2 * RANK];
++        p3_forward_position(
++            RANK,
++            PAWN_OFFSET,
++            PAWN_COUNT,
++            CONTEXT_OFFSET,
++            CONTEXT_COUNT,
++            pawns,
++            context,
++            indices,
++            &mut output,
++        );
++        output.iter().zip(output_grads).map(|(a, b)| a * b).sum()
++    }
++
++    #[test]
++    fn moments_match_brute_force_distinct_pairs() {
++        let mut pawns = vec![0.0; PAWN_COUNT * RANK];
++        let mut context = vec![0.0; CONTEXT_COUNT * RANK];
++        let identities = [8, 16, 17, 26]; // two file-a, file-b, and file-c pawns
++        for (n, &identity) in identities.iter().enumerate() {
++            pawns[identity * RANK] = 0.2 + n as f32 * 0.1;
++            pawns[identity * RANK + 1] = -0.4 + n as f32 * 0.07;
++        }
++        context[0] = 0.5;
++        context[1] = -0.25;
++        context[2] = -0.1;
++        context[3] = 0.8;
++        let indices = [
++            PAWN_OFFSET as i32 + 8,
++            PAWN_OFFSET as i32 + 16,
++            PAWN_OFFSET as i32 + 17,
++            PAWN_OFFSET as i32 + 26,
++            CONTEXT_OFFSET as i32,
++            CONTEXT_OFFSET as i32 + 1,
++            -1,
++        ];
++        let mut actual = [0.0; 2 * RANK];
++        p3_forward_position(
++            RANK,
++            PAWN_OFFSET,
++            PAWN_COUNT,
++            CONTEXT_OFFSET,
++            CONTEXT_COUNT,
++            &pawns,
++            &context,
++            &indices,
++            &mut actual,
++        );
++
++        let mut expected = [0.0; 2 * RANK];
++        for r in 0..RANK {
++            let c = context[r] + context[RANK + r];
++            for i in 0..identities.len() {
++                for j in i + 1..identities.len() {
++                    let a = identities[i];
++                    let b = identities[j];
++                    let product = pawns[a * RANK + r] * pawns[b * RANK + r] * c;
++                    match pawn_file(a).abs_diff(pawn_file(b)) {
++                        0 => expected[r] += product,
++                        1 => expected[RANK + r] += product,
++                        _ => {}
++                    }
++                }
++            }
++        }
++        for (a, b) in actual.into_iter().zip(expected) {
++            assert!((a - b).abs() < 1.0e-6, "{a} != {b}");
++        }
++    }
++
++    #[test]
++    fn backward_matches_central_difference() {
++        let mut pawns = vec![0.0; PAWN_COUNT * RANK];
++        let mut context = vec![0.0; CONTEXT_COUNT * RANK];
++        for (identity, values) in [(8, [0.2, -0.3]), (16, [-0.4, 0.6]), (17, [0.7, 0.1])] {
++            pawns[identity * RANK..identity * RANK + RANK].copy_from_slice(&values);
++        }
++        context[..4].copy_from_slice(&[0.5, -0.2, 0.3, 0.9]);
++        let indices = [
++            PAWN_OFFSET as i32 + 8,
++            PAWN_OFFSET as i32 + 16,
++            PAWN_OFFSET as i32 + 17,
++            CONTEXT_OFFSET as i32,
++            CONTEXT_OFFSET as i32 + 1,
++            -1,
++        ];
++        let output_grads = [0.7, -0.5, 0.2, 0.9];
++        let mut pawn_grads = vec![0.0; pawns.len()];
++        let mut context_grads = vec![0.0; context.len()];
++        p3_backward_position(
++            RANK,
++            PAWN_OFFSET,
++            PAWN_COUNT,
++            CONTEXT_OFFSET,
++            CONTEXT_COUNT,
++            &pawns,
++            &context,
++            &indices,
++            &output_grads,
++            &mut pawn_grads,
++            &mut context_grads,
++        );
++
++        let epsilon = 1.0e-3;
++        for index in [8 * RANK, 8 * RANK + 1, 16 * RANK, 17 * RANK + 1] {
++            let original = pawns[index];
++            pawns[index] = original + epsilon;
++            let plus = objective(&pawns, &context, &indices, &output_grads);
++            pawns[index] = original - epsilon;
++            let minus = objective(&pawns, &context, &indices, &output_grads);
++            pawns[index] = original;
++            let numerical = (plus - minus) / (2.0 * epsilon);
++            assert!((pawn_grads[index] - numerical).abs() < 2.0e-4);
++        }
++        for index in 0..4 {
++            let original = context[index];
++            context[index] = original + epsilon;
++            let plus = objective(&pawns, &context, &indices, &output_grads);
++            context[index] = original - epsilon;
++            let minus = objective(&pawns, &context, &indices, &output_grads);
++            context[index] = original;
++            let numerical = (plus - minus) / (2.0 * epsilon);
++            assert!((context_grads[index] - numerical).abs() < 2.0e-4);
++        }
++    }
++}

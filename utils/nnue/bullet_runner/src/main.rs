@@ -1,10 +1,17 @@
 mod full_threats_v1;
+mod p3_inputs;
 
 use bullet_lib::{
+    acyclib::graph::ir::operation::p3::P3Anova,
     game::{
-        formats::sfbinpack::TrainingDataEntry, inputs::get_num_buckets, outputs::MaterialCount,
+        formats::{bulletformat::ChessBoard, sfbinpack::TrainingDataEntry},
+        inputs::{SparseInputType, get_num_buckets},
+        outputs::MaterialCount,
     },
-    nn::optimiser::{AdamW, AdamWParams},
+    nn::{
+        InitSettings, Shape,
+        optimiser::{AdamW, AdamWParams},
+    },
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr::LrScheduler, wdl},
@@ -15,6 +22,7 @@ use bullet_lib::{
 use std::env;
 
 use full_threats_v1::FullThreatInputs;
+use p3_inputs::P3Inputs;
 
 #[rustfmt::skip]
 const BUCKET_LAYOUT_V3_10: [usize; 32] = [
@@ -90,8 +98,53 @@ fn binpack_filter(entry: &TrainingDataEntry) -> bool {
         && entry.score.unsigned_abs() <= 10000
 }
 
-fn saved_format() -> Vec<SavedFormat> {
-    vec![
+#[derive(Clone, Copy, Debug)]
+enum SykoraInputs {
+    V8(FullThreatInputs),
+    P3(P3Inputs),
+}
+
+impl SparseInputType for SykoraInputs {
+    type RequiredDataType = ChessBoard;
+
+    fn num_inputs(&self) -> usize {
+        match self {
+            Self::V8(inputs) => inputs.num_inputs(),
+            Self::P3(inputs) => inputs.num_inputs(),
+        }
+    }
+
+    fn max_active(&self) -> usize {
+        match self {
+            Self::V8(inputs) => inputs.max_active(),
+            Self::P3(inputs) => inputs.max_active(),
+        }
+    }
+
+    fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, f: F) {
+        match self {
+            Self::V8(inputs) => inputs.map_features(pos, f),
+            Self::P3(inputs) => inputs.map_features(pos, f),
+        }
+    }
+
+    fn shorthand(&self) -> String {
+        match self {
+            Self::V8(inputs) => inputs.shorthand(),
+            Self::P3(inputs) => inputs.shorthand(),
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::V8(inputs) => inputs.description(),
+            Self::P3(inputs) => inputs.description(),
+        }
+    }
+}
+
+fn saved_format(with_p3: bool) -> Vec<SavedFormat> {
+    let mut format = vec![
         // V8's l0w is a virtual-factorised vocabulary containing shared
         // PSQ, bucket residual, and threat rows. Raw checkpoints retain it
         // verbatim; checkpoint_raw_to_npz.py separates and merges the deployed
@@ -120,7 +173,18 @@ fn saved_format() -> Vec<SavedFormat> {
         SavedFormat::id("l3b")
             .round()
             .quantise::<i32>(DENSE_QUANT_I32 * DENSE_QUANT_I32),
-    ]
+    ];
+    if with_p3 {
+        // Retain the factorised P3 tensors in full precision. Deployment
+        // quantisation is calibrated after training.
+        format.extend([
+            SavedFormat::id("p3_pawnw").transform(|_, _| Vec::new()),
+            SavedFormat::id("p3_contextw").transform(|_, _| Vec::new()),
+            SavedFormat::id("p3_l1w").transform(|_, _| Vec::new()),
+            SavedFormat::id("p3_l1b").transform(|_, _| Vec::new()),
+        ]);
+    }
+    format
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -146,9 +210,16 @@ fn run_network<const O: usize>(
     net_id: String,
     resume_from: Option<&str>,
     warm_start_weights: Option<&str>,
+    with_p3: bool,
+    freeze_p3_base: bool,
 ) {
-    let save_format = saved_format();
-    let input_getter = FullThreatInputs::new(BUCKET_LAYOUT_V3_10);
+    let save_format = saved_format(with_p3);
+    let input_getter = if with_p3 {
+        SykoraInputs::P3(P3Inputs::new(BUCKET_LAYOUT_V3_10))
+    } else {
+        SykoraInputs::V8(FullThreatInputs::new(BUCKET_LAYOUT_V3_10))
+    };
+    let training_inputs = input_getter.num_inputs();
 
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
@@ -159,17 +230,75 @@ fn run_network<const O: usize>(
         .save_format(&save_format)
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(move |builder, stm_inputs, ntm_inputs, output_buckets| {
-            let l0 = builder.new_affine("l0", full_threats_v1::TRAINING_INPUTS, hl_size);
+            let l0 = builder.new_affine("l0", training_inputs, hl_size);
             l0.init_with_effective_input_size(128);
             let l1 = builder.new_affine("l1", hl_size, O * dense1_size);
             let l2 = builder.new_affine("l2", 2 * dense1_size, O * dense2_size);
             let l3 = builder.new_affine("l3", dense2_size, O);
 
-            let stm_hidden = l0.forward(stm_inputs).crelu().pairwise_mul();
-            let ntm_hidden = l0.forward(ntm_inputs).crelu().pairwise_mul();
+            let (stm_l0, ntm_l0) = if freeze_p3_base {
+                let weights = l0.weights.copy_stop_grad();
+                let bias = l0.bias.copy_stop_grad();
+                (
+                    weights.matmul(stm_inputs) + bias,
+                    weights.matmul(ntm_inputs) + bias,
+                )
+            } else {
+                (l0.forward(stm_inputs), l0.forward(ntm_inputs))
+            };
+            let stm_hidden = stm_l0.crelu().pairwise_mul();
+            let ntm_hidden = ntm_l0.crelu().pairwise_mul();
             let pooled = stm_hidden.concat(ntm_hidden);
 
-            let z1 = l1.forward(pooled).select(output_buckets);
+            let z1_base = if freeze_p3_base {
+                (l1.weights.copy_stop_grad().matmul(pooled) + l1.bias.copy_stop_grad())
+                    .select(output_buckets)
+            } else {
+                l1.forward(pooled).select(output_buckets)
+            };
+            let z1 = if with_p3 {
+                let embedding_init = InitSettings::Normal {
+                    mean: 0.0,
+                    stdev: 0.05,
+                };
+                let p3_pawnw = builder.new_weights(
+                    "p3_pawnw",
+                    Shape::new(p3_inputs::RANK, p3_inputs::PAWN_COUNT),
+                    embedding_init,
+                );
+                let p3_contextw = builder.new_weights(
+                    "p3_contextw",
+                    Shape::new(p3_inputs::RANK, p3_inputs::CONTEXT_COUNT),
+                    embedding_init,
+                );
+                let p3_l1 = builder.new_affine("p3_l1", 4 * p3_inputs::RANK, O * dense1_size);
+
+                let stm_anova = P3Anova {
+                    pawn_weights: p3_pawnw.annotated_node(),
+                    context_weights: p3_contextw.annotated_node(),
+                    indices: stm_inputs.annotated_node(),
+                    pawn_offset: p3_inputs::PAWN_OFFSET,
+                    pawn_count: p3_inputs::PAWN_COUNT,
+                    context_offset: p3_inputs::CONTEXT_OFFSET,
+                    context_count: p3_inputs::CONTEXT_COUNT,
+                    rank: p3_inputs::RANK,
+                };
+                let ntm_anova = P3Anova {
+                    indices: ntm_inputs.annotated_node(),
+                    ..stm_anova.clone()
+                };
+                // Signed and unclipped. The custom operation forms exact
+                // distinct same-file and adjacent-file pawn moments, then
+                // multiplies both channels by the non-pawn context sum.
+                let stm_tri = builder.apply(stm_anova);
+                let ntm_tri = builder.apply(ntm_anova);
+                let z1_tri = p3_l1
+                    .forward(stm_tri.concat(ntm_tri))
+                    .select(output_buckets);
+                z1_base + z1_tri
+            } else {
+                z1_base
+            };
             let dual = z1.crelu().concat(z1.abs_pow(2.0).crelu());
             let hidden = l2.forward(dual).select(output_buckets).screlu();
             l3.forward(hidden).select(output_buckets)
@@ -188,6 +317,20 @@ fn run_network<const O: usize>(
         THREAT_WEIGHT_MIN,
         THREAT_WEIGHT_MAX,
     );
+    if with_p3 {
+        let p3_suffix = p3_inputs::TRAINING_INPUTS - full_threats_v1::TRAINING_INPUTS;
+        trainer.optimiser.add_clip_range_for_weight(
+            "l0w",
+            full_threats_v1::TRAINING_INPUTS * hl_size,
+            p3_suffix * hl_size,
+            0.0,
+            0.0,
+        );
+
+        trainer
+            .optimiser
+            .add_clip_range_for_weight("p3_l1b", 0, O * dense1_size, 0.0, 0.0);
+    }
 
     let dense_clipping = AdamWParams {
         max_weight: 1.98,
@@ -203,6 +346,32 @@ fn run_network<const O: usize>(
     trainer
         .optimiser
         .set_params_for_weight("l3w", dense_clipping);
+    if with_p3 {
+        for id in ["p3_pawnw", "p3_contextw", "p3_l1w"] {
+            trainer.optimiser.set_params_for_weight(id, dense_clipping);
+        }
+    }
+    if freeze_p3_base {
+        // Stopping the graph gradient leaves an allocated zero-gradient tensor;
+        // AdamW would still decay those weights. Disable decay as well so the
+        // mature FT and first material affine remain bit-identical in phase 1.
+        trainer.optimiser.set_params_for_weight(
+            "l0w",
+            AdamWParams {
+                decay: 0.0,
+                ..ft_clipping
+            },
+        );
+        for id in ["l0b", "l1w", "l1b"] {
+            trainer.optimiser.set_params_for_weight(
+                id,
+                AdamWParams {
+                    decay: 0.0,
+                    ..dense_clipping
+                },
+            );
+        }
+    }
 
     let schedule = TrainingSchedule {
         net_id,
@@ -262,7 +431,14 @@ fn run_network<const O: usize>(
         "Threat weights constrained to [{THREAT_WEIGHT_MIN}, {THREAT_WEIGHT_MAX}] to prevent i8 export saturation"
     );
 
-    println!("Architecture: pairwise-mlp");
+    println!(
+        "Architecture: {}",
+        if with_p3 {
+            "pairwise-mlp-p3"
+        } else {
+            "pairwise-mlp"
+        }
+    );
     println!(
         "Input layout: v3_10 ({} mirrored king buckets) + full_threats_v1",
         num_input_buckets
@@ -278,6 +454,14 @@ fn run_network<const O: usize>(
             .collect::<String>()
     );
     println!("Output buckets: {O}");
+    if with_p3 {
+        println!(
+            "P3-ANOVA Stage B: rank={}, atomic-pawns={}, context={}, moment-channels=same+adjacent, freeze_base={freeze_p3_base}",
+            p3_inputs::RANK,
+            p3_inputs::PAWN_COUNT,
+            p3_inputs::CONTEXT_COUNT,
+        );
+    }
     println!(
         "Head: pairwise pool -> bucketed {hl_size} -> {dense1_size} -> dual {} -> {dense2_size} -> 1",
         2 * dense1_size
@@ -346,6 +530,9 @@ fn main() {
     let dense2_size = env_usize("SYK_DENSE2", 32);
     let output_buckets = env_usize("SYK_OUTPUT_BUCKETS", 8);
     let bucket_layout_name = env_string("SYK_BUCKET_LAYOUT", "v3_10");
+    let p3_rank = env_usize("SYK_P3_RANK", p3_inputs::RANK);
+    let freeze_p3_base = env_usize("SYK_P3_FREEZE_BASE", 0) != 0;
+    let with_p3 = architecture == "pairwise-mlp-p3";
 
     assert!(hl_size > 0, "SYK_HIDDEN must be > 0");
     assert!(dense1_size > 0, "SYK_DENSE1 must be > 0");
@@ -372,14 +559,13 @@ fn main() {
         bucket_layout_name, "v3_10",
         "only the proven v3_10 bucket layout is currently supported"
     );
-    assert_eq!(
-        network_format, "syk8",
-        "only the SYKNNUE8 network format is supported"
+    assert!(
+        (network_format == "syk8" && architecture == "pairwise-mlp")
+            || (network_format == "syk9" && with_p3),
+        "SYKNNUE8 requires pairwise-mlp; SYKNNUE9 requires pairwise-mlp-p3"
     );
-    assert_eq!(
-        architecture, "pairwise-mlp",
-        "SYKNNUE8 requires the pairwise-mlp architecture"
-    );
+    assert_eq!(p3_rank, p3_inputs::RANK, "P3-ANOVA rank is fixed at 32");
+    assert!(!freeze_p3_base || with_p3, "base freezing is P3-only");
     assert_eq!(
         output_buckets, 8,
         "SYKNNUE8 requires eight material output buckets"
@@ -427,5 +613,7 @@ fn main() {
         net_id,
         resume_from.as_deref(),
         warm_start_weights.as_deref(),
+        with_p3,
+        freeze_p3_base,
     );
 }

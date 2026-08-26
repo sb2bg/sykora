@@ -1,0 +1,218 @@
+diff --git a/crates/bullet_cuda_backend/src/ops.rs b/crates/bullet_cuda_backend/src/ops.rs
+index 81726f7..f75fa26 100644
+--- a/crates/bullet_cuda_backend/src/ops.rs
++++ b/crates/bullet_cuda_backend/src/ops.rs
+@@ -1,3 +1,4 @@
++mod p3;
+ mod qat;
+ mod sl;
+ mod sparse;
+diff --git a/crates/bullet_cuda_backend/src/ops/p3.rs b/crates/bullet_cuda_backend/src/ops/p3.rs
+new file mode 100644
+index 0000000..a5dd08f
+--- /dev/null
++++ b/crates/bullet_cuda_backend/src/ops/p3.rs
+@@ -0,0 +1,203 @@
++use acyclib::{
++    device::{function, tensor::Shape},
++    graph::ir::operation::p3::P3AnovaImpl,
++};
++
++use crate::{
++    CudaDevice,
++    kernel::{Expr, Kernel, KernelArgs, KernelInput},
++};
++
++const MAXIMUM_BLOCKS_Y: i32 = 32768;
++
++impl P3AnovaImpl for CudaDevice {
++    type Fwd = Kernel;
++    type Bwd = Kernel;
++
++    fn p3_fwd(desc: function::P3Anova<Self>) -> Self::Fwd {
++        let rank = desc.rank;
++        let nnz = desc.indices.sparse().nnz();
++        let pawn_shape = Shape::new(rank, desc.pawn_count);
++        let context_shape = Shape::new(rank, desc.context_count);
++        let output_shape = Shape::new(2 * rank, 1);
++        let input_shape = desc.indices.shape();
++        let batched = desc.indices.batch_size().is_some();
++        let code =
++            kernel_source(false, rank, nnz, desc.pawn_offset, desc.pawn_count, desc.context_offset, desc.context_count);
++        let batch_size = Expr::Var;
++        let inputs = vec![
++            KernelInput::Size(batch_size.clone()),
++            KernelInput::Slice {
++                slice: desc.pawn_weights,
++                layout: None,
++                mutable: false,
++                batched: false,
++                shape: pawn_shape,
++            },
++            KernelInput::Slice {
++                slice: desc.context_weights,
++                layout: None,
++                mutable: false,
++                batched: false,
++                shape: context_shape,
++            },
++            KernelInput::Slice { slice: desc.indices, layout: Some(nnz), mutable: false, batched, shape: input_shape },
++            KernelInput::Slice { slice: desc.output, layout: None, mutable: true, batched, shape: output_shape },
++        ];
++        build_kernel("P3AnovaForward", code, inputs, batch_size, rank)
++    }
++
++    fn p3_bwd(desc: function::BackpropP3Anova<Self>) -> Self::Bwd {
++        let rank = desc.rank;
++        let nnz = desc.indices.sparse().nnz();
++        let pawn_shape = Shape::new(rank, desc.pawn_count);
++        let context_shape = Shape::new(rank, desc.context_count);
++        let output_shape = Shape::new(2 * rank, 1);
++        let input_shape = desc.indices.shape();
++        let batched = desc.indices.batch_size().is_some();
++        let code =
++            kernel_source(true, rank, nnz, desc.pawn_offset, desc.pawn_count, desc.context_offset, desc.context_count);
++        let batch_size = Expr::Var;
++        let inputs = vec![
++            KernelInput::Size(batch_size.clone()),
++            KernelInput::Slice {
++                slice: desc.pawn_weights,
++                layout: None,
++                mutable: false,
++                batched: false,
++                shape: pawn_shape,
++            },
++            KernelInput::Slice {
++                slice: desc.context_weights,
++                layout: None,
++                mutable: false,
++                batched: false,
++                shape: context_shape,
++            },
++            KernelInput::Slice { slice: desc.indices, layout: Some(nnz), mutable: false, batched, shape: input_shape },
++            KernelInput::Slice { slice: desc.output_grads, layout: None, mutable: false, batched, shape: output_shape },
++            KernelInput::Slice {
++                slice: desc.pawn_weight_grads,
++                layout: None,
++                mutable: true,
++                batched: false,
++                shape: pawn_shape,
++            },
++            KernelInput::Slice {
++                slice: desc.context_weight_grads,
++                layout: None,
++                mutable: true,
++                batched: false,
++                shape: context_shape,
++            },
++        ];
++        build_kernel("P3AnovaBackward", code, inputs, batch_size, rank)
++    }
++}
++
++fn build_kernel(name: &str, code: String, inputs: Vec<KernelInput>, batch_size: Expr<i32>, rank: usize) -> Kernel {
++    let max_y = Expr::Const(MAXIMUM_BLOCKS_Y);
++    let grid_dim = [Expr::Const(1), batch_size.clone().min(&max_y), (batch_size + max_y.clone() - 1) / max_y];
++    let block_dim = [Expr::Const(rank as i32), Expr::Const(1), Expr::Const(1)];
++    let args = KernelArgs { inputs, grid_dim, block_dim, shared_mem_bytes: Expr::Const(0) };
++    unsafe { Kernel::new(name.to_string(), code, args).unwrap() }
++}
++
++fn kernel_source(
++    backward: bool,
++    rank: usize,
++    nnz: usize,
++    pawn_offset: usize,
++    pawn_count: usize,
++    context_offset: usize,
++    context_count: usize,
++) -> String {
++    let signature_tail = if backward { ", const float* Yg, float* PawnGrad, float* ContextGrad" } else { ", float* Y" };
++    let finish = if backward {
++        r#"
++        const float dSame = Yg[loc * (2 * Rank) + row] * context;
++        const float dAdjacent = Yg[loc * (2 * Rank) + Rank + row] * context;
++        const float dContext =
++            Yg[loc * (2 * Rank) + row] * same +
++            Yg[loc * (2 * Rank) + Rank + row] * adjacent;
++
++        for (int i = 0; i < Nnz; ++i) {
++            const int index = X[loc * Nnz + i];
++            if (index < 0) break;
++            if (index >= PawnOffset && index < PawnOffset + PawnCount) {
++                const int identity = index - PawnOffset;
++                const int file = (identity % 64) % 8;
++                const float value = Pawn[identity * Rank + row];
++                const float neighbours =
++                    (file == 0 ? 0.0F : sums[file - 1]) +
++                    (file == 7 ? 0.0F : sums[file + 1]);
++                atomicAdd(
++                    &PawnGrad[identity * Rank + row],
++                    dSame * (sums[file] - value) + dAdjacent * neighbours);
++            } else if (index >= ContextOffset && index < ContextOffset + ContextCount) {
++                atomicAdd(&ContextGrad[(index - ContextOffset) * Rank + row], dContext);
++            } else {
++                break;
++            }
++        }
++        "#
++    } else {
++        r#"
++        Y[loc * (2 * Rank) + row] = same * context;
++        Y[loc * (2 * Rank) + Rank + row] = adjacent * context;
++        "#
++    };
++
++    format!(
++        r#"
++        constexpr int MaximumBlocksY = {MAXIMUM_BLOCKS_Y};
++        constexpr int Rank = {rank};
++        constexpr int Nnz = {nnz};
++        constexpr int PawnOffset = {pawn_offset};
++        constexpr int PawnCount = {pawn_count};
++        constexpr int ContextOffset = {context_offset};
++        constexpr int ContextCount = {context_count};
++
++        extern "C" __global__ void kernel(
++            const int batchSize,
++            const float* Pawn,
++            const float* Context,
++            const int* X
++            {signature_tail})
++        {{
++            const int loc = MaximumBlocksY * blockIdx.z + blockIdx.y;
++            const int row = threadIdx.x;
++            if (loc >= batchSize || row >= Rank) return;
++
++            float sums[8] = {{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F}};
++            float squares[8] = {{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F}};
++            float context = 0.0F;
++
++            for (int i = 0; i < Nnz; ++i) {{
++                const int index = X[loc * Nnz + i];
++                if (index < 0) break;
++                if (index >= PawnOffset && index < PawnOffset + PawnCount) {{
++                    const int identity = index - PawnOffset;
++                    const int file = (identity % 64) % 8;
++                    const float value = Pawn[identity * Rank + row];
++                    sums[file] += value;
++                    squares[file] += value * value;
++                }} else if (index >= ContextOffset && index < ContextOffset + ContextCount) {{
++                    context += Context[(index - ContextOffset) * Rank + row];
++                }} else {{
++                    break;
++                }}
++            }}
++
++            float same = 0.0F;
++            float adjacent = 0.0F;
++            #pragma unroll
++            for (int file = 0; file < 8; ++file) {{
++                same += 0.5F * (sums[file] * sums[file] - squares[file]);
++                if (file < 7) adjacent += sums[file] * sums[file + 1];
++            }}
++            {finish}
++        }}
++        "#
++    )
++}

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const nnue_dot = @import("nnue_dot.zig");
 const full_threats_v1 = @import("full_threats_v1.zig");
 const board = @import("bitboard.zig");
@@ -14,14 +15,22 @@ pub const Q: i32 = 64;
 pub const SCALE: i32 = 400;
 const MAX_NETWORK_BYTES = 128 * 1024 * 1024;
 
-const MAGIC = "SYKNNUE8";
-const FORMAT_VERSION: u16 = 8;
+const MAGIC_V8 = "SYKNNUE8";
+const MAGIC_V9 = "SYKNNUE9";
+const FORMAT_VERSION_V8: u16 = 8;
+const FORMAT_VERSION_V9: u16 = 9;
 const HEADER_BYTES: usize = 224;
 const SECTION_ENTRY_BYTES: usize = 48;
 const HASH_OFFSET: usize = 172;
 const MAX_SECTIONS: usize = 32;
 const ARCHITECTURE_PAIRWISE_MLP_THREATS: u16 = 2;
+const ARCHITECTURE_PAIRWISE_MLP_P3: u16 = 3;
 const FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1: u16 = 2;
+pub const P3_RANK: usize = 32;
+const P3_PAWN_COUNT: usize = 128;
+const P3_CONTEXT_COUNT: usize = 640;
+const P3_QUANT: u16 = 64;
+const P3_ACTIVATION_SHIFT: u6 = 12;
 
 pub const LoadError = error{
     OutOfMemory,
@@ -52,6 +61,8 @@ pub const Network = struct {
     threat_quant: u16,
     psq_abs_bound: u32,
     threat_abs_bound: u32,
+    is_p3: bool,
+    p3_l1_abs_bound: u32,
     ft_biases: []i16, // [H]
     ft_weights: []i16, // [I * H]
     threat_weights: []i8, // [60_720 * H]
@@ -61,6 +72,10 @@ pub const Network = struct {
     l2_weights: []i8, // [O, 2*D1, D2]
     output_biases: []i32, // [O]
     output_weights: []i8, // [O, D2]
+    p3_pawn_weights: []i8, // [128, R]
+    p3_context_weights: []i8, // [640, R]
+    p3_l1_weights_grouped: []i8, // [O, 4R/4, D1, 4]
+    p3_l1_corrections: [8 * 16]i32, // -128 * sum(weights), [O, D1]
 
     pub fn deinit(self: *Network) void {
         self.allocator.free(self.ft_biases);
@@ -72,11 +87,15 @@ pub const Network = struct {
         self.allocator.free(self.l2_weights);
         self.allocator.free(self.output_biases);
         self.allocator.free(self.output_weights);
+        self.allocator.free(self.p3_pawn_weights);
+        self.allocator.free(self.p3_context_weights);
+        self.allocator.free(self.p3_l1_weights_grouped);
     }
 
     pub fn loadFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
         if (data.len < 8) return error.InvalidNetwork;
-        if (!std.mem.eql(u8, data[0..8], MAGIC)) return error.UnsupportedVersion;
+        if (!std.mem.eql(u8, data[0..8], MAGIC_V8) and
+            !std.mem.eql(u8, data[0..8], MAGIC_V9)) return error.UnsupportedVersion;
         return loadNetworkFromBytes(allocator, data);
     }
 
@@ -101,6 +120,10 @@ pub const Network = struct {
 
     pub fn inputSize(self: *const Network) usize {
         return PSQ_INPUT_SIZE * @as(usize, self.bucket_count);
+    }
+
+    pub inline fn hasP3(self: *const Network) bool {
+        return self.is_p3;
     }
 };
 
@@ -266,8 +289,75 @@ fn validateThreatWeights(
     if (actual_bound != declared_bound) return error.InvalidNetwork;
 }
 
+fn validateP3Weights(
+    pawn_weights: []const i8,
+    context_weights: []const i8,
+    projection_weights: []const i8,
+    declared_bound: u32,
+) LoadError!void {
+    if (pawn_weights.len != P3_PAWN_COUNT * P3_RANK or
+        context_weights.len != P3_CONTEXT_COUNT * P3_RANK or
+        projection_weights.len != 8 * 4 * P3_RANK * 16)
+    {
+        return error.InvalidNetwork;
+    }
+
+    var pawn_max = [_]u8{0} ** P3_RANK;
+    var context_max = [_]u8{0} ** P3_RANK;
+    for (0..P3_PAWN_COUNT) |identity| {
+        for (0..P3_RANK) |rank| {
+            pawn_max[rank] = @max(pawn_max[rank], @abs(pawn_weights[identity * P3_RANK + rank]));
+        }
+    }
+    for (0..P3_CONTEXT_COUNT) |identity| {
+        for (0..P3_RANK) |rank| {
+            context_max[rank] = @max(context_max[rank], @abs(context_weights[identity * P3_RANK + rank]));
+        }
+    }
+    var population_factor: u64 = 0;
+    for (0..33) |pawn_count| {
+        const pawns: u64 = pawn_count;
+        const factor = (pawns * (pawns -| 1) / 2) * (32 - pawns);
+        population_factor = @max(population_factor, factor);
+    }
+    for (0..P3_RANK) |rank| {
+        const p: u64 = pawn_max[rank];
+        const c: u64 = context_max[rank];
+        if (population_factor * p * p * c > std.math.maxInt(i32)) {
+            return error.AccumulatorBoundsExceeded;
+        }
+    }
+
+    var actual_bound: u64 = 0;
+    for (0..8) |bucket| {
+        for (0..16) |output| {
+            var weight_sum: u64 = 0;
+            for (0..P3_RANK) |group| {
+                var lane_abs = [_]u16{0} ** 4;
+                for (0..4) |lane| {
+                    const input = group * 4 + lane;
+                    const weight = projection_weights[(bucket * 4 * P3_RANK + input) * 16 + output];
+                    lane_abs[lane] = @abs(weight);
+                    weight_sum += lane_abs[lane];
+                }
+                const pair_bound = @max(
+                    lane_abs[0] + lane_abs[1],
+                    lane_abs[2] + lane_abs[3],
+                );
+                if (@as(u32, pair_bound) * 255 > std.math.maxInt(i16)) {
+                    return error.AccumulatorBoundsExceeded;
+                }
+            }
+            actual_bound = @max(actual_bound, 128 * weight_sum);
+        }
+    }
+    if (actual_bound > std.math.maxInt(u32)) return error.AccumulatorBoundsExceeded;
+    if (@as(u32, @intCast(actual_bound)) != declared_bound) return error.InvalidNetwork;
+}
+
 fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadError!Network {
     if (data.len < HEADER_BYTES or data.len > MAX_NETWORK_BYTES) return error.InvalidNetwork;
+    const is_p3 = std.mem.eql(u8, data[0..8], MAGIC_V9);
     var pos: usize = 8;
 
     const version = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
@@ -275,7 +365,7 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     const section_count_u16 = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const section_entry_bytes = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const flags = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
-    if (version != FORMAT_VERSION) return error.UnsupportedVersion;
+    if (version != (if (is_p3) FORMAT_VERSION_V9 else FORMAT_VERSION_V8)) return error.UnsupportedVersion;
     if (header_bytes != HEADER_BYTES or section_entry_bytes != SECTION_ENTRY_BYTES or flags != 0) {
         return error.InvalidNetwork;
     }
@@ -287,10 +377,11 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     const hidden_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const dense1_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     const dense2_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
-    if (architecture != ARCHITECTURE_PAIRWISE_MLP_THREATS or
+    if (architecture != (if (is_p3) ARCHITECTURE_PAIRWISE_MLP_P3 else ARCHITECTURE_PAIRWISE_MLP_THREATS) or
         feature_set != FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1 or
         bucket_count_u16 != 10 or output_bucket_count_u16 != 8 or
-        (hidden_size != 768 and hidden_size != 1024) or dense1_size != 16 or dense2_size != 32)
+        (if (is_p3) hidden_size != 1024 else (hidden_size != 768 and hidden_size != 1024)) or
+        dense1_size != 16 or dense2_size != 32)
     {
         return error.InvalidNetwork;
     }
@@ -355,8 +446,30 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     if (pos + 32 + 20 != HEADER_BYTES) return error.InvalidNetwork;
     const expected_hash = data[pos .. pos + 32];
     pos += 32;
-    if (!bytesAreZero(data[pos .. pos + 20])) return error.InvalidNetwork;
-    pos += 20;
+    var p3_l1_abs_bound: u32 = 0;
+    if (is_p3) {
+        const p3_rank = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        const p3_pawn_count = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        const p3_context_count = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        const p3_quant = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
+        if (pos >= data.len) return error.InvalidNetwork;
+        const p3_shift = data[pos];
+        pos += 1;
+        if (pos + 3 > data.len or !bytesAreZero(data[pos .. pos + 3])) return error.InvalidNetwork;
+        pos += 3;
+        p3_l1_abs_bound = readBytesInt(u32, data, &pos) orelse return error.InvalidNetwork;
+        if (pos + 4 > data.len or !bytesAreZero(data[pos .. pos + 4])) return error.InvalidNetwork;
+        pos += 4;
+        if (p3_rank != P3_RANK or p3_pawn_count != P3_PAWN_COUNT or
+            p3_context_count != P3_CONTEXT_COUNT or p3_quant != P3_QUANT or
+            p3_shift != P3_ACTIVATION_SHIFT)
+        {
+            return error.InvalidNetwork;
+        }
+    } else {
+        if (!bytesAreZero(data[pos .. pos + 20])) return error.InvalidNetwork;
+        pos += 20;
+    }
 
     var actual_hash: [32]u8 = undefined;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -367,7 +480,8 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     if (!std.mem.eql(u8, expected_hash, &actual_hash)) return error.InvalidNetwork;
 
     const section_count: usize = section_count_u16;
-    if (section_count != 9 or section_count > MAX_SECTIONS) return error.InvalidNetwork;
+    const expected_section_count: usize = if (is_p3) 12 else 9;
+    if (section_count != expected_section_count or section_count > MAX_SECTIONS) return error.InvalidNetwork;
     const table_bytes = std.math.mul(usize, section_count, SECTION_ENTRY_BYTES) catch return error.InvalidNetwork;
     const table_end = std.math.add(usize, HEADER_BYTES, table_bytes) catch return error.InvalidNetwork;
     if (table_end > data.len) return error.InvalidNetwork;
@@ -429,6 +543,18 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     const l2_weight_section = try requireSection(sections, 13, 1, &.{ 8, 32, 32 });
     const output_bias_section = try requireSection(sections, 14, 4, &.{8});
     const output_weight_section = try requireSection(sections, 15, 1, &.{ 8, 32 });
+    const p3_pawn_section = if (is_p3)
+        try requireSection(sections, 20, 1, &.{ P3_PAWN_COUNT, P3_RANK })
+    else
+        null;
+    const p3_context_section = if (is_p3)
+        try requireSection(sections, 21, 1, &.{ P3_CONTEXT_COUNT, P3_RANK })
+    else
+        null;
+    const p3_l1_section = if (is_p3)
+        try requireSection(sections, 22, 1, &.{ 8, 4 * P3_RANK, 16 })
+    else
+        null;
 
     const ft_biases = try allocSectionInts(i16, allocator, data, ft_bias_section);
     errdefer allocator.free(ft_biases);
@@ -448,6 +574,21 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     errdefer allocator.free(output_biases);
     const output_weights = try allocSectionInts(i8, allocator, data, output_weight_section);
     errdefer allocator.free(output_weights);
+    const p3_pawn_weights = if (p3_pawn_section) |section|
+        try allocSectionInts(i8, allocator, data, section)
+    else
+        allocator.alloc(i8, 0) catch return error.OutOfMemory;
+    errdefer allocator.free(p3_pawn_weights);
+    const p3_context_weights = if (p3_context_section) |section|
+        try allocSectionInts(i8, allocator, data, section)
+    else
+        allocator.alloc(i8, 0) catch return error.OutOfMemory;
+    errdefer allocator.free(p3_context_weights);
+    const p3_l1_weights = if (p3_l1_section) |section|
+        try allocSectionInts(i8, allocator, data, section)
+    else
+        allocator.alloc(i8, 0) catch return error.OutOfMemory;
+    defer allocator.free(p3_l1_weights);
 
     const hidden: usize = hidden_size;
     const groups = hidden / 4;
@@ -466,7 +607,29 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
         }
     }
 
-    const l1_margin = @as(i64, hidden_size) * 127 * 128;
+    const p3_grouped = allocator.alloc(i8, p3_l1_weights.len) catch return error.OutOfMemory;
+    errdefer allocator.free(p3_grouped);
+    var p3_corrections = [_]i32{0} ** (8 * 16);
+    if (is_p3) {
+        for (0..8) |bucket| {
+            for (0..16) |output| {
+                var weight_sum: i32 = 0;
+                for (0..P3_RANK) |group| {
+                    for (0..4) |lane| {
+                        const input = group * 4 + lane;
+                        const source = (bucket * 4 * P3_RANK + input) * 16 + output;
+                        const destination = ((bucket * P3_RANK + group) * 16 + output) * 4 + lane;
+                        const weight = p3_l1_weights[source];
+                        p3_grouped[destination] = weight;
+                        weight_sum += weight;
+                    }
+                }
+                p3_corrections[bucket * 16 + output] = -128 * weight_sum;
+            }
+        }
+    }
+
+    const l1_margin = @as(i64, hidden_size) * 127 * 128 + p3_l1_abs_bound;
     for (l1_biases) |bias| {
         const value: i64 = bias;
         if (value < std.math.minInt(i32) + l1_margin or value > std.math.maxInt(i32) - l1_margin) return error.InvalidNetwork;
@@ -481,6 +644,12 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     if (actual_psq_bound != psq_abs_bound) return error.InvalidNetwork;
     try validateThreatWeights(allocator, threat_weights, hidden, threat_abs_bound);
     if (@as(u64, psq_abs_bound) + threat_abs_bound > std.math.maxInt(i32)) return error.AccumulatorBoundsExceeded;
+    if (is_p3) try validateP3Weights(
+        p3_pawn_weights,
+        p3_context_weights,
+        p3_l1_weights,
+        p3_l1_abs_bound,
+    );
 
     return .{
         .allocator = allocator,
@@ -496,6 +665,8 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
         .threat_quant = threat_quant,
         .psq_abs_bound = psq_abs_bound,
         .threat_abs_bound = threat_abs_bound,
+        .is_p3 = is_p3,
+        .p3_l1_abs_bound = p3_l1_abs_bound,
         .ft_biases = ft_biases,
         .ft_weights = ft_weights,
         .threat_weights = threat_weights,
@@ -505,6 +676,10 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
         .l2_weights = l2_weights,
         .output_biases = output_biases,
         .output_weights = output_weights,
+        .p3_pawn_weights = p3_pawn_weights,
+        .p3_context_weights = p3_context_weights,
+        .p3_l1_weights_grouped = p3_grouped,
+        .p3_l1_corrections = p3_corrections,
     };
 }
 
@@ -555,6 +730,102 @@ fn featureIndex(
     }
     const bucket_offset = PSQ_INPUT_SIZE * @as(usize, net.bucket_layout[king_sq]);
     return bucket_offset + side_idx * 6 * 64 + piece_idx * 64 + sq;
+}
+
+const P3Identity = struct {
+    index: usize,
+    oriented_file: usize,
+};
+
+const P3_SIMD_LANES = if (builtin.cpu.has(.x86, .avx2)) 8 else (std.simd.suggestVectorLength(i32) orelse 4);
+const P3I8Vec = @Vector(P3_SIMD_LANES, i8);
+const P3U8Vec = @Vector(P3_SIMD_LANES, u8);
+const P3I16Vec = @Vector(P3_SIMD_LANES, i16);
+const P3I32Vec = @Vector(P3_SIMD_LANES, i32);
+const P3U5Vec = @Vector(P3_SIMD_LANES, u5);
+
+fn p3Identity(
+    perspective: piece.Color,
+    square: u8,
+    piece_type: piece.Type,
+    color: piece.Color,
+    perspective_king_sq: u8,
+) P3Identity {
+    var sq = if (perspective == .white) square else flipVertical(square);
+    const king_sq = if (perspective == .white) perspective_king_sq else flipVertical(perspective_king_sq);
+    const side = if (perspective == .white) color else oppositeColor(color);
+    const side_idx: usize = @intFromEnum(side);
+    if ((king_sq % 8) > 3) sq ^= 7;
+    const piece_idx: usize = @intFromEnum(piece_type);
+    return .{
+        .index = if (piece_type == .pawn)
+            side_idx * 64 + sq
+        else
+            (side_idx * 5 + (piece_idx - 1)) * 64 + sq,
+        .oriented_file = sq % 8,
+    };
+}
+
+fn applyP3Entity(
+    net: *const Network,
+    pawn_accumulator: *P3PawnAccumulator,
+    context_accumulator: *P3ContextAccumulator,
+    perspective: piece.Color,
+    king_sq: u8,
+    square: u8,
+    piece_type: piece.Type,
+    color: piece.Color,
+    comptime add: bool,
+) void {
+    const identity = p3Identity(perspective, square, piece_type, color, king_sq);
+    if (piece_type == .pawn) {
+        const row = net.p3_pawn_weights[identity.index * P3_RANK ..][0..P3_RANK];
+        const base = identity.oriented_file * P3_RANK;
+        var rank: usize = 0;
+        while (rank < P3_RANK) : (rank += P3_SIMD_LANES) {
+            const weight_ptr: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+            const weights: P3I32Vec = @intCast(weight_ptr.*);
+            const sum_ptr: *align(1) P3I16Vec = @ptrCast(&pawn_accumulator.pawn_sums[base + rank]);
+            const old_sums: P3I32Vec = @intCast(sum_ptr.*);
+            var neighbor_sums: P3I32Vec = @splat(0);
+            if (identity.oriented_file > 0) {
+                const left: *align(1) const P3I16Vec = @ptrCast(
+                    &pawn_accumulator.pawn_sums[base - P3_RANK + rank],
+                );
+                neighbor_sums += @as(P3I32Vec, @intCast(left.*));
+            }
+            if (identity.oriented_file < 7) {
+                const right: *align(1) const P3I16Vec = @ptrCast(
+                    &pawn_accumulator.pawn_sums[base + P3_RANK + rank],
+                );
+                neighbor_sums += @as(P3I32Vec, @intCast(right.*));
+            }
+            const same: *align(1) P3I32Vec = @ptrCast(&pawn_accumulator.same_pairs[rank]);
+            const adjacent: *align(1) P3I32Vec = @ptrCast(&pawn_accumulator.adjacent_pairs[rank]);
+            if (add) {
+                same.* += weights * old_sums;
+                adjacent.* += weights * neighbor_sums;
+                sum_ptr.* = @intCast(old_sums + weights);
+            } else {
+                const new_sums = old_sums - weights;
+                sum_ptr.* = @intCast(new_sums);
+                same.* -= weights * new_sums;
+                adjacent.* -= weights * neighbor_sums;
+            }
+        }
+    } else {
+        const row = net.p3_context_weights[identity.index * P3_RANK ..][0..P3_RANK];
+        var rank: usize = 0;
+        while (rank < P3_RANK) : (rank += P3_SIMD_LANES) {
+            const weight_ptr: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+            const context: *align(1) P3I16Vec = @ptrCast(&context_accumulator.values[rank]);
+            if (add) {
+                context.* += @as(P3I16Vec, @intCast(weight_ptr.*));
+            } else {
+                context.* -= @as(P3I16Vec, @intCast(weight_ptr.*));
+            }
+        }
+    }
 }
 
 inline fn clampToActivationRange(v: i32, max_value: i32) i32 {
@@ -653,6 +924,47 @@ pub const ThreatAccumulatorPair = struct {
     color_sets: [2]u64,
     kind_sets: [6]u64,
     piece_map: full_threats_v1.PieceMap,
+};
+
+pub const P3PawnAccumulator = struct {
+    pawn_sums: [8 * P3_RANK]i16,
+    same_pairs: [P3_RANK]i32,
+    adjacent_pairs: [P3_RANK]i32,
+};
+
+pub const P3ContextAccumulator = struct {
+    values: [P3_RANK]i16,
+};
+
+pub const P3PawnAccumulatorPair = struct {
+    white: P3PawnAccumulator,
+    black: P3PawnAccumulator,
+
+    inline fn perspective(self: *P3PawnAccumulatorPair, color: piece.Color) *P3PawnAccumulator {
+        return if (color == .white) &self.white else &self.black;
+    }
+
+    inline fn perspectiveConst(self: *const P3PawnAccumulatorPair, color: piece.Color) *const P3PawnAccumulator {
+        return if (color == .white) &self.white else &self.black;
+    }
+};
+
+pub const P3ContextAccumulatorPair = struct {
+    white: P3ContextAccumulator,
+    black: P3ContextAccumulator,
+
+    inline fn perspective(self: *P3ContextAccumulatorPair, color: piece.Color) *P3ContextAccumulator {
+        return if (color == .white) &self.white else &self.black;
+    }
+
+    inline fn perspectiveConst(self: *const P3ContextAccumulatorPair, color: piece.Color) *const P3ContextAccumulator {
+        return if (color == .white) &self.white else &self.black;
+    }
+};
+
+pub const P3AccumulatorPair = struct {
+    pawns: P3PawnAccumulatorPair,
+    contexts: P3ContextAccumulatorPair,
 };
 
 const AccumulatorRefreshCacheEntry = struct {
@@ -1009,6 +1321,388 @@ fn initAccumulatorsT(comptime T: type, net: *const Network, b: *Board) Accumulat
 /// Full recompute of accumulators from board state (used at search root).
 pub fn initAccumulators(net: *const Network, b: *Board) AccumulatorPair {
     return initAccumulatorsT(i16, net, b);
+}
+
+fn initP3PerspectiveParts(
+    net: *const Network,
+    b: *Board,
+    perspective: piece.Color,
+    pawn_result: *P3PawnAccumulator,
+    context_result: *P3ContextAccumulator,
+    comptime init_pawns: bool,
+    comptime init_context: bool,
+) void {
+    if (init_pawns) {
+        pawn_result.* = .{
+            .pawn_sums = [_]i16{0} ** (8 * P3_RANK),
+            .same_pairs = [_]i32{0} ** P3_RANK,
+            .adjacent_pairs = [_]i32{0} ** P3_RANK,
+        };
+    }
+    if (init_context) {
+        context_result.* = .{ .values = [_]i16{0} ** P3_RANK };
+    }
+    if (!net.is_p3) return;
+    const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+    inline for ([_]piece.Color{ .white, .black }) |color| {
+        const color_bb = b.board.getColorBitboard(color);
+        inline for ([_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen, .king }) |pt| {
+            if ((pt == .pawn and !init_pawns) or (pt != .pawn and !init_context)) continue;
+            var bb = color_bb & b.board.getKindBitboard(pt);
+            while (bb != 0) {
+                const sq: u8 = @intCast(@ctz(bb));
+                bb &= bb - 1;
+                applyP3Entity(net, pawn_result, context_result, perspective, king_sq, sq, pt, color, true);
+            }
+        }
+    }
+}
+
+pub fn initP3Accumulators(net: *const Network, b: *Board) P3AccumulatorPair {
+    var result: P3AccumulatorPair = undefined;
+    initP3PerspectiveParts(net, b, .white, &result.pawns.white, &result.contexts.white, true, true);
+    initP3PerspectiveParts(net, b, .black, &result.pawns.black, &result.contexts.black, true, true);
+    return result;
+}
+
+inline fn p3MirroringChanged(
+    perspective: piece.Color,
+    old_king_sq: u8,
+    new_king_sq: u8,
+) bool {
+    return perspectiveMirrored(perspectiveKingSquare(perspective, old_king_sq)) !=
+        perspectiveMirrored(perspectiveKingSquare(perspective, new_king_sq));
+}
+
+pub fn updateP3Accumulators(
+    net: *const Network,
+    b: *Board,
+    prev: *const P3AccumulatorPair,
+    result: *P3AccumulatorPair,
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+    capture_sq: ?u8,
+    promotion: ?piece.Type,
+    rook_from: ?u8,
+    rook_to: ?u8,
+) void {
+    std.debug.assert(net.is_p3);
+    result.* = prev.*;
+    applyP3MoveInPlace(
+        net,
+        b,
+        result,
+        from_sq,
+        to_sq,
+        moved_piece,
+        moved_color,
+        captured_piece,
+        capture_sq,
+        promotion,
+        rook_from,
+        rook_to,
+        false,
+    );
+}
+
+/// Whether a move changes the maintained pawn moments. King-mirror crossings
+/// refresh every pawn identity for that perspective even though no pawn moved.
+pub inline fn p3MoveChangesPawns(
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+) bool {
+    return moved_piece == .pawn or captured_piece == .pawn or
+        (moved_piece == .king and p3MirroringChanged(moved_color, from_sq, to_sq));
+}
+
+/// Whether a move changes the non-pawn context. A promotion removes a pawn but
+/// inserts a non-pawn, while captures can change both independently.
+pub inline fn p3MoveChangesContext(
+    moved_piece: piece.Type,
+    captured_piece: ?piece.Type,
+    promotion: ?piece.Type,
+) bool {
+    return moved_piece != .pawn or promotion != null or
+        (captured_piece != null and captured_piece.? != .pawn);
+}
+
+fn applyP3MoveParts(
+    net: *const Network,
+    b: *Board,
+    pawns: *P3PawnAccumulatorPair,
+    contexts: *P3ContextAccumulatorPair,
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+    capture_sq: ?u8,
+    promotion: ?piece.Type,
+    rook_from: ?u8,
+    rook_to: ?u8,
+    comptime update_pawns: bool,
+    comptime update_context: bool,
+    comptime undo: bool,
+) void {
+    const final_piece = promotion orelse moved_piece;
+    const captured_color = oppositeColor(moved_color);
+
+    inline for ([_]piece.Color{ .white, .black }) |perspective| {
+        const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+        const refresh = moved_piece == .king and moved_color == perspective and
+            p3MirroringChanged(perspective, from_sq, to_sq);
+        const pawn_dest = pawns.perspective(perspective);
+        const context_dest = contexts.perspective(perspective);
+        if (refresh) {
+            initP3PerspectiveParts(
+                net,
+                b,
+                perspective,
+                pawn_dest,
+                context_dest,
+                update_pawns,
+                update_context,
+            );
+        } else if (undo) {
+            if ((final_piece == .pawn and update_pawns) or (final_piece != .pawn and update_context))
+                applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, to_sq, final_piece, moved_color, false);
+            if (rook_from) |rf| {
+                if (update_context) {
+                    applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, rook_to.?, .rook, moved_color, false);
+                    applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, rf, .rook, moved_color, true);
+                }
+            }
+            if (captured_piece) |captured| {
+                if ((captured == .pawn and update_pawns) or (captured != .pawn and update_context))
+                    applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, capture_sq.?, captured, captured_color, true);
+            }
+            if ((moved_piece == .pawn and update_pawns) or (moved_piece != .pawn and update_context))
+                applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, from_sq, moved_piece, moved_color, true);
+        } else {
+            if ((moved_piece == .pawn and update_pawns) or (moved_piece != .pawn and update_context))
+                applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, from_sq, moved_piece, moved_color, false);
+            if (captured_piece) |captured| {
+                if ((captured == .pawn and update_pawns) or (captured != .pawn and update_context))
+                    applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, capture_sq.?, captured, captured_color, false);
+            }
+            if (rook_from) |rf| {
+                if (update_context) {
+                    applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, rf, .rook, moved_color, false);
+                    applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, rook_to.?, .rook, moved_color, true);
+                }
+            }
+            if ((final_piece == .pawn and update_pawns) or (final_piece != .pawn and update_context))
+                applyP3Entity(net, pawn_dest, context_dest, perspective, king_sq, to_sq, final_piece, moved_color, true);
+        }
+    }
+}
+
+pub fn updateP3PawnAccumulators(
+    net: *const Network,
+    b: *Board,
+    prev: *const P3PawnAccumulatorPair,
+    result: *P3PawnAccumulatorPair,
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+    capture_sq: ?u8,
+    promotion: ?piece.Type,
+    rook_from: ?u8,
+    rook_to: ?u8,
+) void {
+    if (moved_piece == .pawn and captured_piece == null and from_sq % 8 == to_sq % 8) {
+        result.* = prev.*;
+        inline for ([_]piece.Color{ .white, .black }) |perspective| {
+            const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+            const source = prev.perspectiveConst(perspective);
+            const dest = result.perspective(perspective);
+            const old_identity = p3Identity(perspective, from_sq, .pawn, moved_color, king_sq);
+            const old_row = net.p3_pawn_weights[old_identity.index * P3_RANK ..][0..P3_RANK];
+            const new_row: ?[]const i8 = if (promotion == null) blk: {
+                const identity = p3Identity(perspective, to_sq, .pawn, moved_color, king_sq);
+                break :blk net.p3_pawn_weights[identity.index * P3_RANK ..][0..P3_RANK];
+            } else null;
+            const base = old_identity.oriented_file * P3_RANK;
+            var rank: usize = 0;
+            while (rank < P3_RANK) : (rank += P3_SIMD_LANES) {
+                const old_weights_ptr: *align(1) const P3I8Vec = @ptrCast(&old_row[rank]);
+                const old_weights: P3I32Vec = @intCast(old_weights_ptr.*);
+                const old_sums_ptr: *align(1) const P3I16Vec = @ptrCast(&source.pawn_sums[base + rank]);
+                const old_sums: P3I32Vec = @intCast(old_sums_ptr.*);
+                const post_removal = old_sums - old_weights;
+                var neighbor_sums: P3I32Vec = @splat(0);
+                if (old_identity.oriented_file > 0) {
+                    const left: *align(1) const P3I16Vec = @ptrCast(
+                        &source.pawn_sums[base - P3_RANK + rank],
+                    );
+                    neighbor_sums += @as(P3I32Vec, @intCast(left.*));
+                }
+                if (old_identity.oriented_file < 7) {
+                    const right: *align(1) const P3I16Vec = @ptrCast(
+                        &source.pawn_sums[base + P3_RANK + rank],
+                    );
+                    neighbor_sums += @as(P3I32Vec, @intCast(right.*));
+                }
+
+                var final_sums = post_removal;
+                const same_source: *align(1) const P3I32Vec = @ptrCast(&source.same_pairs[rank]);
+                const adjacent_source: *align(1) const P3I32Vec = @ptrCast(&source.adjacent_pairs[rank]);
+                var same = same_source.* - old_weights * post_removal;
+                var adjacent = adjacent_source.* - old_weights * neighbor_sums;
+                if (new_row) |row| {
+                    const new_weights_ptr: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+                    const new_weights: P3I32Vec = @intCast(new_weights_ptr.*);
+                    same += new_weights * post_removal;
+                    adjacent += new_weights * neighbor_sums;
+                    final_sums += new_weights;
+                }
+                const sum_dest: *align(1) P3I16Vec = @ptrCast(&dest.pawn_sums[base + rank]);
+                const same_dest: *align(1) P3I32Vec = @ptrCast(&dest.same_pairs[rank]);
+                const adjacent_dest: *align(1) P3I32Vec = @ptrCast(&dest.adjacent_pairs[rank]);
+                sum_dest.* = @intCast(final_sums);
+                same_dest.* = same;
+                adjacent_dest.* = adjacent;
+            }
+        }
+        return;
+    }
+    result.* = prev.*;
+    var unused_contexts: P3ContextAccumulatorPair = undefined;
+    applyP3MoveParts(net, b, result, &unused_contexts, from_sq, to_sq, moved_piece, moved_color, captured_piece, capture_sq, promotion, rook_from, rook_to, true, false, false);
+}
+
+pub fn updateP3ContextAccumulators(
+    net: *const Network,
+    b: *Board,
+    prev: *const P3ContextAccumulatorPair,
+    result: *P3ContextAccumulatorPair,
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+    capture_sq: ?u8,
+    promotion: ?piece.Type,
+    rook_from: ?u8,
+    rook_to: ?u8,
+) void {
+    if (moved_piece != .pawn and captured_piece == null and promotion == null and
+        rook_from == null and
+        !(moved_piece == .king and p3MirroringChanged(moved_color, from_sq, to_sq)))
+    {
+        inline for ([_]piece.Color{ .white, .black }) |perspective| {
+            const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+            const old_identity = p3Identity(perspective, from_sq, moved_piece, moved_color, king_sq);
+            const new_identity = p3Identity(perspective, to_sq, moved_piece, moved_color, king_sq);
+            const old_row = net.p3_context_weights[old_identity.index * P3_RANK ..][0..P3_RANK];
+            const new_row = net.p3_context_weights[new_identity.index * P3_RANK ..][0..P3_RANK];
+            const source = prev.perspectiveConst(perspective);
+            const dest = result.perspective(perspective);
+            var rank: usize = 0;
+            while (rank < P3_RANK) : (rank += P3_SIMD_LANES) {
+                const source_ptr: *align(1) const P3I16Vec = @ptrCast(&source.values[rank]);
+                const old_weights: *align(1) const P3I8Vec = @ptrCast(&old_row[rank]);
+                const new_weights: *align(1) const P3I8Vec = @ptrCast(&new_row[rank]);
+                const destination: *align(1) P3I16Vec = @ptrCast(&dest.values[rank]);
+                destination.* = source_ptr.* -
+                    @as(P3I16Vec, @intCast(old_weights.*)) +
+                    @as(P3I16Vec, @intCast(new_weights.*));
+            }
+        }
+        return;
+    }
+    const final_piece = promotion orelse moved_piece;
+    const captured_color = oppositeColor(moved_color);
+    inline for ([_]piece.Color{ .white, .black }) |perspective| {
+        const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+        const dest = result.perspective(perspective);
+        if (moved_piece == .king and moved_color == perspective and
+            p3MirroringChanged(perspective, from_sq, to_sq))
+        {
+            var unused_pawns: P3PawnAccumulator = undefined;
+            initP3PerspectiveParts(net, b, perspective, &unused_pawns, dest, false, true);
+        } else {
+            const old_moved_row: ?[]const i8 = if (moved_piece != .pawn)
+                net.p3_context_weights[p3Identity(perspective, from_sq, moved_piece, moved_color, king_sq).index * P3_RANK ..][0..P3_RANK]
+            else
+                null;
+            const captured_row: ?[]const i8 = if (captured_piece) |captured|
+                if (captured != .pawn)
+                    net.p3_context_weights[p3Identity(perspective, capture_sq.?, captured, captured_color, king_sq).index * P3_RANK ..][0..P3_RANK]
+                else
+                    null
+            else
+                null;
+            const old_rook_row: ?[]const i8 = if (rook_from) |square|
+                net.p3_context_weights[p3Identity(perspective, square, .rook, moved_color, king_sq).index * P3_RANK ..][0..P3_RANK]
+            else
+                null;
+            const new_rook_row: ?[]const i8 = if (rook_to) |square|
+                net.p3_context_weights[p3Identity(perspective, square, .rook, moved_color, king_sq).index * P3_RANK ..][0..P3_RANK]
+            else
+                null;
+            const new_moved_row: ?[]const i8 = if (final_piece != .pawn)
+                net.p3_context_weights[p3Identity(perspective, to_sq, final_piece, moved_color, king_sq).index * P3_RANK ..][0..P3_RANK]
+            else
+                null;
+
+            const source = prev.perspectiveConst(perspective);
+            var rank: usize = 0;
+            while (rank < P3_RANK) : (rank += P3_SIMD_LANES) {
+                const source_ptr: *align(1) const P3I16Vec = @ptrCast(&source.values[rank]);
+                var values = source_ptr.*;
+                if (old_moved_row) |row| {
+                    const weights: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+                    values -= @as(P3I16Vec, @intCast(weights.*));
+                }
+                if (captured_row) |row| {
+                    const weights: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+                    values -= @as(P3I16Vec, @intCast(weights.*));
+                }
+                if (old_rook_row) |row| {
+                    const weights: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+                    values -= @as(P3I16Vec, @intCast(weights.*));
+                }
+                if (new_rook_row) |row| {
+                    const weights: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+                    values += @as(P3I16Vec, @intCast(weights.*));
+                }
+                if (new_moved_row) |row| {
+                    const weights: *align(1) const P3I8Vec = @ptrCast(&row[rank]);
+                    values += @as(P3I16Vec, @intCast(weights.*));
+                }
+                const destination: *align(1) P3I16Vec = @ptrCast(&dest.values[rank]);
+                destination.* = values;
+            }
+        }
+    }
+}
+
+pub fn applyP3MoveInPlace(
+    net: *const Network,
+    b: *Board,
+    result: *P3AccumulatorPair,
+    from_sq: u8,
+    to_sq: u8,
+    moved_piece: piece.Type,
+    moved_color: piece.Color,
+    captured_piece: ?piece.Type,
+    capture_sq: ?u8,
+    promotion: ?piece.Type,
+    rook_from: ?u8,
+    rook_to: ?u8,
+    comptime undo: bool,
+) void {
+    std.debug.assert(net.is_p3);
+    applyP3MoveParts(net, b, &result.pawns, &result.contexts, from_sq, to_sq, moved_piece, moved_color, captured_piece, capture_sq, promotion, rook_from, rook_to, true, true, undo);
 }
 
 inline fn perspectiveKingSquareOnBoard(b: *Board, perspective: piece.Color) u8 {
@@ -1564,6 +2258,74 @@ inline fn accumulatePairwiseL1Group(
     }
 }
 
+inline fn fillP3FeatureBlock(
+    pairs: *align(1) const P3I32Vec,
+    context: *align(1) const P3I16Vec,
+    destination: *align(1) P3U8Vec,
+) void {
+    const raw = pairs.* * @as(P3I32Vec, @intCast(context.*));
+    const zero: P3I32Vec = @splat(0);
+    const one: P3I32Vec = @splat(1);
+    const half: P3I32Vec = @splat(@as(i32, 1) << (P3_ACTIVATION_SHIFT - 1));
+    const rounded = (raw + half - @select(i32, raw < zero, one, zero)) >>
+        @as(P3U5Vec, @splat(P3_ACTIVATION_SHIFT));
+    const clipped = @min(@max(rounded, @as(P3I32Vec, @splat(-128))), @as(P3I32Vec, @splat(127)));
+    destination.* = @intCast(clipped + @as(P3I32Vec, @splat(128)));
+}
+
+fn fillP3Features(
+    pawns: *const P3PawnAccumulator,
+    context_accumulator: *const P3ContextAccumulator,
+    destination: []u8,
+) void {
+    std.debug.assert(destination.len == 2 * P3_RANK);
+    var rank: usize = 0;
+    while (rank < P3_RANK) : (rank += P3_SIMD_LANES) {
+        const context: *align(1) const P3I16Vec = @ptrCast(&context_accumulator.values[rank]);
+        const same: *align(1) const P3I32Vec = @ptrCast(&pawns.same_pairs[rank]);
+        const adjacent: *align(1) const P3I32Vec = @ptrCast(&pawns.adjacent_pairs[rank]);
+        const same_destination: *align(1) P3U8Vec = @ptrCast(&destination[rank]);
+        const adjacent_destination: *align(1) P3U8Vec = @ptrCast(&destination[P3_RANK + rank]);
+        fillP3FeatureBlock(same, context, same_destination);
+        fillP3FeatureBlock(adjacent, context, adjacent_destination);
+    }
+}
+
+fn addP3L1Contribution(
+    net: *const Network,
+    p3_pawns: *const P3PawnAccumulatorPair,
+    p3_contexts: *const P3ContextAccumulatorPair,
+    stm_is_white: bool,
+    bucket: usize,
+    l1_sums: *Dense1Vec,
+) void {
+    var features: [4 * P3_RANK]u8 = undefined;
+    const us_pawns = if (stm_is_white) &p3_pawns.white else &p3_pawns.black;
+    const them_pawns = if (stm_is_white) &p3_pawns.black else &p3_pawns.white;
+    const us_context = if (stm_is_white) &p3_contexts.white else &p3_contexts.black;
+    const them_context = if (stm_is_white) &p3_contexts.black else &p3_contexts.white;
+    fillP3Features(us_pawns, us_context, features[0 .. 2 * P3_RANK]);
+    fillP3Features(them_pawns, them_context, features[2 * P3_RANK .. 4 * P3_RANK]);
+
+    const correction: *align(1) const Dense1Vec = @ptrCast(
+        &net.p3_l1_corrections[bucket * 16],
+    );
+    l1_sums.* += correction.*;
+    for (0..P3_RANK) |group| {
+        const feature_group: *align(1) const [4]u8 = @ptrCast(&features[group * 4]);
+        const inputs = nnue_dot.splatGroup(feature_group);
+        var output: usize = 0;
+        while (output < 16) : (output += nnue_dot.output_lanes) {
+            const weight_index = ((bucket * P3_RANK + group) * 16 + output) * 4;
+            const weights: *align(1) const nnue_dot.I8Vec = @ptrCast(
+                &net.p3_l1_weights_grouped[weight_index],
+            );
+            const sums: *align(1) nnue_dot.I32Vec = @ptrCast(&l1_sums[output]);
+            sums.* = nnue_dot.dotAdd(sums.*, inputs, weights.*);
+        }
+    }
+}
+
 inline fn poolSplitAccumulatorBlock(
     net: *const Network,
     psq: anytype,
@@ -1594,6 +2356,8 @@ fn evaluatePairwiseMlpTail16x32FromSplit(
     us_threat: []const i16,
     them_psq: anytype,
     them_threat: []const i16,
+    p3_pawns: ?*const P3PawnAccumulatorPair,
+    p3_contexts: ?*const P3ContextAccumulatorPair,
     b: *Board,
 ) i32 {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
@@ -1638,6 +2402,16 @@ fn evaluatePairwiseMlpTail16x32FromSplit(
             );
         }
     }
+    if (net.is_p3) {
+        addP3L1Contribution(
+            net,
+            p3_pawns orelse unreachable,
+            p3_contexts orelse unreachable,
+            b.board.move == .white,
+            bucket,
+            &l1_sums,
+        );
+    }
     return finishPairwiseMlpTail16x32(net, l1_sums, bucket);
 }
 
@@ -1650,6 +2424,8 @@ fn evaluatePairwiseMlpFromSplitSlices(
     us_threat: []const i16,
     them_psq: anytype,
     them_threat: []const i16,
+    p3_pawns: ?*const P3PawnAccumulatorPair,
+    p3_contexts: ?*const P3ContextAccumulatorPair,
     b: *Board,
 ) i32 {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
@@ -1665,6 +2441,8 @@ fn evaluatePairwiseMlpFromSplitSlices(
         us_threat,
         them_psq,
         them_threat,
+        p3_pawns,
+        p3_contexts,
         b,
     );
 }
@@ -1773,6 +2551,8 @@ pub fn evaluateFromCachedAccumulators(
     net: *const Network,
     psq: anytype,
     threats: *const ThreatAccumulatorPair,
+    p3_pawns: ?*const P3PawnAccumulatorPair,
+    p3_contexts: ?*const P3ContextAccumulatorPair,
     b: *Board,
 ) i32 {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
@@ -1793,6 +2573,8 @@ pub fn evaluateFromCachedAccumulators(
         us_threat,
         them_psq,
         them_threat,
+        p3_pawns,
+        p3_contexts,
         b,
     );
 }
@@ -1808,7 +2590,15 @@ pub fn evaluateFromAccumulators(
     b: *Board,
 ) i32 {
     const threats = initThreatAccumulators(net, b);
-    return evaluateFromCachedAccumulators(net, acc, &threats, b);
+    const p3 = if (net.is_p3) initP3Accumulators(net, b) else null;
+    return evaluateFromCachedAccumulators(
+        net,
+        acc,
+        &threats,
+        if (p3) |*value| &value.pawns else null,
+        if (p3) |*value| &value.contexts else null,
+        b,
+    );
 }
 
 /// Returns score from the side-to-move perspective, same convention as classical eval.

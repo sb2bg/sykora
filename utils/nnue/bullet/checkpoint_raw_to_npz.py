@@ -62,10 +62,12 @@ def parse_network_config(run_meta: dict) -> dict:
     env = run_meta.get("env", {})
     network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk7"
     architecture = network.get("architecture") or env.get("SYK_ARCHITECTURE") or "pairwise-mlp"
-    if architecture not in {"pairwise-linear", "pairwise-mlp"}:
+    if architecture not in {"pairwise-linear", "pairwise-mlp", "pairwise-mlp-p3"}:
         raise ValueError(f"unsupported architecture: {architecture!r}")
-    if network_format not in {"syk7", "syk8"}:
+    if network_format not in {"syk7", "syk8", "syk9"}:
         raise ValueError(f"unsupported network format: {network_format!r}")
+    if (network_format == "syk9") != (architecture == "pairwise-mlp-p3"):
+        raise ValueError("syk9 and pairwise-mlp-p3 must be used together")
 
     if "bucket_layout_64" in network:
         layout = [int(value) for value in network["bucket_layout_64"]]
@@ -88,6 +90,9 @@ def parse_network_config(run_meta: dict) -> dict:
             network.get("output_bucket_count") or env.get("SYK_OUTPUT_BUCKETS") or 1
         ),
         "factorised": bool(network.get("factorised", True)),
+        "p3_rank": int(network.get("p3_rank") or env.get("SYK_P3_RANK") or 32),
+        "p3_pawn_count": int(network.get("p3", {}).get("pawn_feature_count", 128)),
+        "p3_context_count": int(network.get("p3", {}).get("context_feature_count", 640)),
     }
 
 
@@ -113,14 +118,30 @@ def expected_raw_sizes(config: dict) -> dict[str, int]:
     h = config["ft_hidden"]
     buckets = max(config["bucket_layout_64"]) + 1
     common = 768 * buckets * h + h + tail_float_count(config)
-    if config["format"] == "syk8":
+    if config["format"] in {"syk8", "syk9"}:
+        p3_input_count = 0
+        p3_parameter_count = 0
+        if config["format"] == "syk9":
+            rank = config["p3_rank"]
+            pawn_count = config["p3_pawn_count"]
+            context_count = config["p3_context_count"]
+            dense1 = config["dense1"]
+            outputs = config["output_bucket_count"]
+            p3_input_count = pawn_count + context_count
+            p3_parameter_count = (
+                pawn_count * rank
+                + context_count * rank
+                + 4 * rank * outputs * dense1
+                + outputs * dense1
+            )
         return {
             "virtual_factorised": (
-                768 + 768 * buckets + FULL_THREATS_V1_COUNT
+                768 + 768 * buckets + FULL_THREATS_V1_COUNT + p3_input_count
             )
             * h
             + h
             + tail_float_count(config)
+            + p3_parameter_count
         }
     return {
         "factorised": 768 * h + common,
@@ -159,7 +180,11 @@ def raw_from_optimizer_state(raw_path: Path, config: dict):
     if not state_path.is_file():
         return None
     tensors = read_optimizer_weights(state_path)
-    names = ["l0w", "l0b"] if config["format"] == "syk8" else ["l0f", "l0w", "l0b"]
+    names = (
+        ["l0w", "l0b"]
+        if config["format"] in {"syk8", "syk9"}
+        else ["l0f", "l0w", "l0b"]
+    )
     if config["architecture"] == "pairwise-linear":
         if "outw" in tensors and "outb" in tensors:
             names.extend(["outw", "outb"])
@@ -168,6 +193,8 @@ def raw_from_optimizer_state(raw_path: Path, config: dict):
             names.extend(["l1w", "l1b"])
     else:
         names.extend(["l1w", "l1b", "l2w", "l2b", "l3w", "l3b"])
+    if config["architecture"] == "pairwise-mlp-p3":
+        names.extend(["p3_pawnw", "p3_contextw", "p3_l1w", "p3_l1b"])
     missing = [name for name in names if name not in tensors]
     if missing:
         raise ValueError(
@@ -215,6 +242,32 @@ def decode_tail(raw, offset: int, config: dict) -> tuple[dict, int]:
     return tensors, offset
 
 
+def decode_p3(raw, offset: int, config: dict) -> tuple[dict, int]:
+    import numpy as np
+
+    if config["architecture"] != "pairwise-mlp-p3":
+        return {}, offset
+
+    rank = config["p3_rank"]
+    pawn_count = config["p3_pawn_count"]
+    context_count = config["p3_context_count"]
+    outputs = config["output_bucket_count"]
+    dense1 = config["dense1"]
+
+    pawnw, offset = take_f32(raw, offset, pawn_count * rank)
+    contextw, offset = take_f32(raw, offset, context_count * rank)
+    p3_l1w, offset = take_f32(raw, offset, 4 * rank * outputs * dense1)
+    p3_l1b, offset = take_f32(raw, offset, outputs * dense1)
+    return {
+        "p3_pawn_weights": pawnw.reshape(pawn_count, rank).astype(np.float32),
+        "p3_context_weights": contextw.reshape(context_count, rank).astype(np.float32),
+        "p3_l1_weights": p3_l1w.reshape(4 * rank, outputs, dense1)
+        .transpose(1, 0, 2)
+        .astype(np.float32),
+        "p3_l1_bias": p3_l1b.reshape(outputs, dense1).astype(np.float32),
+    }, offset
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -231,7 +284,7 @@ def main() -> int:
 
     raw = np.fromfile(raw_path, dtype="<f4")
     sizes = expected_raw_sizes(config)
-    if config["format"] == "syk8" and raw.size == sizes["virtual_factorised"]:
+    if config["format"] in {"syk8", "syk9"} and raw.size == sizes["virtual_factorised"]:
         raw_layout = "virtual_factorised"
     elif config["format"] != "syk8" and raw.size == sizes["factorised"]:
         raw_layout = "factorised"
@@ -260,12 +313,22 @@ def main() -> int:
     offset = 0
     threat_weights = None
     if raw_layout == "virtual_factorised":
-        virtual_count = 768 + input_size + FULL_THREATS_V1_COUNT
+        p3_input_count = (
+            config["p3_pawn_count"] + config["p3_context_count"]
+            if config["format"] == "syk9"
+            else 0
+        )
+        virtual_count = 768 + input_size + FULL_THREATS_V1_COUNT + p3_input_count
         l0w, offset = take_f32(raw, offset, virtual_count * h)
         virtual = l0w.reshape(virtual_count, h)
         factoriser = virtual[:768]
         residual = virtual[768 : 768 + input_size]
-        threat_weights = virtual[768 + input_size :]
+        threat_start = 768 + input_size
+        threat_weights = virtual[threat_start : threat_start + FULL_THREATS_V1_COUNT]
+        if p3_input_count:
+            atomic_rows = virtual[threat_start + FULL_THREATS_V1_COUNT :]
+            if np.any(atomic_rows != 0.0):
+                raise ValueError("syk9 atomic P3 rows in l0w must remain exactly zero")
         ft_weights = residual + np.tile(factoriser, (bucket_count, 1))
     elif raw_layout in {"factorised", "factorised_from_optimizer_state"}:
         l0f, offset = take_f32(raw, offset, 768 * h)
@@ -281,6 +344,7 @@ def main() -> int:
 
     l0b, offset = take_f32(raw, offset, h)
     tail, offset = decode_tail(raw, offset, config)
+    p3, offset = decode_p3(raw, offset, config)
     if offset != raw.size:
         raise ValueError(f"decoder consumed {offset} floats but raw.bin contains {raw.size}")
 
@@ -291,7 +355,7 @@ def main() -> int:
         "feature_set": np.asarray(
             [
                 FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1
-                if config["format"] == "syk8"
+                if config["format"] in {"syk8", "syk9"}
                 else 1
             ],
             dtype=np.uint8,
@@ -307,6 +371,7 @@ def main() -> int:
         "dense2": np.asarray([config["dense2"]], dtype=np.uint16),
         "raw_layout": np.asarray([raw_layout]),
         **tail,
+        **p3,
     }
     if threat_weights is not None:
         payload["threat_weights"] = threat_weights.astype(np.float32)

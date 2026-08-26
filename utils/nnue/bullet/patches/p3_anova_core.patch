@@ -1,0 +1,331 @@
+diff --git a/crates/acyclib/src/device/cpu.rs b/crates/acyclib/src/device/cpu.rs
+index dac1926..f11ccbc 100644
+--- a/crates/acyclib/src/device/cpu.rs
++++ b/crates/acyclib/src/device/cpu.rs
+@@ -2,6 +2,7 @@ pub mod base;
+ pub mod blas;
+ pub mod cmp;
+ pub mod multi;
++pub mod p3;
+ pub mod sparse;
+ 
+ use std::sync::Arc;
+diff --git a/crates/acyclib/src/device/function.rs b/crates/acyclib/src/device/function.rs
+index 884f715..c68c1d8 100644
+--- a/crates/acyclib/src/device/function.rs
++++ b/crates/acyclib/src/device/function.rs
+@@ -1,6 +1,7 @@
+ mod binary;
+ mod inplace;
+ mod matmul;
++mod p3;
+ mod sparse;
+ mod trinary;
+ mod unary;
+@@ -10,6 +11,7 @@ use std::fmt;
+ pub use binary::*;
+ pub use inplace::*;
+ pub use matmul::*;
++pub use p3::*;
+ pub use sparse::*;
+ pub use trinary::*;
+ pub use unary::*;
+diff --git a/crates/acyclib/src/device/function/p3.rs b/crates/acyclib/src/device/function/p3.rs
+new file mode 100644
+index 0000000..4bb96f4
+--- /dev/null
++++ b/crates/acyclib/src/device/function/p3.rs
+@@ -0,0 +1,97 @@
++use crate::device::{Device, OperationError, function::DeviceOperation, operation::P3AnovaOps, tensor::TensorRef};
++
++#[derive(Clone)]
++pub struct P3Anova<D: Device> {
++    pub pawn_weights: TensorRef<D>,
++    pub context_weights: TensorRef<D>,
++    pub indices: TensorRef<D>,
++    pub pawn_offset: usize,
++    pub pawn_count: usize,
++    pub context_offset: usize,
++    pub context_count: usize,
++    pub rank: usize,
++    pub output: TensorRef<D>,
++}
++
++impl<D: P3AnovaOps> DeviceOperation<D> for P3Anova<D> {
++    fn opname(&self) -> String {
++        "P3Anova".to_string()
++    }
++
++    fn execute(&self) -> Result<(), OperationError<D::DeviceError>> {
++        let pawns = self.pawn_weights.dense();
++        let context = self.context_weights.dense();
++        let indices = self.indices.sparse();
++        let mut output = self.output.dense_mut();
++        let batch_size = indices.batch_size();
++
++        if batch_size != output.batch_size() {
++            return Err(OperationError::MismatchedBatchSizes);
++        }
++
++        D::p3_anova(
++            batch_size.unwrap_or(1),
++            indices.nnz(),
++            self.rank,
++            self.pawn_offset,
++            self.pawn_count,
++            self.context_offset,
++            self.context_count,
++            &pawns.buf,
++            &context.buf,
++            &indices.buf,
++            &mut output.buf,
++        )
++    }
++}
++
++#[derive(Clone)]
++pub struct BackpropP3Anova<D: Device> {
++    pub pawn_weights: TensorRef<D>,
++    pub context_weights: TensorRef<D>,
++    pub indices: TensorRef<D>,
++    pub pawn_offset: usize,
++    pub pawn_count: usize,
++    pub context_offset: usize,
++    pub context_count: usize,
++    pub rank: usize,
++    pub output_grads: TensorRef<D>,
++    pub pawn_weight_grads: TensorRef<D>,
++    pub context_weight_grads: TensorRef<D>,
++}
++
++impl<D: P3AnovaOps> DeviceOperation<D> for BackpropP3Anova<D> {
++    fn opname(&self) -> String {
++        "BackpropP3Anova".to_string()
++    }
++
++    fn execute(&self) -> Result<(), OperationError<D::DeviceError>> {
++        let pawns = self.pawn_weights.dense();
++        let context = self.context_weights.dense();
++        let indices = self.indices.sparse();
++        let output_grads = self.output_grads.dense();
++        let mut pawn_grads = self.pawn_weight_grads.dense_mut();
++        let mut context_grads = self.context_weight_grads.dense_mut();
++        let batch_size = indices.batch_size();
++
++        if batch_size != output_grads.batch_size() {
++            return Err(OperationError::MismatchedBatchSizes);
++        }
++
++        D::backprop_p3_anova(
++            batch_size.unwrap_or(1),
++            indices.nnz(),
++            self.rank,
++            self.pawn_offset,
++            self.pawn_count,
++            self.context_offset,
++            self.context_count,
++            &pawns.buf,
++            &context.buf,
++            &indices.buf,
++            &output_grads.buf,
++            &mut pawn_grads.buf,
++            &mut context_grads.buf,
++        )
++    }
++}
+diff --git a/crates/acyclib/src/device/operation.rs b/crates/acyclib/src/device/operation.rs
+index 3a13564..4fd5efd 100644
+--- a/crates/acyclib/src/device/operation.rs
++++ b/crates/acyclib/src/device/operation.rs
+@@ -1,9 +1,11 @@
+ mod base;
+ mod blas;
+ mod core;
++mod p3;
+ mod sparse;
+ 
+ pub use base::{AdamConfig, BaseOperations, DiffableFromOutput};
+ pub use blas::{BlasOperations, GemmConfig};
+ pub use core::CoreDeviceOps;
++pub use p3::P3AnovaOps;
+ pub use sparse::SparseAffineOps;
+diff --git a/crates/acyclib/src/device/operation/p3.rs b/crates/acyclib/src/device/operation/p3.rs
+new file mode 100644
+index 0000000..cf5be87
+--- /dev/null
++++ b/crates/acyclib/src/device/operation/p3.rs
+@@ -0,0 +1,34 @@
++use crate::device::{Device, OperationResult};
++
++#[allow(clippy::too_many_arguments)]
++pub trait P3AnovaOps: Device {
++    fn p3_anova(
++        batch_size: usize,
++        nnz: usize,
++        rank: usize,
++        pawn_offset: usize,
++        pawn_count: usize,
++        context_offset: usize,
++        context_count: usize,
++        pawn_weights: &Self::BufferF32,
++        context_weights: &Self::BufferF32,
++        indices: &Self::BufferI32,
++        output: &mut Self::BufferF32,
++    ) -> OperationResult<Self::DeviceError>;
++
++    fn backprop_p3_anova(
++        batch_size: usize,
++        nnz: usize,
++        rank: usize,
++        pawn_offset: usize,
++        pawn_count: usize,
++        context_offset: usize,
++        context_count: usize,
++        pawn_weights: &Self::BufferF32,
++        context_weights: &Self::BufferF32,
++        indices: &Self::BufferI32,
++        output_grads: &Self::BufferF32,
++        pawn_weight_grads: &mut Self::BufferF32,
++        context_weight_grads: &mut Self::BufferF32,
++    ) -> OperationResult<Self::DeviceError>;
++}
+diff --git a/crates/acyclib/src/graph/ir/operation.rs b/crates/acyclib/src/graph/ir/operation.rs
+index 1d57232..b4ea02d 100644
+--- a/crates/acyclib/src/graph/ir/operation.rs
++++ b/crates/acyclib/src/graph/ir/operation.rs
+@@ -1,6 +1,7 @@
+ pub mod affine;
+ pub mod binary;
+ pub mod nary;
++pub mod p3;
+ pub mod sparse;
+ pub mod unary;
+ pub mod util;
+diff --git a/crates/acyclib/src/graph/ir/operation/p3.rs b/crates/acyclib/src/graph/ir/operation/p3.rs
+new file mode 100644
+index 0000000..2e759ba
+--- /dev/null
++++ b/crates/acyclib/src/graph/ir/operation/p3.rs
+@@ -0,0 +1,122 @@
++use crate::{
++    dag::NodeId,
++    device::{
++        Device,
++        function::{self, DeviceFunction, DeviceOperation},
++        operation::P3AnovaOps,
++        tensor::Shape,
++    },
++    graph::{
++        Graph, GraphNodeIdTy,
++        ir::{
++            BackendMarker, GraphIR, GraphIRError,
++            node::AnnotatedNode,
++            operation::{GraphIROperationBase, GraphIROperationCompilable, GraphIROperationError, util},
++        },
++    },
++};
++
++pub trait P3AnovaImpl: Device {
++    type Fwd: DeviceOperation<Self>;
++    type Bwd: DeviceOperation<Self>;
++
++    fn p3_fwd(op: function::P3Anova<Self>) -> Self::Fwd;
++    fn p3_bwd(op: function::BackpropP3Anova<Self>) -> Self::Bwd;
++}
++
++impl<D: P3AnovaOps> P3AnovaImpl for D {
++    type Fwd = function::P3Anova<Self>;
++    type Bwd = function::BackpropP3Anova<Self>;
++
++    fn p3_fwd(op: function::P3Anova<Self>) -> Self::Fwd {
++        op
++    }
++
++    fn p3_bwd(op: function::BackpropP3Anova<Self>) -> Self::Bwd {
++        op
++    }
++}
++
++#[derive(Clone, Debug)]
++pub struct P3Anova {
++    pub pawn_weights: AnnotatedNode,
++    pub context_weights: AnnotatedNode,
++    pub indices: AnnotatedNode,
++    pub pawn_offset: usize,
++    pub pawn_count: usize,
++    pub context_offset: usize,
++    pub context_count: usize,
++    pub rank: usize,
++}
++
++impl<B: BackendMarker> GraphIROperationBase<B> for P3Anova {
++    fn nodes(&self) -> Vec<AnnotatedNode> {
++        vec![self.pawn_weights, self.context_weights, self.indices]
++    }
++
++    fn output_shape(&self, ir: &GraphIR<B>) -> Result<Shape, GraphIRError> {
++        util::check_dense_eq(ir, &self.pawn_weights, true)?;
++        util::check_dense_eq(ir, &self.context_weights, true)?;
++        util::check_dense_eq(ir, &self.indices, false)?;
++        util::check_not_batched(ir, &self.pawn_weights)?;
++        util::check_not_batched(ir, &self.context_weights)?;
++        util::check_no_grad(ir, &[&self.indices])?;
++
++        let valid = self.rank > 0
++            && self.indices.shape.cols() == 1
++            && self.pawn_weights.shape == Shape::new(self.rank, self.pawn_count)
++            && self.context_weights.shape == Shape::new(self.rank, self.context_count)
++            && self.pawn_offset.checked_add(self.pawn_count).is_some_and(|end| end <= self.indices.shape.rows())
++            && self.context_offset.checked_add(self.context_count).is_some_and(|end| end <= self.indices.shape.rows());
++
++        valid
++            .then_some(Shape::new(2 * self.rank, 1))
++            .ok_or(GraphIRError::Op(GraphIROperationError::InvalidInputShape(self.indices.shape)))
++    }
++
++    fn shorthand(&self) -> String {
++        format!("P3Anova(R{})", self.rank)
++    }
++}
++
++impl<B: BackendMarker> GraphIROperationCompilable<B> for P3Anova
++where
++    B::Backend: P3AnovaImpl,
++{
++    fn forward_pass(&self, graph: &Graph<B::Backend>, output_node: NodeId) -> DeviceFunction<B::Backend> {
++        let indices = graph.get_ref(self.indices.idx, GraphNodeIdTy::Values);
++        let output = graph.get_ref(output_node, GraphNodeIdTy::Values);
++        let mut func = DeviceFunction::default();
++        func.push(function::MaybeUpdateBatchSize { input: indices.clone(), output: output.clone() });
++        func.push(<B::Backend as P3AnovaImpl>::p3_fwd(function::P3Anova {
++            pawn_weights: graph.get_ref(self.pawn_weights.idx, GraphNodeIdTy::Values),
++            context_weights: graph.get_ref(self.context_weights.idx, GraphNodeIdTy::Values),
++            indices,
++            pawn_offset: self.pawn_offset,
++            pawn_count: self.pawn_count,
++            context_offset: self.context_offset,
++            context_count: self.context_count,
++            rank: self.rank,
++            output,
++        }));
++        func
++    }
++
++    fn backward_pass(&self, graph: &Graph<B::Backend>, output_node: NodeId) -> DeviceFunction<B::Backend> {
++        let mut func = DeviceFunction::default();
++        func.push(<B::Backend as P3AnovaImpl>::p3_bwd(function::BackpropP3Anova {
++            pawn_weights: graph.get_ref(self.pawn_weights.idx, GraphNodeIdTy::Values),
++            context_weights: graph.get_ref(self.context_weights.idx, GraphNodeIdTy::Values),
++            indices: graph.get_ref(self.indices.idx, GraphNodeIdTy::Values),
++            pawn_offset: self.pawn_offset,
++            pawn_count: self.pawn_count,
++            context_offset: self.context_offset,
++            context_count: self.context_count,
++            rank: self.rank,
++            output_grads: graph.get_ref(output_node, GraphNodeIdTy::Gradients),
++            pawn_weight_grads: graph.get_ref(self.pawn_weights.idx, GraphNodeIdTy::Gradients),
++            context_weight_grads: graph.get_ref(self.context_weights.idx, GraphNodeIdTy::Gradients),
++        }));
++        func
++    }
++}

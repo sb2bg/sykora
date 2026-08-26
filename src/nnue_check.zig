@@ -69,6 +69,13 @@ fn threatAccumulatorsMatch(
         std.mem.eql(u8, &left.piece_map, &right.piece_map);
 }
 
+fn p3AccumulatorsMatch(
+    left: *const nnue.P3AccumulatorPair,
+    right: *const nnue.P3AccumulatorPair,
+) bool {
+    return std.meta.eql(left.*, right.*);
+}
+
 /// Verify, for every legal move from `b`, that the incremental i16 update
 /// matches a full i16 recompute AND stays bit-identical to the i32 reference
 /// backend (both accumulator contents and final evals).
@@ -76,12 +83,20 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
     const root_acc = nnue.initAccumulators(net, b);
     const root_wide = nnue.initAccumulatorsWide(net, b);
     const root_threats = nnue.initThreatAccumulators(net, b);
+    const root_p3 = nnue.initP3Accumulators(net, b);
     var moves = @import("bitboard.zig").MoveList.init();
     b.generateLegalMoves(&moves) catch return false;
     const hidden_size: usize = @intCast(net.ft_hidden_size);
 
     if (!accumulatorsMatchWide(&root_acc, &root_wide, hidden_size)) return false;
-    if (nnue.evaluateFromCachedAccumulators(net, &root_acc, &root_threats, b) !=
+    if (nnue.evaluateFromCachedAccumulators(
+        net,
+        &root_acc,
+        &root_threats,
+        if (net.hasP3()) &root_p3.pawns else null,
+        if (net.hasP3()) &root_p3.contexts else null,
+        b,
+    ) !=
         nnue.evaluateFromAccumulators(net, &root_acc, b))
     {
         return false;
@@ -134,11 +149,104 @@ fn verifyIncrementalMoves(net: *const nnue.Network, b: *Board) bool {
         var incremental_threats: nnue.ThreatAccumulatorPair = undefined;
         nnue.updateThreatAccumulators(net, b, &root_threats, &incremental_threats);
         const full_threats = nnue.initThreatAccumulators(net, b);
+        var incremental_p3: nnue.P3AccumulatorPair = root_p3;
+        var split_pawns = root_p3.pawns;
+        var split_contexts = root_p3.contexts;
+        if (net.hasP3()) {
+            nnue.applyP3MoveInPlace(
+                net,
+                b,
+                &incremental_p3,
+                move.from(),
+                move.to(),
+                undo.moved_piece,
+                undo.mover_color,
+                undo.captured_piece,
+                undo.captured_square,
+                move.promotion(),
+                undo.castle_rook_from,
+                undo.castle_rook_to,
+                false,
+            );
+            if (nnue.p3MoveChangesPawns(
+                move.from(),
+                move.to(),
+                undo.moved_piece,
+                undo.mover_color,
+                undo.captured_piece,
+            )) {
+                nnue.updateP3PawnAccumulators(
+                    net,
+                    b,
+                    &root_p3.pawns,
+                    &split_pawns,
+                    move.from(),
+                    move.to(),
+                    undo.moved_piece,
+                    undo.mover_color,
+                    undo.captured_piece,
+                    undo.captured_square,
+                    move.promotion(),
+                    undo.castle_rook_from,
+                    undo.castle_rook_to,
+                );
+            }
+            if (nnue.p3MoveChangesContext(
+                undo.moved_piece,
+                undo.captured_piece,
+                move.promotion(),
+            )) {
+                nnue.updateP3ContextAccumulators(
+                    net,
+                    b,
+                    &root_p3.contexts,
+                    &split_contexts,
+                    move.from(),
+                    move.to(),
+                    undo.moved_piece,
+                    undo.mover_color,
+                    undo.captured_piece,
+                    undo.captured_square,
+                    move.promotion(),
+                    undo.castle_rook_from,
+                    undo.castle_rook_to,
+                );
+            }
+        }
+        const full_p3 = nnue.initP3Accumulators(net, b);
         matches = matches and
             threatAccumulatorsMatch(&incremental_threats, &full_threats, hidden_size) and
-            nnue.evaluateFromCachedAccumulators(net, &incremental, &incremental_threats, b) ==
+            (!net.hasP3() or p3AccumulatorsMatch(&incremental_p3, &full_p3)) and
+            (!net.hasP3() or std.meta.eql(split_pawns, full_p3.pawns)) and
+            (!net.hasP3() or std.meta.eql(split_contexts, full_p3.contexts)) and
+            nnue.evaluateFromCachedAccumulators(
+                net,
+                &incremental,
+                &incremental_threats,
+                if (net.hasP3()) &incremental_p3.pawns else null,
+                if (net.hasP3()) &incremental_p3.contexts else null,
+                b,
+            ) ==
                 nnue.evaluateFromAccumulators(net, &incremental, b);
         b.unmakeMoveUnchecked(move, undo);
+        if (net.hasP3()) {
+            nnue.applyP3MoveInPlace(
+                net,
+                b,
+                &incremental_p3,
+                move.from(),
+                move.to(),
+                undo.moved_piece,
+                undo.mover_color,
+                undo.captured_piece,
+                undo.captured_square,
+                move.promotion(),
+                undo.castle_rook_from,
+                undo.castle_rook_to,
+                true,
+            );
+            matches = matches and p3AccumulatorsMatch(&incremental_p3, &root_p3);
+        }
         if (!matches) return false;
     }
     return true;

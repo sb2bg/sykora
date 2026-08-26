@@ -105,9 +105,12 @@ def run_position(
     *,
     depth: Optional[int],
     movetime_ms: Optional[int],
+    nodes: Optional[int],
 ) -> BenchResult:
     board = board_from_spec(fen_or_startpos)
-    if movetime_ms is not None:
+    if nodes is not None:
+        limit = chess.engine.Limit(nodes=nodes)
+    elif movetime_ms is not None:
         limit = chess.engine.Limit(time=movetime_ms / 1000.0, depth=depth)
     else:
         assert depth is not None
@@ -154,6 +157,7 @@ def main() -> int:
     parser.add_argument("--engine", default="./zig-out/bin/sykora", help="Path to UCI engine binary")
     parser.add_argument("--depth", type=int, default=10, help="Search depth (ignored only if --movetime-ms is used without depth)")
     parser.add_argument("--movetime-ms", type=int, default=None, help="Per-position movetime in ms")
+    parser.add_argument("--nodes", type=int, default=None, help="Fixed nodes per position")
     parser.add_argument("--runs", type=int, default=1, help="Repeat full suite this many times")
     parser.add_argument("--position-file", default=None, help="Optional text file with 'label|fen' lines")
     parser.add_argument("--engine-opt", action="append", default=[], help="UCI option Key=Value (repeatable)")
@@ -164,6 +168,10 @@ def main() -> int:
         parser.error("--depth must be > 0")
     if args.movetime_ms is not None and args.movetime_ms <= 0:
         parser.error("--movetime-ms must be > 0")
+    if args.nodes is not None and args.nodes <= 0:
+        parser.error("--nodes must be > 0")
+    if args.nodes is not None and args.movetime_ms is not None:
+        parser.error("--nodes and --movetime-ms cannot be combined")
     if args.runs <= 0:
         parser.error("--runs must be > 0")
 
@@ -191,6 +199,7 @@ def main() -> int:
                         fen,
                         depth=args.depth,
                         movetime_ms=args.movetime_ms,
+                        nodes=args.nodes,
                     )
                     result.run_idx = run_idx
                     all_results.append(result)
@@ -222,7 +231,12 @@ def main() -> int:
     print(f"engine:          {args.engine}")
     print(f"positions:       {len(positions)}")
     print(f"runs:            {args.runs}")
-    print(f"depth:           {args.depth}" if args.movetime_ms is None else f"depth/time:      {args.depth} / {args.movetime_ms}ms")
+    if args.nodes is not None:
+        print(f"nodes/position:  {args.nodes}")
+    elif args.movetime_ms is None:
+        print(f"depth:           {args.depth}")
+    else:
+        print(f"depth/time:      {args.depth} / {args.movetime_ms}ms")
     print(f"overall NPS:     {overall_nps:.0f}")
     print(f"mean NPS:        {mean(nps_values):.0f}")
     print(f"median NPS:      {median(nps_values):.0f}")

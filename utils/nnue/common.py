@@ -18,11 +18,14 @@ NNUE_Q = 64
 SCALE = 400
 MAGIC_V8 = b"SYKNNUE8"
 FORMAT_VERSION_V8 = 8
+MAGIC_V9 = b"SYKNNUE9"
+FORMAT_VERSION_V9 = 9
 V8_HEADER_BYTES = 224
 V8_SECTION_ENTRY_BYTES = 48
 V8_HASH_OFFSET = 172
 
 V8_ARCH_PAIRWISE_MLP_THREATS = 2
+V9_ARCH_PAIRWISE_MLP_P3 = 3
 POOL_PAIRWISE_PRODUCT = 1
 DENSE1_DUAL_CSCRELU = 1
 DENSE2_SCRELU = 1
@@ -41,6 +44,9 @@ SECTION_L2_BIAS = 12
 SECTION_L2_WEIGHT = 13
 SECTION_OUT_BIAS = 14
 SECTION_OUT_WEIGHT = 15
+SECTION_P3_PAWN_WEIGHT = 20
+SECTION_P3_CONTEXT_WEIGHT = 21
+SECTION_P3_L1_WEIGHT = 22
 
 FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1 = 2
 
@@ -303,6 +309,191 @@ def write_syk_nnue_v8(
     pos += 20
     if pos != V8_HEADER_BYTES:
         raise AssertionError(f"SYKNNUE8 header construction ended at {pos}")
+
+    table = bytearray(len(sections) * V8_SECTION_ENTRY_BYTES)
+    payload_start = _align_up(V8_HEADER_BYTES + len(table), 64)
+    output = bytearray(payload_start)
+    output[:V8_HEADER_BYTES] = header
+    output[V8_HEADER_BYTES : V8_HEADER_BYTES + len(table)] = table
+    offset = payload_start
+    for index, (section_id, element_type, dimensions, payload) in enumerate(sections):
+        offset = _align_up(offset, 64)
+        if len(output) < offset:
+            output.extend(b"\0" * (offset - len(output)))
+        dims = list(dimensions) + [1] * (4 - len(dimensions))
+        entry = struct.pack(
+            "<HBBI4IQQII",
+            section_id,
+            element_type,
+            len(dimensions),
+            1,
+            *dims,
+            offset,
+            len(payload),
+            zlib.crc32(payload) & 0xFFFFFFFF,
+            0,
+        )
+        start = V8_HEADER_BYTES + index * V8_SECTION_ENTRY_BYTES
+        output[start : start + V8_SECTION_ENTRY_BYTES] = entry
+        output.extend(payload)
+        offset += len(payload)
+
+    digest = hashlib.sha256(output).digest()
+    output[hash_offset : hash_offset + 32] = digest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(output)
+
+
+def write_syk_nnue_v9(
+    path: Path,
+    *,
+    ft_hidden_size: int,
+    dense1_size: int,
+    dense2_size: int,
+    input_bucket_layout_64: List[int],
+    output_bucket_count: int,
+    ft_bias_bytes: bytes,
+    psq_weight_bytes: bytes,
+    threat_weight_bytes: bytes,
+    l1_bias_bytes: bytes,
+    l1_weight_bytes: bytes,
+    l2_bias_bytes: bytes,
+    l2_weight_bytes: bytes,
+    out_bias_bytes: bytes,
+    out_weight_bytes: bytes,
+    p3_pawn_weight_bytes: bytes,
+    p3_context_weight_bytes: bytes,
+    p3_l1_weight_bytes: bytes,
+    p3_rank: int,
+    p3_pawn_count: int,
+    p3_context_count: int,
+    p3_quant: int,
+    p3_activation_shift: int,
+    p3_l1_abs_bound: int,
+    psq_abs_bound: int,
+    threat_abs_bound: int,
+    q0: int = NNUE_Q0,
+    threat_quant: int = NNUE_Q0,
+    pool_quant: int = 128,
+    q: int = NNUE_Q,
+    scale: int = SCALE,
+) -> None:
+    """Write the SYKNNUE9 full-threat + P3-ANOVA container."""
+    if len(input_bucket_layout_64) != 64:
+        raise ValueError("input_bucket_layout_64 must contain exactly 64 entries")
+    input_bucket_count = num_buckets(input_bucket_layout_64)
+    if input_bucket_count != 10 or output_bucket_count != 8:
+        raise ValueError("SYKNNUE9 requires B=10 and O=8")
+    if ft_hidden_size != 1024 or ft_hidden_size % 2:
+        raise ValueError("SYKNNUE9 P3 requires H=1024")
+    if dense1_size != 16 or dense2_size != 32:
+        raise ValueError("SYKNNUE9 requires D1=16 and D2=32")
+    if (q0, threat_quant, pool_quant, q, scale) != (NNUE_Q0, NNUE_Q0, 128, NNUE_Q, SCALE):
+        raise ValueError("unsupported SYKNNUE9 base quantisation contract")
+    if (p3_rank, p3_pawn_count, p3_context_count, p3_quant, p3_activation_shift) != (
+        32,
+        128,
+        640,
+        64,
+        12,
+    ):
+        raise ValueError("unsupported SYKNNUE9 P3 quantisation contract")
+    for name, bound in (
+        ("psq", psq_abs_bound),
+        ("threat", threat_abs_bound),
+        ("p3_l1", p3_l1_abs_bound),
+    ):
+        if not 0 <= bound <= 0xFFFFFFFF:
+            raise ValueError(f"{name} accumulator-bound evidence must fit u32")
+
+    psq_input_size = PSQ_INPUT_SIZE * input_bucket_count
+    sections = [
+        (SECTION_FT_BIAS, TYPE_I16, (ft_hidden_size,), ft_bias_bytes),
+        (SECTION_FT_WEIGHT, TYPE_I16, (psq_input_size, ft_hidden_size), psq_weight_bytes),
+        (SECTION_THREAT_WEIGHT, TYPE_I8, (FULL_THREATS_V1_COUNT, ft_hidden_size), threat_weight_bytes),
+        (SECTION_L1_BIAS, TYPE_I32, (output_bucket_count, dense1_size), l1_bias_bytes),
+        (SECTION_L1_WEIGHT, TYPE_I8, (output_bucket_count, ft_hidden_size, dense1_size), l1_weight_bytes),
+        (SECTION_L2_BIAS, TYPE_I32, (output_bucket_count, dense2_size), l2_bias_bytes),
+        (SECTION_L2_WEIGHT, TYPE_I8, (output_bucket_count, 2 * dense1_size, dense2_size), l2_weight_bytes),
+        (SECTION_OUT_BIAS, TYPE_I32, (output_bucket_count,), out_bias_bytes),
+        (SECTION_OUT_WEIGHT, TYPE_I8, (output_bucket_count, dense2_size), out_weight_bytes),
+        (SECTION_P3_PAWN_WEIGHT, TYPE_I8, (p3_pawn_count, p3_rank), p3_pawn_weight_bytes),
+        (SECTION_P3_CONTEXT_WEIGHT, TYPE_I8, (p3_context_count, p3_rank), p3_context_weight_bytes),
+        (
+            SECTION_P3_L1_WEIGHT,
+            TYPE_I8,
+            (output_bucket_count, 4 * p3_rank, dense1_size),
+            p3_l1_weight_bytes,
+        ),
+    ]
+    type_sizes = {TYPE_I8: 1, TYPE_I16: 2, TYPE_I32: 4}
+    for section_id, element_type, dimensions, payload in sections:
+        expected = type_sizes[element_type]
+        for dimension in dimensions:
+            expected *= dimension
+        if len(payload) != expected:
+            raise ValueError(f"section {section_id} has {len(payload)} bytes, expected {expected}")
+
+    header = bytearray(V8_HEADER_BYTES)
+    pos = 0
+
+    def put(fmt: str, *values) -> None:
+        nonlocal pos
+        struct.pack_into(fmt, header, pos, *values)
+        pos += struct.calcsize(fmt)
+
+    header[:8] = MAGIC_V9
+    pos = 8
+    put("<H", FORMAT_VERSION_V9)
+    put("<H", V8_HEADER_BYTES)
+    put("<H", len(sections))
+    put("<H", V8_SECTION_ENTRY_BYTES)
+    put("<I", 0)
+    put("<H", V9_ARCH_PAIRWISE_MLP_P3)
+    put("<H", FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1)
+    put("<H", input_bucket_count)
+    put("<H", output_bucket_count)
+    put("<H", ft_hidden_size)
+    put("<H", dense1_size)
+    put("<H", dense2_size)
+    put("<B", ACTIVATION_RELU)
+    put("<B", POOL_PAIRWISE_PRODUCT)
+    put("<B", DENSE1_DUAL_CSCRELU)
+    put("<B", DENSE2_SCRELU)
+    put("<B", SELECTOR_MATERIAL)
+    pos += 3
+    put("<H", q0)
+    put("<H", pool_quant)
+    put("<H", q)
+    put("<H", scale)
+    put("<I", psq_input_size)
+    put("<I", FULL_THREATS_V1_COUNT)
+    put("<H", FULL_THREATS_V1_SCHEME_ID)
+    put("<B", TYPE_I16)
+    put("<B", TYPE_I8)
+    put("<H", threat_quant)
+    put("<B", TYPE_I32)
+    pos += 3
+    header[pos : pos + 64] = bytes(int(value) for value in input_bucket_layout_64)
+    pos += 64
+    header[pos : pos + 32] = bytes.fromhex(FULL_THREATS_V1_PACKING_SHA256)
+    pos += 32
+    put("<I", psq_abs_bound)
+    put("<I", threat_abs_bound)
+    hash_offset = pos
+    if hash_offset != V8_HASH_OFFSET:
+        raise AssertionError(f"SYKNNUE9 hash field moved to {hash_offset}")
+    pos += 32
+    put("<H", p3_rank)
+    put("<H", p3_pawn_count)
+    put("<H", p3_context_count)
+    put("<H", p3_quant)
+    put("<B", p3_activation_shift)
+    pos += 3
+    put("<I", p3_l1_abs_bound)
+    pos += 4
+    if pos != V8_HEADER_BYTES:
+        raise AssertionError(f"SYKNNUE9 header construction ended at {pos}")
 
     table = bytearray(len(sections) * V8_SECTION_ENTRY_BYTES)
     payload_start = _align_up(V8_HEADER_BYTES + len(table), 64)

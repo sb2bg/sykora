@@ -14,6 +14,9 @@ DEFAULT_REMOTE = "https://github.com/jw1912/bullet.git"
 PINNED_COMMIT = "4e9317ffb07ee01b3ae5202d083526fc1d90fa2f"
 PATCHES = (
     Path(__file__).resolve().parent / "patches" / "weight_clip_ranges.patch",
+    Path(__file__).resolve().parent / "patches" / "p3_anova_core.patch",
+    Path(__file__).resolve().parent / "patches" / "p3_anova_cpu.patch",
+    Path(__file__).resolve().parent / "patches" / "p3_anova_cuda.patch",
 )
 
 

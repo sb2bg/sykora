@@ -96,8 +96,9 @@ Sykora is tested on the CCRL [Blitz](https://computerchess.org.uk/404/) and [40/
 
 - **NNUE evaluation** (default, embedded in binary):
   - Embedded `SYKNNUE8` T1024: factorised mirrored king-bucketed sparse inputs (10 buckets), H=1024 feature transformer, `full_threats_v1`, and eight material heads
-  - External `SYKNNUE8` T1024/T768 support through `EvalFile`
+  - External `SYKNNUE8` T1024/T768 and `SYKNNUE9` T1024 P³-ANOVA support through `EvalFile`
   - Incremental PSQ and threat accumulation with pairwise product pooling fused into the CReLU/CSReLU dense tail
+  - Optional rank-32 pawn–pawn–piece adapter with maintained same-file/adjacent-file pair moments
   - Factorised training: shared `768 → H` factoriser merged into per-bucket weights at export
   - Trained on Stockfish binpack data via the Bullet trainer
   - Blendable with classical eval via `NnueBlend` (default: `100` = pure NNUE)
@@ -281,7 +282,7 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora embeds the final `v8_t1024_broad_20260724T205147Z` `SYKNNUE8` threat-aware pairwise-MLP network. External `EvalFile` overrides must also use the registered SYKNNUE8 T1024 or T768 format. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
+Sykora embeds the final `v8_t1024_broad_20260724T205147Z` `SYKNNUE8` threat-aware pairwise-MLP network. External `EvalFile` overrides may use registered SYKNNUE8 T1024/T768 nets or SYKNNUE9 T1024 rank-32 P³-ANOVA nets. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
 
 The key training requirement is **factorisation**: a shared `768 → H` PSQ matrix is trained across all king buckets and merged into each bucket's residual weights at export time. V8 preserves that sample-sharing mechanism and adds the frozen `full_threats_v1` vocabulary.
 
@@ -293,7 +294,7 @@ The key training requirement is **factorisation**: a shared `768 → H` PSQ matr
 - To use a different net, set `EvalFile` to the path of an external `.sknnue` file.
 - `NnueScale` scales the NNUE score before it is fed into the search.
 
-For the deployed threat architecture and experiment contract, see `specs/syknnue8_spec.md`. The v7 specification is retained as historical design documentation.
+For the deployed threat architecture and experiment contract, see `specs/syknnue8_spec.md`. The P³ extension and v9 container are documented in `specs/syknnue9_p3_spec.md`.
 
 ### Training Pipeline
 
@@ -335,6 +336,11 @@ python utils/nnue/bullet/checkpoint_raw_to_npz.py \
 python utils/nnue/bullet/export_npz_to_syk8.py \
   --input checkpoint.npz \
   --output-net output.sknnue
+
+# For a pairwise-mlp-p3 / syk9 checkpoint:
+python utils/nnue/bullet/export_npz_to_syk9.py \
+  --input checkpoint.npz \
+  --output-net output-p3.sknnue
 ```
 
 ### Embedding a New Net

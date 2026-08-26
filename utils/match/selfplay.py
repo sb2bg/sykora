@@ -176,7 +176,9 @@ def load_openings(spec: str, shuffle: bool, seed: int) -> List[List[str]]:
     return valid_openings
 
 
-def build_limit(movetime_ms: int, depth: Optional[int]) -> chess.engine.Limit:
+def build_limit(movetime_ms: int, depth: Optional[int], nodes: Optional[int]) -> chess.engine.Limit:
+    if nodes is not None:
+        return chess.engine.Limit(nodes=nodes)
     if depth is not None:
         return chess.engine.Limit(time=movetime_ms / 1000.0, depth=depth)
     return chess.engine.Limit(time=movetime_ms / 1000.0)
@@ -454,6 +456,7 @@ def make_summary(
             "games": args.games,
             "movetime_ms": args.movetime_ms,
             "depth": args.depth,
+            "nodes": args.nodes,
             "game_time_ms": args.game_time_ms,
             "inc_ms": args.inc_ms,
             "openings": args.openings,
@@ -521,6 +524,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional fixed depth limit",
     )
+    parser.add_argument(
+        "--nodes",
+        type=int,
+        default=None,
+        help="Optional fixed node limit per move",
+    )
 
     parser.add_argument(
         "--openings",
@@ -567,14 +576,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--movetime-ms must be > 0")
     if args.depth is not None and args.depth <= 0:
         parser.error("--depth must be > 0")
+    if args.nodes is not None and args.nodes <= 0:
+        parser.error("--nodes must be > 0")
     if args.max_plies <= 0:
         parser.error("--max-plies must be > 0")
     if args.game_time_ms is not None and args.game_time_ms <= 0:
         parser.error("--game-time-ms must be > 0")
     if args.inc_ms < 0:
         parser.error("--inc-ms must be >= 0")
-    if args.game_time_ms is not None and args.depth is not None:
-        parser.error("--game-time-ms and --depth cannot be used together")
+    if args.game_time_ms is not None and (args.depth is not None or args.nodes is not None):
+        parser.error("--game-time-ms cannot be combined with --depth or --nodes")
+    if args.depth is not None and args.nodes is not None:
+        parser.error("--depth and --nodes cannot be used together")
     if args.threads is not None and args.threads <= 0:
         parser.error("--threads must be > 0")
     if args.hash_mb is not None and args.hash_mb <= 0:
@@ -596,7 +609,7 @@ def run_match(args: argparse.Namespace) -> MatchResult:
         if args.game_time_ms is not None
         else None
     )
-    limit = None if clock is not None else build_limit(args.movetime_ms, args.depth)
+    limit = None if clock is not None else build_limit(args.movetime_ms, args.depth, args.nodes)
 
     engine1_opts = parse_uci_options(args.engine1_opt)
     engine2_opts = parse_uci_options(args.engine2_opt)
@@ -619,6 +632,7 @@ def run_match(args: argparse.Namespace) -> MatchResult:
             print(
                 f"Games: {args.games} | movetime: {args.movetime_ms}ms"
                 + (f" | depth: {args.depth}" if args.depth else "")
+                + (f" | nodes: {args.nodes}" if args.nodes else "")
             )
         else:
             print(

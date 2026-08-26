@@ -13,8 +13,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import struct
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import chess
@@ -27,6 +30,7 @@ if str(UTILS_NNUE_DIR) not in sys.path:
 from common import (  # noqa: E402
     FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1,
     MAGIC_V8,
+    MAGIC_V9,
     OUTPUT_BUCKET_SCHEME_MATERIAL,
     SECTION_FT_BIAS,
     SECTION_FT_WEIGHT,
@@ -36,6 +40,9 @@ from common import (  # noqa: E402
     SECTION_L2_WEIGHT,
     SECTION_OUT_BIAS,
     SECTION_OUT_WEIGHT,
+    SECTION_P3_CONTEXT_WEIGHT,
+    SECTION_P3_L1_WEIGHT,
+    SECTION_P3_PAWN_WEIGHT,
     SECTION_THREAT_WEIGHT,
     board_feature_indices,
     read_syk_nnue_v8,
@@ -116,6 +123,20 @@ def reference_eval(net: dict, tensors: dict, fen: str) -> int:
 
     bucket = output_bucket(net, board)
     l1 = pooled @ tensors[SECTION_L1_WEIGHT][bucket] + tensors[SECTION_L1_BIAS][bucket]
+    if SECTION_P3_PAWN_WEIGHT in tensors:
+        white_p3 = p3_features(net, tensors, board, True)
+        black_p3 = p3_features(net, tensors, board, False)
+        p3 = np.concatenate(
+            (white_p3, black_p3) if stm_is_white else (black_p3, white_p3)
+        )
+        p3 = np.asarray(
+            [
+                max(-128, min(127, div_round_nearest_signed(int(value), 1 << net["p3_activation_shift"])))
+                for value in p3
+            ],
+            dtype=np.int64,
+        )
+        l1 += p3 @ tensors[SECTION_P3_L1_WEIGHT][bucket]
     l1 = np.asarray(
         [div_round_nearest_signed(int(value), pool_quant) for value in l1],
         dtype=np.int64,
@@ -134,6 +155,166 @@ def reference_eval(net: dict, tensors: dict, fen: str) -> int:
         tensors[SECTION_OUT_BIAS][bucket]
     )
     return div_round_nearest_signed(raw * net["scale"], q * q)
+
+
+def p3_identity(board: chess.Board, perspective_is_white: bool, square: int, item) -> tuple[int, int]:
+    sq = square if perspective_is_white else square ^ 56
+    king_sq = board.king(chess.WHITE if perspective_is_white else chess.BLACK)
+    if king_sq is None:
+        raise ValueError("board must contain both kings")
+    king_sq = king_sq if perspective_is_white else king_sq ^ 56
+    relative_white = item.color if perspective_is_white else not item.color
+    side = 0 if relative_white == chess.WHITE else 1
+    if king_sq % 8 > 3:
+        sq ^= 7
+    kind = item.piece_type - 1
+    identity = side * 64 + sq if kind == 0 else (side * 5 + kind - 1) * 64 + sq
+    return identity, sq % 8
+
+
+def p3_features(net: dict, tensors: dict, board: chess.Board, perspective_is_white: bool):
+    import numpy as np
+
+    rank = net["p3_rank"]
+    pawn = tensors[SECTION_P3_PAWN_WEIGHT]
+    context_weights = tensors[SECTION_P3_CONTEXT_WEIGHT]
+    sums = np.zeros((8, rank), dtype=np.int64)
+    squares = np.zeros((8, rank), dtype=np.int64)
+    context = np.zeros(rank, dtype=np.int64)
+    for square, item in board.piece_map().items():
+        identity, file = p3_identity(board, perspective_is_white, square, item)
+        if item.piece_type == chess.PAWN:
+            row = pawn[identity]
+            sums[file] += row
+            squares[file] += row * row
+        else:
+            context += context_weights[identity]
+    same = ((sums * sums - squares).sum(axis=0)) // 2
+    adjacent = (sums[:-1] * sums[1:]).sum(axis=0)
+    return np.concatenate((same * context, adjacent * context))
+
+
+def read_syk_nnue_v9_for_parity(path: Path) -> dict:
+    """Read v9 tensors; the engine performs the authoritative strict validation."""
+    data = Path(path).read_bytes()
+    if len(data) < 224 or data[:8] != MAGIC_V9:
+        raise ValueError("not a SYKNNUE9 net")
+    pos = 8
+
+    def take(fmt: str):
+        nonlocal pos
+        values = struct.unpack_from(fmt, data, pos)
+        pos += struct.calcsize(fmt)
+        return values[0] if len(values) == 1 else values
+
+    version = take("<H")
+    header_bytes = take("<H")
+    section_count = take("<H")
+    section_entry_bytes = take("<H")
+    flags = take("<I")
+    architecture = take("<H")
+    feature_set = take("<H")
+    input_bucket_count = take("<H")
+    output_bucket_count = take("<H")
+    h = take("<H")
+    d1 = take("<H")
+    d2 = take("<H")
+    activation_ids = tuple(data[pos : pos + 5])
+    pos += 8
+    q0 = take("<H")
+    pool_quant = take("<H")
+    q = take("<H")
+    scale = take("<H")
+    psq_feature_count = take("<I")
+    threat_feature_count = take("<I")
+    threat_scheme_id = take("<H")
+    pos += 2
+    threat_quant = take("<H")
+    pos += 4
+    bucket_layout = list(data[pos : pos + 64])
+    pos += 64
+    packing_hash = data[pos : pos + 32]
+    pos += 32
+    psq_abs_bound = take("<I")
+    threat_abs_bound = take("<I")
+    expected_hash = data[pos : pos + 32]
+    pos += 32
+    p3_rank = take("<H")
+    p3_pawn_count = take("<H")
+    p3_context_count = take("<H")
+    p3_quant = take("<H")
+    p3_activation_shift = take("<B")
+    pos += 3
+    p3_l1_abs_bound = take("<I")
+    pos += 4
+    if (
+        (version, header_bytes, section_count, section_entry_bytes, flags, architecture)
+        != (9, 224, 12, 48, 0, 3)
+        or pos != 224
+    ):
+        raise ValueError("malformed SYKNNUE9 header")
+    hasher = hashlib.sha256()
+    hasher.update(data[:172])
+    hasher.update(b"\0" * 32)
+    hasher.update(data[204:])
+    if hasher.digest() != expected_hash:
+        raise ValueError("SYKNNUE9 content hash mismatch")
+
+    type_sizes = {1: 1, 3: 2, 4: 4}
+    sections = {}
+    previous_end = ((224 + section_count * 48 + 63) // 64) * 64
+    for index in range(section_count):
+        fields = struct.unpack_from("<HBBI4IQQII", data, 224 + index * 48)
+        section_id, element_type, rank, section_flags = fields[:4]
+        dimensions = tuple(fields[4:8])
+        offset, byte_length, crc32, reserved = fields[8:]
+        expected_length = type_sizes[element_type]
+        for dimension in dimensions[:rank]:
+            expected_length *= dimension
+        payload = data[offset : offset + byte_length]
+        if (
+            section_flags != 1
+            or reserved != 0
+            or offset < previous_end
+            or expected_length != byte_length
+            or zlib.crc32(payload) & 0xFFFFFFFF != crc32
+        ):
+            raise ValueError("malformed SYKNNUE9 section")
+        sections[section_id] = {
+            "type": element_type,
+            "shape": dimensions[:rank],
+            "payload": payload,
+        }
+        previous_end = offset + byte_length
+    return {
+        "architecture": "pairwise-mlp-p3",
+        "feature_set": feature_set,
+        "input_bucket_count": input_bucket_count,
+        "output_bucket_count": output_bucket_count,
+        "output_bucket_scheme": OUTPUT_BUCKET_SCHEME_MATERIAL,
+        "ft_hidden_size": h,
+        "dense1_size": d1,
+        "dense2_size": d2,
+        "activation_ids": activation_ids,
+        "q0": q0,
+        "threat_quant": threat_quant,
+        "pool_quant": pool_quant,
+        "q": q,
+        "scale": scale,
+        "bucket_layout_64": bucket_layout,
+        "threat_feature_count": threat_feature_count,
+        "threat_scheme_id": threat_scheme_id,
+        "threat_packing_sha256": packing_hash.hex(),
+        "psq_abs_bound": psq_abs_bound,
+        "threat_abs_bound": threat_abs_bound,
+        "p3_rank": p3_rank,
+        "p3_pawn_count": p3_pawn_count,
+        "p3_context_count": p3_context_count,
+        "p3_quant": p3_quant,
+        "p3_activation_shift": p3_activation_shift,
+        "p3_l1_abs_bound": p3_l1_abs_bound,
+        "sections": sections,
+    }
 
 
 def decode_tensors(net: dict) -> dict:
@@ -204,9 +385,12 @@ def main() -> int:
     args = parse_args()
     net_path = Path(args.net)
     magic = net_path.read_bytes()[:8]
-    if magic != MAGIC_V8:
-        raise SystemExit(f"unsupported network magic: {magic!r}; expected SYKNNUE8")
-    net = read_syk_nnue_v8(net_path)
+    if magic == MAGIC_V8:
+        net = read_syk_nnue_v8(net_path)
+    elif magic == MAGIC_V9:
+        net = read_syk_nnue_v9_for_parity(net_path)
+    else:
+        raise SystemExit(f"unsupported network magic: {magic!r}")
     tensors = decode_tensors(net)
     evaluator = lambda fen: reference_eval(net, tensors, fen)
 
