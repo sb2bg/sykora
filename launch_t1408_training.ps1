@@ -32,7 +32,7 @@ foreach ($required in @($python, $trainer, $warmStart, $validation, $parityEngin
 
 # Keep the trainer and its child processes on the sixteen E-cores. The active
 # Cute Chess launcher is restricted to logical CPUs 0-15 (the P-cores).
-(Get-Process -Id $PID).ProcessorAffinity = [IntPtr]([Int64]0xFFFF0000)
+(Get-Process -Id $PID).ProcessorAffinity = [IntPtr]([Int64]4294901760)
 
 while ($true) {
     $activeSprt = Get-CimInstance Win32_Process | Where-Object {
