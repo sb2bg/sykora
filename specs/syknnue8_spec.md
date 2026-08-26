@@ -139,8 +139,8 @@ source is evidence for the design, not code to transplant.
 | Evaluation scale | 400 | 400 |
 
 `H` must be even for pairwise pooling and divisible by every registered SIMD
-tile width. The format may allow other even widths, but only T1024 and T768
-are v8 release candidates until separately tested.
+tile width. T1408 is the post-v8 large-network experiment; T1024 and T768 are
+the original v8 release candidates.
 
 ### 4.2 PSQ contribution
 
@@ -323,6 +323,7 @@ With i16 PSQ weights and i8 threat/dense weights:
 | Candidate | Parameters | Raw tensor payload | Approx. MiB |
 | --- | ---: | ---: | ---: |
 | v7, B10/H1024, no threats | 8,005,256 | 15,871,776 bytes | 15.14 |
+| T1408, B10/H1408 | 96,497,672 | 107,313,696 bytes | 102.34 |
 | T1024, B10/H1024 | 70,182,536 | 78,049,056 bytes | 74.43 |
 | T768, B10/H768 | 52,639,112 | 58,539,296 bytes | 55.83 |
 | Later B16/H768 threat-only | 56,178,056 | 65,617,184 bytes | 62.58 |

@@ -109,7 +109,7 @@ def main() -> int:
         raise ValueError("bucket_layout_64 must contain 64 entries")
     input_size, h = ft_weights.shape
     expected_input = input_size_for_feature_set(feature_set, bucket_layout)
-    if input_size != expected_input or h not in (768, 1024) or h % 2:
+    if input_size != expected_input or h not in (768, 1024, 1408) or h % 2:
         raise ValueError("invalid SYKNNUE8 FT shape")
     if ft_bias.shape != (h,) or threat_weights.shape != (FULL_THREATS_V1_COUNT, h):
         raise ValueError("feature-transformer tensor shape mismatch")

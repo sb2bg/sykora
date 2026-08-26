@@ -60,6 +60,7 @@ def take_f32(buf, offset: int, count: int):
 def parse_network_config(run_meta: dict) -> dict:
     network = dict(run_meta.get("network", {}))
     env = run_meta.get("env", {})
+    p3 = dict(network.get("p3") or {})
     network_format = network.get("format") or env.get("SYK_NETWORK_FORMAT") or "syk7"
     architecture = network.get("architecture") or env.get("SYK_ARCHITECTURE") or "pairwise-mlp"
     if architecture not in {"pairwise-linear", "pairwise-mlp", "pairwise-mlp-p3"}:
@@ -91,8 +92,8 @@ def parse_network_config(run_meta: dict) -> dict:
         ),
         "factorised": bool(network.get("factorised", True)),
         "p3_rank": int(network.get("p3_rank") or env.get("SYK_P3_RANK") or 32),
-        "p3_pawn_count": int(network.get("p3", {}).get("pawn_feature_count", 128)),
-        "p3_context_count": int(network.get("p3", {}).get("context_feature_count", 640)),
+        "p3_pawn_count": int(p3.get("pawn_feature_count", 128)),
+        "p3_context_count": int(p3.get("context_feature_count", 640)),
     }
 
 

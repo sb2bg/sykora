@@ -96,7 +96,7 @@ Sykora is tested on the CCRL [Blitz](https://computerchess.org.uk/404/) and [40/
 
 - **NNUE evaluation** (default, embedded in binary):
   - Embedded `SYKNNUE8` T1024: factorised mirrored king-bucketed sparse inputs (10 buckets), H=1024 feature transformer, `full_threats_v1`, and eight material heads
-  - External `SYKNNUE8` T1024/T768 and `SYKNNUE9` T1024 P³-ANOVA support through `EvalFile`
+  - External `SYKNNUE8` T1408/T1024/T768 and `SYKNNUE9` T1024 P³-ANOVA support through `EvalFile`
   - Incremental PSQ and threat accumulation with pairwise product pooling fused into the CReLU/CSReLU dense tail
   - Optional rank-32 pawn–pawn–piece adapter with maintained same-file/adjacent-file pair moments
   - Factorised training: shared `768 → H` factoriser merged into per-bucket weights at export
@@ -282,7 +282,7 @@ See `history/README.md` for folder schema and the archived workflow.
 
 ## NNUE
 
-Sykora embeds the final `v8_t1024_broad_20260724T205147Z` `SYKNNUE8` threat-aware pairwise-MLP network. External `EvalFile` overrides may use registered SYKNNUE8 T1024/T768 nets or SYKNNUE9 T1024 rank-32 P³-ANOVA nets. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
+Sykora embeds the final `v8_t1024_broad_20260724T205147Z` `SYKNNUE8` threat-aware pairwise-MLP network. External `EvalFile` overrides may use registered SYKNNUE8 T1408/T1024/T768 nets or SYKNNUE9 T1024 rank-32 P³-ANOVA nets. The previous mature v3 weights remain archived in `src/net.sknnue.v3.bak`.
 
 The key training requirement is **factorisation**: a shared `768 → H` PSQ matrix is trained across all king buckets and merged into each bucket's residual weights at export time. V8 preserves that sample-sharing mechanism and adds the frozen `full_threats_v1` vocabulary.
 

@@ -571,8 +571,8 @@ fn main() {
         "SYKNNUE8 requires eight material output buckets"
     );
     assert!(
-        hl_size == 1024 || hl_size == 768,
-        "SYKNNUE8 registered widths are H=1024 (T1024) and H=768 (T768)"
+        hl_size == 1408 || hl_size == 1024 || hl_size == 768,
+        "SYKNNUE8 registered widths are H=1408 (T1408), H=1024 (T1024), and H=768 (T768)"
     );
 
     let num_input_buckets = get_num_buckets(&BUCKET_LAYOUT_V3_10);

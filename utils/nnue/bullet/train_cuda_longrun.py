@@ -345,8 +345,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--resume and --warm-start are mutually exclusive")
     if args.allow_random_v8_init and (args.resume or args.warm_start):
         raise ValueError("--allow-random-v8-init cannot be combined with resume or warm start")
-    if args.hidden not in {768, 1024}:
-        raise ValueError("registered widths are --hidden 1024 (T1024) and 768 (T768)")
+    if args.hidden not in {768, 1024, 1408}:
+        raise ValueError(
+            "registered widths are --hidden 1408 (T1408), 1024 (T1024), and 768 (T768)"
+        )
     if args.dense1 != 16 or args.dense2 != 32 or args.output_buckets != 8:
         raise ValueError("Sykora NNUE requires --dense1 16 --dense2 32 --output-buckets 8")
     if not args.resume and not args.warm_start and not args.allow_random_v8_init:
@@ -434,7 +436,12 @@ def main() -> int:
         warm_dir = run_dir / "warm_start"
         warm_start_weights = warm_dir / "weights.bin"
         warm_start_report = warm_dir / "verification.json"
-        warm_start_script = "warm_start_p3.py" if args.architecture == "pairwise-mlp-p3" else "warm_start_v8.py"
+        if args.architecture == "pairwise-mlp-p3":
+            warm_start_script = "warm_start_p3.py"
+        elif args.hidden == 1408:
+            warm_start_script = "warm_start_wide.py"
+        else:
+            warm_start_script = "warm_start_v8.py"
         warm_start_cmd = [
             sys.executable,
             str(THIS_DIR / warm_start_script),
@@ -445,6 +452,8 @@ def main() -> int:
             "--report",
             str(warm_start_report),
         ]
+        if args.hidden == 1408:
+            warm_start_cmd.extend(["--target-hidden", str(args.hidden)])
 
     repo_provenance = git_snapshot(REPO_ROOT, provenance_dir, "sykora")
     expected_bullet_diff = b"".join(patch.read_bytes() for patch in PATCHES)

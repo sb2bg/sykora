@@ -380,7 +380,8 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     if (architecture != (if (is_p3) ARCHITECTURE_PAIRWISE_MLP_P3 else ARCHITECTURE_PAIRWISE_MLP_THREATS) or
         feature_set != FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1 or
         bucket_count_u16 != 10 or output_bucket_count_u16 != 8 or
-        (if (is_p3) hidden_size != 1024 else (hidden_size != 768 and hidden_size != 1024)) or
+        (if (is_p3) hidden_size != 1024 else
+            (hidden_size != 768 and hidden_size != 1024 and hidden_size != 1408)) or
         dense1_size != 16 or dense2_size != 32)
     {
         return error.InvalidNetwork;

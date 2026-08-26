@@ -227,8 +227,8 @@ def write_syk_nnue_v8(
     input_bucket_count = num_buckets(input_bucket_layout_64)
     if input_bucket_count != 10 or output_bucket_count != 8:
         raise ValueError("SYKNNUE8 requires B=10 and O=8")
-    if ft_hidden_size not in (768, 1024) or ft_hidden_size % 2:
-        raise ValueError("SYKNNUE8 registered widths are H=768 and H=1024")
+    if ft_hidden_size not in (768, 1024, 1408) or ft_hidden_size % 2:
+        raise ValueError("SYKNNUE8 registered widths are H=768, H=1024, and H=1408")
     if dense1_size != 16 or dense2_size != 32:
         raise ValueError("SYKNNUE8 requires the registered D1=16, D2=32 tail")
     if (q0, threat_quant, pool_quant, q, scale) != (NNUE_Q0, NNUE_Q0, 128, NNUE_Q, SCALE):
@@ -596,7 +596,7 @@ def read_syk_nnue_v8(path: Path) -> dict:
         or feature_set != FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1
         or input_bucket_count != 10
         or output_bucket_count != 8
-        or h not in (768, 1024)
+        or h not in (768, 1024, 1408)
         or d1 != 16
         or d2 != 32
         or activation_ids != (0, 1, 1, 1, 1)
