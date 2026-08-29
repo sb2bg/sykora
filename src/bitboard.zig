@@ -12,6 +12,8 @@ const make_unmake = @import("board/make_unmake.zig");
 const legal_context_mod = @import("board/legal_context.zig");
 const legal_movegen = @import("board/legal_movegen.zig");
 
+pub const LegalContext = legal_context_mod.LegalContext;
+
 pub const MAX_MOVES = 256;
 
 pub const MoveList = struct {
@@ -472,8 +474,12 @@ pub const Board = struct {
 
     /// Generate all legal moves for the current position
     pub fn generateLegalMoves(self: *Self, moves: *MoveList) !void {
-        const ctx = legal_context_mod.computeLegalContext(self.board);
+        const ctx = self.computeLegalContext();
         legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .all);
+    }
+
+    pub inline fn computeLegalContext(self: *const Self) LegalContext {
+        return legal_context_mod.computeLegalContext(self.board);
     }
 
     pub const PerftStats = struct {
@@ -677,13 +683,21 @@ pub const Board = struct {
     }
 
     pub fn generateLegalCaptures(self: *Self, moves: *MoveList) void {
-        const ctx = legal_context_mod.computeLegalContext(self.board);
-        legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .captures);
+        const ctx = self.computeLegalContext();
+        self.generateLegalCapturesWithContext(moves, &ctx);
+    }
+
+    pub inline fn generateLegalCapturesWithContext(self: *Self, moves: *MoveList, ctx: *const LegalContext) void {
+        legal_movegen.generateLegalMovesFast(self.board, moves, ctx, .captures);
     }
 
     pub fn generateLegalQuietMoves(self: *Self, moves: *MoveList) void {
-        const ctx = legal_context_mod.computeLegalContext(self.board);
-        legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .quiets);
+        const ctx = self.computeLegalContext();
+        self.generateLegalQuietMovesWithContext(moves, &ctx);
+    }
+
+    pub inline fn generateLegalQuietMovesWithContext(self: *Self, moves: *MoveList, ctx: *const LegalContext) void {
+        legal_movegen.generateLegalMovesFast(self.board, moves, ctx, .quiets);
     }
 
     inline fn rankFileToIndex(rank: u8, file: u8) u8 {
@@ -820,6 +834,37 @@ pub const Board = struct {
         return buffer.toOwnedSlice(allocator);
     }
 };
+
+test "cached legal context preserves staged move generation" {
+    const positions = [_][]const u8{
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/ppp2ppp/2n5/3qp3/3P4/2N1B3/PPP2PPP/R3K2R w KQkq - 0 1",
+        "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+    };
+
+    for (positions) |position| {
+        var test_board = try Board.fromFen(position);
+        const ctx = test_board.computeLegalContext();
+
+        var direct_captures = MoveList.init();
+        var cached_captures = MoveList.init();
+        test_board.generateLegalCaptures(&direct_captures);
+        test_board.generateLegalCapturesWithContext(&cached_captures, &ctx);
+        try std.testing.expectEqual(direct_captures.count, cached_captures.count);
+        for (direct_captures.slice(), cached_captures.slice()) |direct, cached| {
+            try std.testing.expectEqual(direct.data, cached.data);
+        }
+
+        var direct_quiets = MoveList.init();
+        var cached_quiets = MoveList.init();
+        test_board.generateLegalQuietMoves(&direct_quiets);
+        test_board.generateLegalQuietMovesWithContext(&cached_quiets, &ctx);
+        try std.testing.expectEqual(direct_quiets.count, cached_quiets.count);
+        for (direct_quiets.slice(), cached_quiets.slice()) |direct, cached| {
+            try std.testing.expectEqual(direct.data, cached.data);
+        }
+    }
+}
 
 // Static attack functions - can be called without a Board instance
 pub inline fn getKnightAttacks(square: u6) u64 {

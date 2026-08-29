@@ -199,6 +199,7 @@ pub const MovePicker = struct {
     prev_continuation_key: ?u16,
     prev2_continuation_key: ?u16,
     ply: u32,
+    legal_context: ?board.LegalContext,
 
     captures: MoveList,
     quiets: MoveList,
@@ -234,6 +235,7 @@ pub const MovePicker = struct {
             .prev_continuation_key = prev_continuation_key,
             .prev2_continuation_key = prev2_continuation_key,
             .ply = ply,
+            .legal_context = null,
             .captures = MoveList.init(),
             .quiets = MoveList.init(),
             .bad_captures = MoveList.init(),
@@ -258,7 +260,8 @@ pub const MovePicker = struct {
                     }
                 },
                 .generate_captures => {
-                    self.board_ptr.generateLegalCaptures(&self.captures);
+                    self.ensureLegalContext();
+                    self.board_ptr.generateLegalCapturesWithContext(&self.captures, &self.legal_context.?);
                     self.scoreCaptures();
                     self.stage = .good_captures;
                 },
@@ -305,7 +308,7 @@ pub const MovePicker = struct {
                     self.stage = .generate_quiets;
                 },
                 .generate_quiets => {
-                    self.board_ptr.generateLegalQuietMoves(&self.quiets);
+                    self.board_ptr.generateLegalQuietMovesWithContext(&self.quiets, &self.legal_context.?);
                     self.scoreQuiets();
                     self.stage = .quiets;
                 },
@@ -340,6 +343,12 @@ pub const MovePicker = struct {
                 },
                 .done => return null,
             }
+        }
+    }
+
+    inline fn ensureLegalContext(self: *Self) void {
+        if (self.legal_context == null) {
+            self.legal_context = self.board_ptr.computeLegalContext();
         }
     }
 
