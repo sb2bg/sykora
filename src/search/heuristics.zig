@@ -68,6 +68,14 @@ pub const CounterMoveTable = struct {
     }
 };
 
+/// Apply signed history gravity. The decay term follows the current value,
+/// allowing a saturated positive cell to respond to a penalty (and vice
+/// versa) instead of becoming permanently frozen at either limit.
+pub fn gravityAdjusted(current: i32, delta: i32) i32 {
+    const next = current + delta - @divTrunc(current * @as(i32, @intCast(@abs(delta))), 16384);
+    return @max(-16384, @min(16384, next));
+}
+
 pub const HistoryTable = struct {
     scores: [2][64][64]i32,
 
@@ -84,20 +92,14 @@ pub const HistoryTable = struct {
         const c: usize = @intFromEnum(color);
         const bonus = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
-        const current = entry.*;
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        entry.* = @max(-16384, @min(16384, current + adjusted_bonus));
+        entry.* = gravityAdjusted(entry.*, bonus);
     }
 
     pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color, max_bonus: u32) void {
         const c: usize = @intFromEnum(color);
         const penalty = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
-        const current = entry.*;
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        entry.* = @max(-16384, @min(16384, current - adjusted_penalty));
+        entry.* = gravityAdjusted(entry.*, -penalty);
     }
 
     pub fn get(self: *const HistoryTable, move: Move) i32 {
@@ -202,16 +204,17 @@ pub const ContinuationHistoryTable = struct {
     }
 
     fn updateCell(cell: *i16, bonus: i32) void {
-        const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current + adjusted_bonus)));
+        cell.* = @intCast(gravityAdjusted(cell.*, bonus));
     }
 
     fn penalizeCell(cell: *i16, penalty: i32) void {
-        const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current - adjusted_penalty)));
+        cell.* = @intCast(gravityAdjusted(cell.*, -penalty));
     }
 };
+
+test "signed gravity lets saturated history recover" {
+    try std.testing.expectEqual(@as(i32, 15_584), gravityAdjusted(16_384, -400));
+    try std.testing.expectEqual(@as(i32, -15_584), gravityAdjusted(-16_384, 400));
+    try std.testing.expectEqual(@as(i32, 16_384), gravityAdjusted(16_384, 400));
+    try std.testing.expectEqual(@as(i32, -16_384), gravityAdjusted(-16_384, -400));
+}
