@@ -129,18 +129,21 @@ pub const TranspositionTable = struct {
     }
 
     pub fn resize(self: *Self, new_size_mb: usize) !void {
-        self.allocator.free(self.buckets);
         const bucket_size = @sizeOf(TTBucket);
         const num_buckets = (new_size_mb * 1024 * 1024) / bucket_size;
-        const buckets = try self.allocator.alloc(TTBucket, num_buckets);
-        for (buckets) |*bucket| {
+        const new_buckets = try self.allocator.alloc(TTBucket, num_buckets);
+        for (new_buckets) |*bucket| {
             bucket.* = TTBucket.init();
         }
-        self.buckets = buckets;
+
+        // Keep the existing table usable if the replacement allocation fails.
+        const old_buckets = self.buckets;
+        self.buckets = new_buckets;
         self.num_buckets = num_buckets;
         self.bucket_divisor_reciprocal = divisorReciprocal(@intCast(num_buckets));
         self.bucket_mask = if (std.math.isPowerOfTwo(num_buckets)) num_buckets - 1 else 0;
         self.current_age = 0;
+        self.allocator.free(old_buckets);
     }
 
     inline fn bucketIndex(self: *Self, hash: u64) usize {
@@ -340,6 +343,20 @@ test "lock-free TT stores and probes packed entries" {
     try std.testing.expectEqual(best_move.data, entry.best_move.data);
     try std.testing.expectEqual(@as(?i32, 321), entry.staticEval());
     try std.testing.expect(tt.probe(hash ^ 1) == null);
+}
+
+test "failed TT resize preserves the existing allocation" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var tt = try TranspositionTable.init(failing_allocator.allocator(), 1);
+    defer tt.deinit();
+
+    const hash: u64 = 0xCAFE_BABE_1234_5678;
+    tt.store(hash, 9, 42, .exact, Move.init(1, 18, null), -17);
+    const original_bucket_count = tt.num_buckets;
+
+    try std.testing.expectError(error.OutOfMemory, tt.resize(2));
+    try std.testing.expectEqual(original_bucket_count, tt.num_buckets);
+    try std.testing.expectEqual(@as(i32, 42), tt.probe(hash).?.score);
 }
 
 test "fast modulo matches integer remainder" {
