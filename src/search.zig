@@ -250,15 +250,15 @@ inline fn addLmpQuietMoveBonus(limit: u32, bonus: u32) u32 {
     return std.math.add(u32, limit, bonus) catch std.math.maxInt(u32);
 }
 
-inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
+inline fn speculativeSacPenalty(see_score: i32, depth: u32, hce_weight_pct: i32) i32 {
     const loss = -see_score;
     if (loss < eval.PAWN_VALUE) return 0;
 
-    // Root-only bias against dubious minor-piece-for-pawn sacs.
-    // The HCE overvalues king safety destruction from open files/missing shield pawns,
-    // making these sacs look better than they are.
+    // This correction targets the handcrafted evaluator's king-safety bias.
+    // Scale it by the HCE share so a pure NNUE search is judged by the net.
     const capped_depth: i32 = @intCast(@min(depth, 12));
-    return 60 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 4;
+    const base = 60 + @divTrunc(loss - eval.PAWN_VALUE, 2) + capped_depth * 4;
+    return @divTrunc(base * @max(0, @min(hce_weight_pct, 100)), 100);
 }
 
 // Pre-computed fixed-point LMR table. Keeping two decimal places lets the
@@ -1876,7 +1876,11 @@ pub const SearchEngine = struct {
             // Discourage speculative non-checking minor-piece sacs for pawns unless
             // search already proves concrete compensation.
             if (speculative_sac_candidate and !gives_check and !eval.isMateScore(score)) {
-                score -= speculativeSacPenalty(speculative_sac_see, search_depth);
+                const hce_weight_pct = if (self.use_nnue and self.nnue_net != null)
+                    100 - @max(0, @min(self.nnue_blend, 100))
+                else
+                    100;
+                score -= speculativeSacPenalty(speculative_sac_see, search_depth, hce_weight_pct);
             }
 
             moves_searched += 1;
@@ -2364,6 +2368,13 @@ test "rule-50 handling preserves checkmate precedence in search and qsearch" {
 
 test "search ply ceiling leaves accumulator headroom" {
     try std.testing.expect(MAX_SEARCH_PLY < ACC_STACK_SIZE);
+}
+
+test "speculative sacrifice correction follows the HCE blend" {
+    const hce_penalty = speculativeSacPenalty(-eval.PAWN_VALUE - 80, 8, 100);
+    try std.testing.expect(hce_penalty > 0);
+    try std.testing.expectEqual(@divTrunc(hce_penalty, 2), speculativeSacPenalty(-eval.PAWN_VALUE - 80, 8, 50));
+    try std.testing.expectEqual(@as(i32, 0), speculativeSacPenalty(-eval.PAWN_VALUE - 80, 8, 0));
 }
 
 test "quiet SEE detects hanging pieces without changing safe quiets" {
