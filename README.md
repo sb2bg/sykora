@@ -8,7 +8,7 @@
 
 Magic bitboards, alpha-beta with modern pruning and reductions, Lazy SMP, embedded NNUE trained via [Bullet](https://github.com/jw1912/bullet).
 
-[![Sykora CCRL badge](https://ccrl-badges.vercel.app/badge?engine=Sykora&list=4015&showList=false&showRank=true)](https://computerchess.org.uk/4040/cgi/engine_details.cgi?match_length=30&each_game=0&print=Details&each_game=0&eng=Sykora%203.1%2064-bit#Sykora_3_1_64-bit)
+[![Sykora CCRL badge](https://ccrl-badges.vercel.app/badge?engine=Sykora&list=4015&showList=false&showRank=true)](https://computerchess.org.uk/4040/cgi/engine_details.cgi?match_length=30&each_game=0&print=Details&each_game=0&eng=Sykora%204.0%2064-bit#Sykora_4_0_64-bit)
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
@@ -37,7 +37,7 @@ Sykora is tested on the CCRL [Blitz](https://computerchess.org.uk/404/) and [40/
 
 | Version               | CCRL Blitz        | CCRL 40/15 | Elo Improvement |
 | --------------------- | ----------------- | ---------- | --------------- |
-| `Sykora 4.0 64-bit`   | `3400` (estimated) | -          | `+94` (estimated) |
+| `Sykora 4.0 64-bit`   | -                 | `3455`     | `+149`          |
 | `Sykora 3.1 64-bit`   | -                 | `3306`     | `+42`           |
 | `Sykora 3.0 64-bit`   | `3264`            | -          | `+24`           |
 | `Sykora 0.2.2 64-bit` | `3240`            | `3234`     | -               |
