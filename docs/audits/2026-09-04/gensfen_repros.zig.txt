@@ -1,0 +1,11 @@
+test "audit bullet king normalization" {
+    var white = Board.startpos();
+    const wr = boardToBulletRecord(&white, 100);
+    var black = try Board.fromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+    const br = boardToBulletRecord(&black, 100);
+    std.debug.print("\nAUDIT BulletFormat white: ksq={d} opp_ksq={d} score={d}; canonical expected 4,4,100\n", .{wr.ksq,wr.opp_ksq,wr.score});
+    std.debug.print("AUDIT BulletFormat black: ksq={d} opp_ksq={d} score={d}; canonical expected 4,4,-100\n", .{br.ksq,br.opp_ksq,br.score});
+    try std.testing.expectEqual(@as(u8,60), wr.opp_ksq);
+    try std.testing.expectEqual(@as(u8,60), br.ksq);
+    try std.testing.expectEqual(@as(i16,100), br.score);
+}

@@ -1,0 +1,23 @@
+Compiler:
+0.15.2
+Repository revision:
+f93ab8f8dacd7def7fb80a1cbcfb56795eae446f
+
+Isolated diagnostics for search.zig:
+1/3 search.test.audit history opposing evidence...
+AUDIT history +16000, -100: 15997; signed gravity: 15803
+OK
+2/3 search.test.audit continuation lookup changes after make...
+AUDIT continuation before make 6000, after make 0
+OK
+3/3 search.test.audit quiescence rule fifty...
+AUDIT halfmove=100: qsearch=1061, alphaBeta=0
+OK
+All 3 tests passed.
+
+Isolated diagnostics for gensfen.zig:
+1/1 gensfen.test.audit bullet king normalization...
+AUDIT BulletFormat white: ksq=4 opp_ksq=60 score=100; canonical expected 4,4,100
+AUDIT BulletFormat black: ksq=60 opp_ksq=4 score=100; canonical expected 4,4,-100
+OK
+All 1 tests passed.

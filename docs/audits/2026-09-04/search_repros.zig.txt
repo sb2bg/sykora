@@ -1,0 +1,50 @@
+test "audit history opposing evidence" {
+    var h = HistoryTable.init();
+    const m = Move.init(12, 28, null);
+    h.scores[0][12][28] = 16000;
+    h.penalize(m, 10, .white, 490);
+    std.debug.print("\nAUDIT history +16000, -100: {d}; signed gravity: 15803\n", .{h.getForColor(m, .white)});
+    try std.testing.expectEqual(@as(i32,15997), h.getForColor(m, .white));
+    h.scores[0][12][28] = 16384;
+    h.penalize(m, 10, .white, 490);
+    try std.testing.expectEqual(@as(i32,16384), h.getForColor(m,.white));
+}
+
+test "audit continuation lookup changes after make" {
+    var b = try Board.fromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    var tt = try TranspositionTable.init(std.testing.allocator, 1);
+    defer tt.deinit();
+    var stop = std.atomic.Value(bool).init(false);
+    const s = try std.testing.allocator.create(SearchEngine);
+    defer std.testing.allocator.destroy(s);
+    s.* = try SearchEngine.init(&b, std.testing.allocator, &stop, null, &tt, false, null, 100, 100);
+    defer s.deinit();
+    const m = try Move.fromString("e2e4");
+    const prev = continuationKey(.black, .pawn, 36);
+    const curr = continuationKey(.white, .pawn, m.to());
+    s.continuation_keys[0] = prev;
+    s.continuation_history.prev_scores[prev][curr] = 6000;
+    const before = s.quietHeuristicScore(m, .white, 1);
+    const undo = b.makeMoveWithUndoUnchecked(m);
+    const after = s.quietHeuristicScore(m, .white, 1);
+    b.unmakeMoveUnchecked(m, undo);
+    std.debug.print("\nAUDIT continuation before make {d}, after make {d}\n", .{before,after});
+    try std.testing.expectEqual(@as(i32,6000), before);
+    try std.testing.expectEqual(@as(i32,0), after);
+}
+
+test "audit quiescence rule fifty" {
+    var b = try Board.fromFen("7k/8/8/8/8/8/8/KQ6 w - - 100 1");
+    var tt = try TranspositionTable.init(std.testing.allocator, 1);
+    defer tt.deinit();
+    var stop = std.atomic.Value(bool).init(false);
+    const s = try std.testing.allocator.create(SearchEngine);
+    defer std.testing.allocator.destroy(s);
+    s.* = try SearchEngine.init(&b, std.testing.allocator, &stop, null, &tt, false, null, 100, 100);
+    defer s.deinit();
+    const q = try s.quiescence(-INF, INF, 1);
+    const a = try s.alphaBeta(-INF, INF, 1, 1, true);
+    std.debug.print("\nAUDIT halfmove=100: qsearch={d}, alphaBeta={d}\n", .{q,a});
+    try std.testing.expect(q != 0);
+    try std.testing.expectEqual(@as(i32,0), a);
+}
