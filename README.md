@@ -12,7 +12,6 @@ Magic bitboards, alpha-beta with modern pruning and reductions, Lazy SMP, embedd
 [![Lichess bullet rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=bullet)](https://lichess.org/@/sykorabot/perf/bullet)
 [![Lichess blitz rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=blitz)](https://lichess.org/@/sykorabot/perf/blitz)
 [![Lichess rapid rating](https://lichess-shield.vercel.app/api?username=sykorabot&format=rapid)](https://lichess.org/@/sykorabot/perf/rapid)
-[![Release SPRT](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml/badge.svg)](https://github.com/sb2bg/sykora/actions/workflows/sprt.yml)
 
 [Play live on Lichess →](https://lichess.org/@/sykorabot)
 
@@ -283,8 +282,6 @@ python utils/history/history.py sts candidate --movetime-ms 100
 ```
 
 Every archived selfplay/SPRT run writes settings, summary JSON, stdout/stderr logs, and reproducibility metadata under `history/`.
-
-The `Release SPRT` workflow (`.github/workflows/sprt.yml`) uses the same archived `history.py sprt` path.
 
 Low-level runners under `utils/match/` remain available, but they are implementation details rather than the recommended user/agent entrypoints.
 
