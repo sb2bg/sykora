@@ -72,10 +72,10 @@ pub fn build(b: *std.Build) void {
     // Add tests for all source files
     const test_step = b.step("test", "Run unit tests");
 
-    // Test main.zig
+    // Explicit aggregation forces discovery in imported engine modules.
     const main_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
         }),

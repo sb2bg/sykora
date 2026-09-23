@@ -157,10 +157,12 @@ Sykora is tested on the CCRL [Blitz](https://computerchess.org.uk/404/) and [40/
 | `Threads`         | int    | `1`       | Search threads (1..64, Lazy SMP)                           |
 | `Hash`            | int    | `128`     | Transposition table size in MB (1..4096)                   |
 | `Move Overhead`   | int    | `30`      | Clock reserve in milliseconds (0..5000)                    |
-| `LMRScale`        | int    | `134`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
+| `LMRScale`        | int    | `140`     | Fixed-point LMR scale for OpenBench tuning (100 = 1.00)    |
 | `LMRHistoryScale` | int    | `95`      | Fixed-point LMR history influence (100 = 1.00)             |
-| `LMPMoveScale`    | int    | `96`      | Fixed-point LMP move-count scale (100 = 1.00)              |
+| `LMRFullDepthMoves` | int  | `3`       | Quiet moves searched before LMR begins (1..8)              |
+| `LMPMoveScale`    | int    | `90`      | Fixed-point LMP move-count scale (100 = 1.00)              |
 | `HistoryMaxBonus` | int    | `490`     | Maximum quiet/continuation history update                  |
+| `CheckExtension`  | int    | `2`       | Check extension mode (0=off, 1=all, 2=PV only)              |
 
 The activation function (ReLU or SCReLU) is auto-detected from the network file header.
 
@@ -194,6 +196,14 @@ zig build -Doptimize=ReleaseFast
 ```
 
 The executable lands at `zig-out/bin/sykora`. The embedded NNUE net (`src/net.sknnue`) is compiled in.
+
+The release asset `sykora-linux-aarch64` is a static musl build with NEON and
+position-independent code for AArch64 Linux and Android. Build it locally with
+Zig 0.15.2 using:
+
+```bash
+zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl -Dcpu=baseline+neon -Dpie
+```
 
 Run directly, or via the build system:
 
