@@ -6,6 +6,27 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+## [4.1] - 2026-09-22
+
+### Added
+
+- Added support for external `SYKNNUE9` P³-ANOVA networks and a larger T1408
+  training profile. The embedded default remains `SYKNNUE8`.
+
+### Changed
+
+- Optimized incremental NNUE evaluation, transposition-table access, and
+  multithreaded search accounting.
+- Reduced search tree size with targeted late-move reductions and singular
+  pruning changes, with updated UCI search defaults.
+- Made the `sykora-linux-aarch64` release asset a static musl, NEON-enabled,
+  position-independent binary for AArch64 Linux and Android.
+- Made `zig build test` discover the engine's module tests.
+
+### Fixed
+
+- Corrected the T1408 trainer affinity mask.
+
 ## [4.0] - 2026-08-02
 
 ### Added
@@ -136,7 +157,8 @@ This changelog was reconstructed from the tagged release history and the commits
 - Fixed castling, en passant, capture handling, move legality edge cases, transposition-table scoring issues, and early search stability problems.
 - Fixed cleanup and shutdown behavior around search threads, bot sessions, and Zig `0.16` compatibility.
 
-[Unreleased]: https://github.com/sb2bg/sykora/compare/v4.0...HEAD
+[Unreleased]: https://github.com/sb2bg/sykora/compare/v4.1...HEAD
+[4.1]: https://github.com/sb2bg/sykora/compare/v4.0...v4.1
 [4.0]: https://github.com/sb2bg/sykora/compare/v3.1...v4.0
 [3.1]: https://github.com/sb2bg/sykora/compare/v3.0...v3.1
 [3.0]: https://github.com/sb2bg/sykora/compare/v0.2.2...v3.0
