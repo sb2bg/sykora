@@ -16,6 +16,7 @@ const KillerMoves = heuristics.KillerMoves;
 const CounterMoveTable = heuristics.CounterMoveTable;
 const HistoryTable = heuristics.HistoryTable;
 const ContinuationHistoryTable = heuristics.ContinuationHistoryTable;
+const CorrectionHistory = heuristics.CorrectionHistory;
 const continuationKey = heuristics.continuationKey;
 const INVALID_CONTINUATION_KEY = heuristics.INVALID_CONTINUATION_KEY;
 
@@ -330,6 +331,8 @@ pub const SearchEngine = struct {
 
     const StaticEvalContext = struct {
         static_eval: i32,
+        raw_eval: i32,
+        correction_keys: CorrectionHistory.Keys,
         improving: bool,
         futile: bool,
     };
@@ -360,6 +363,7 @@ pub const SearchEngine = struct {
     history: HistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: *ContinuationHistoryTable,
+    correction_history: *CorrectionHistory,
     nodes_searched: usize,
     seldepth: u32,
     previous_move: ?Move,
@@ -409,6 +413,9 @@ pub const SearchEngine = struct {
         const continuation_history = try allocator.create(ContinuationHistoryTable);
         errdefer allocator.destroy(continuation_history);
         continuation_history.initInPlace();
+        const correction_history = try allocator.create(CorrectionHistory);
+        errdefer allocator.destroy(correction_history);
+        correction_history.initInPlace();
 
         return Self{
             .board = board_ptr,
@@ -423,6 +430,7 @@ pub const SearchEngine = struct {
             .history = HistoryTable.init(),
             .counter_moves = CounterMoveTable.init(),
             .continuation_history = continuation_history,
+            .correction_history = correction_history,
             .nodes_searched = 0,
             .seldepth = 0,
             .previous_move = null,
@@ -460,6 +468,7 @@ pub const SearchEngine = struct {
     pub fn deinit(self: *Self) void {
         self.deinitAccumulatorStack();
         self.allocator.destroy(self.continuation_history);
+        self.allocator.destroy(self.correction_history);
     }
 
     inline fn evalCacheIndex(hash: u64) usize {
@@ -661,6 +670,18 @@ pub const SearchEngine = struct {
         if (self.acc_stack != null) {
             self.acc_ply -= 1;
         }
+    }
+
+    inline fn isTacticalMove(self: *Self, move: Move) bool {
+        if (move.promotion() != null) return true;
+        const b = &self.board.board;
+        if (b.getPieceAt(move.to(), oppositeColor(b.move)) != null) return true;
+        return b.en_passant_square == move.to() and b.getPieceAt(move.from(), b.move) == .pawn;
+    }
+
+    inline fn correctEval(self: *Self, raw_eval: i32, keys: CorrectionHistory.Keys) i32 {
+        const corrected = raw_eval + self.correction_history.correction(self.board.board.move, keys);
+        return std.math.clamp(corrected, -eval.MATE_BOUND + 1, eval.MATE_BOUND - 1);
     }
 
     inline fn evaluatePosition(self: *Self) i32 {
@@ -1206,10 +1227,12 @@ pub const SearchEngine = struct {
         beta_adj: i32,
         cached_static_eval: ?i32,
     ) StaticEvalContext {
-        const static_eval = if (!in_check)
+        const raw_eval = if (!in_check)
             cached_static_eval orelse self.evaluatePosition()
         else
             -INF;
+        const correction_keys = CorrectionHistory.keys(&self.board.board);
+        const static_eval = if (!in_check) self.correctEval(raw_eval, correction_keys) else -INF;
         const improving = blk: {
             if (in_check or ply < 2 or ply >= STATIC_EVAL_STACK_SIZE) {
                 break :blk false;
@@ -1233,6 +1256,8 @@ pub const SearchEngine = struct {
         _ = beta_adj;
         return .{
             .static_eval = static_eval,
+            .raw_eval = raw_eval,
+            .correction_keys = correction_keys,
             .improving = improving,
             .futile = futile,
         };
@@ -1894,6 +1919,23 @@ pub const SearchEngine = struct {
             }
         }
 
+        if (!in_check and self.ttScoreUsable() and !eval.isMateScore(best_score)) {
+            const best_is_quiet = if (best_move) |m| !self.isTacticalMove(m) else true;
+            const failed_low = best_score <= original_alpha;
+            const failed_high = best_score >= beta_adj;
+            if (best_is_quiet and
+                !(failed_high and best_score <= static_eval) and
+                !(failed_low and best_score >= static_eval))
+            {
+                self.correction_history.update(
+                    self.board.board.move,
+                    eval_ctx.correction_keys,
+                    search_depth,
+                    best_score - static_eval,
+                );
+            }
+        }
+
         self.storeAlphaBetaResult(
             best_score,
             original_alpha,
@@ -1901,7 +1943,7 @@ pub const SearchEngine = struct {
             search_depth,
             ply,
             best_move,
-            if (in_check) null else static_eval,
+            if (in_check) null else eval_ctx.raw_eval,
         );
 
         return best_score;
@@ -2077,11 +2119,13 @@ pub const SearchEngine = struct {
 
         // Stand pat - but only when not in check
         var stand_pat: i32 = -INF;
+        var raw_eval: i32 = -INF;
         if (!in_check) {
-            stand_pat = tt_static_eval orelse self.evaluatePosition();
+            raw_eval = tt_static_eval orelse self.evaluatePosition();
+            stand_pat = self.correctEval(raw_eval, CorrectionHistory.keys(&self.board.board));
 
             if (stand_pat >= beta) {
-                self.storeQuiescenceResult(stand_pat, original_alpha, beta, ply, tt_move, stand_pat);
+                self.storeQuiescenceResult(stand_pat, original_alpha, beta, ply, tt_move, raw_eval);
                 return beta;
             }
             if (alpha < stand_pat) {
@@ -2172,7 +2216,7 @@ pub const SearchEngine = struct {
                     beta,
                     ply,
                     move,
-                    if (in_check) null else stand_pat,
+                    if (in_check) null else raw_eval,
                 );
                 return beta;
             }
@@ -2188,7 +2232,7 @@ pub const SearchEngine = struct {
             beta,
             ply,
             best_move,
-            if (in_check) null else stand_pat,
+            if (in_check) null else raw_eval,
         );
         return alpha;
     }

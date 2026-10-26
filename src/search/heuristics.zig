@@ -208,6 +208,84 @@ pub const ContinuationHistoryTable = struct {
     }
 };
 
+pub const CORRECTION_SIZE = 16384;
+const CORRECTION_GRAIN = 256;
+const CORRECTION_WEIGHT_SCALE = 256;
+const CORRECTION_MAX = 64 * CORRECTION_GRAIN;
+
+/// Learns the residual between searched scores and static eval, keyed by pawn
+/// structure and by each side's non-pawn placement.
+pub const CorrectionHistory = struct {
+    pawn: [2][CORRECTION_SIZE]i16,
+    non_pawn: [2][2][CORRECTION_SIZE]i16,
+
+    pub fn initInPlace(self: *CorrectionHistory) void {
+        @memset(std.mem.asBytes(self), 0);
+    }
+
+    pub const Keys = struct {
+        pawn: u64,
+        non_pawn: [2]u64,
+    };
+
+    pub fn keys(b: anytype) Keys {
+        const pawns = b.getKindBitboard(.pawn);
+        const white = b.getColorBitboard(.white);
+        const black = b.getColorBitboard(.black);
+        const non_pawn = ~pawns;
+        return .{
+            .pawn = mix(pawns & white) ^ mix((pawns & black) ^ 0x9E3779B97F4A7C15),
+            .non_pawn = .{
+                pieceSetKey(b, white & non_pawn),
+                pieceSetKey(b, black & non_pawn),
+            },
+        };
+    }
+
+    fn pieceSetKey(b: anytype, side: u64) u64 {
+        var key: u64 = 0;
+        inline for (.{ .knight, .bishop, .rook, .queen, .king }, 0..) |kind, i| {
+            key ^= mix((side & b.getKindBitboard(kind)) +% @as(u64, i + 1) *% 0xD1B54A32D192ED03);
+        }
+        return key;
+    }
+
+    inline fn mix(x: u64) u64 {
+        var z = x +% 0x9E3779B97F4A7C15;
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        return z ^ (z >> 31);
+    }
+
+    inline fn index(key: u64) usize {
+        return @intCast(key & (CORRECTION_SIZE - 1));
+    }
+
+    pub fn correction(self: *const CorrectionHistory, stm: piece.Color, k: Keys) i32 {
+        const c = @intFromEnum(stm);
+        const pawn_entry = &self.pawn[c][index(k.pawn)];
+        const white_entry = &self.non_pawn[c][0][index(k.non_pawn[0])];
+        const black_entry = &self.non_pawn[c][1][index(k.non_pawn[1])];
+        const sum = 2 * @as(i32, pawn_entry.*) + @as(i32, white_entry.*) + @as(i32, black_entry.*);
+        return @divTrunc(sum, 2 * CORRECTION_GRAIN);
+    }
+
+    pub fn update(self: *CorrectionHistory, stm: piece.Color, k: Keys, depth: u32, diff: i32) void {
+        const c = @intFromEnum(stm);
+        const scaled = std.math.clamp(diff * CORRECTION_GRAIN, -CORRECTION_MAX, CORRECTION_MAX);
+        const weight: i32 = @intCast(@min(depth + 1, 16));
+        updateCell(&self.pawn[c][index(k.pawn)], scaled, weight);
+        updateCell(&self.non_pawn[c][0][index(k.non_pawn[0])], scaled, weight);
+        updateCell(&self.non_pawn[c][1][index(k.non_pawn[1])], scaled, weight);
+    }
+
+    fn updateCell(cell: *i16, scaled: i32, weight: i32) void {
+        const current = @as(i32, cell.*);
+        const next = @divTrunc(current * (CORRECTION_WEIGHT_SCALE - weight) + scaled * weight, CORRECTION_WEIGHT_SCALE);
+        cell.* = @intCast(std.math.clamp(next, -CORRECTION_MAX, CORRECTION_MAX));
+    }
+};
+
 // Signed evidence must pull saturated history back toward the opposite sign.
 fn historyGravity(current: i32, bonus: i32) i32 {
     const bounded = std.math.clamp(bonus, -16384, 16384);
