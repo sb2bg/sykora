@@ -21,6 +21,15 @@ pub fn build(b: *std.Build) void {
     );
 
     const pie = b.option(bool, "pie", "Build a position-independent executable");
+    const evalfile = b.option(
+        []const u8,
+        "evalfile",
+        "Embed this NNUE file instead of src/net.sknnue",
+    );
+    const embedded_net: std.Build.LazyPath = if (evalfile) |path|
+        .{ .cwd_relative = path }
+    else
+        b.path("src/net.sknnue");
 
     const exe = b.addExecutable(.{
         .name = "sykora",
@@ -31,6 +40,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.pie = pie;
+    exe.root_module.addAnonymousImport("embedded_net", .{ .root_source_file = embedded_net });
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -80,6 +90,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    main_tests.root_module.addAnonymousImport("embedded_net", .{ .root_source_file = embedded_net });
     const run_main_tests = b.addRunArtifact(main_tests);
     test_step.dependOn(&run_main_tests.step);
 }
