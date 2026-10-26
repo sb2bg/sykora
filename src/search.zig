@@ -99,7 +99,7 @@ const SEE_CAPTURE_SCALE: i32 = 128;
 
 const INF: i32 = 32000;
 const DRAW_SCORE: i32 = 0;
-const PAWN_ENDGAME_ROOT_EXTENSION: u32 = 1;
+const PAWN_ENDGAME_ROOT_EXTENSION: i32 = 1;
 const STOP_CHECK_INTERVAL: u32 = 1024;
 
 fn elapsedMs(start: std.time.Instant) i64 {
@@ -296,6 +296,8 @@ const SINGULAR_REDUCTION: u32 = 2;
 const SINGULAR_MARGIN_BASE_CP: i32 = 30;
 const SINGULAR_MARGIN_PER_PLY_CP: i32 = 25;
 const SINGULAR_MULTICUT_MIN_BEATERS: u32 = 2;
+const SINGULAR_DOUBLE_MARGIN_CP: i32 = 20;
+const SINGULAR_DOUBLE_LIMIT: u32 = 6;
 
 // Futility pruning parameters
 const FUTILITY_MARGIN: i32 = 200;
@@ -324,7 +326,7 @@ pub const SearchEngine = struct {
     };
 
     const SingularResult = struct {
-        extension: u32,
+        extension: i32,
         cutoff: ?i32,
     };
 
@@ -362,6 +364,7 @@ pub const SearchEngine = struct {
     continuation_history: *ContinuationHistoryTable,
     nodes_searched: usize,
     seldepth: u32,
+    double_extensions: u32,
     previous_move: ?Move,
     continuation_keys: [MAX_PLY]u16,
     // Position history for repetition detection during search
@@ -425,6 +428,7 @@ pub const SearchEngine = struct {
             .continuation_history = continuation_history,
             .nodes_searched = 0,
             .seldepth = 0,
+            .double_extensions = 0,
             .previous_move = null,
             .continuation_keys = [_]u16{INVALID_CONTINUATION_KEY} ** MAX_PLY,
             .position_history = undefined,
@@ -797,6 +801,7 @@ pub const SearchEngine = struct {
         // Reset search state
         self.nodes_searched = 0;
         self.seldepth = 0;
+        self.double_extensions = 0;
         self.killer_moves = KillerMoves.init();
         self.history.age(); // Age history instead of clearing
         self.counter_moves.clear();
@@ -1145,6 +1150,7 @@ pub const SearchEngine = struct {
         );
 
         var beaters: u32 = 0;
+        var best_other: i32 = -INF;
         while (move_picker.next()) |move| {
             if (movesEqual(move, tt_move)) continue;
 
@@ -1176,6 +1182,7 @@ pub const SearchEngine = struct {
                 self.continuation_keys[ply] = old_continuation_key;
             }
 
+            best_other = @max(best_other, score);
             if (score >= singular_beta) {
                 beaters += 1;
                 if (beaters >= SINGULAR_MULTICUT_MIN_BEATERS and tt_bound == .lower_bound and tt_score >= beta_adj) {
@@ -1190,8 +1197,15 @@ pub const SearchEngine = struct {
             }
         }
 
+        if (self.stop_search.load(.monotonic)) return .{ .extension = 0, .cutoff = null };
+        const extension: i32 = if (beaters == 0)
+            (if (best_other < singular_beta - SINGULAR_DOUBLE_MARGIN_CP and self.double_extensions < SINGULAR_DOUBLE_LIMIT) 2 else 1)
+        else if (tt_score >= beta_adj)
+            -1
+        else
+            0;
         return .{
-            .extension = if (beaters == 0) 1 else 0,
+            .extension = extension,
             .cutoff = null,
         };
     }
@@ -1747,15 +1761,20 @@ pub const SearchEngine = struct {
                 self.position_history[self.history_count] = self.board.zobrist_hasher.zobrist_hash;
                 self.history_count += 1;
             }
-            const extension: u32 = if (ply == 0 and
+            const extension: i32 = if (ply == 0 and
                 search_depth >= 2 and
                 root_pawn_endgame)
                 PAWN_ENDGAME_ROOT_EXTENSION
-            else if (singular_extension > 0 and tt_move != null and movesEqual(move, tt_move.?))
+            else if (singular_extension != 0 and tt_move != null and movesEqual(move, tt_move.?))
                 singular_extension
             else
                 0;
-            const next_depth = search_depth - 1 + extension;
+            const next_depth: u32 = @intCast(@as(i32, @intCast(search_depth)) - 1 + extension);
+            const double_extended = extension >= 2;
+            if (double_extended) self.double_extensions += 1;
+            defer if (double_extended) {
+                self.double_extensions -= 1;
+            };
 
             var score: i32 = undefined;
 
