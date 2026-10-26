@@ -75,7 +75,7 @@ pub const Network = struct {
     p3_pawn_weights: []i8, // [128, R]
     p3_context_weights: []i8, // [640, R]
     p3_l1_weights_grouped: []i8, // [O, 4R/4, D1, 4]
-    p3_l1_corrections: [8 * 16]i32, // -128 * sum(weights), [O, D1]
+    p3_l1_corrections: [8 * 16]i32, // -128 * sum(weights) for unsigned dot inputs, [O, D1]
 
     pub fn deinit(self: *Network) void {
         self.allocator.free(self.ft_biases);
@@ -625,7 +625,7 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
                         weight_sum += weight;
                     }
                 }
-                p3_corrections[bucket * 16 + output] = -128 * weight_sum;
+                p3_corrections[bucket * 16 + output] = if (nnue_dot.signed_inputs) 0 else -128 * weight_sum;
             }
         }
     }
@@ -2271,7 +2271,11 @@ inline fn fillP3FeatureBlock(
     const rounded = (raw + half - @select(i32, raw < zero, one, zero)) >>
         @as(P3U5Vec, @splat(P3_ACTIVATION_SHIFT));
     const clipped = @min(@max(rounded, @as(P3I32Vec, @splat(-128))), @as(P3I32Vec, @splat(127)));
-    destination.* = @intCast(clipped + @as(P3I32Vec, @splat(128)));
+    if (comptime nnue_dot.signed_inputs) {
+        destination.* = @bitCast(@as(@Vector(P3_SIMD_LANES, i8), @intCast(clipped)));
+    } else {
+        destination.* = @intCast(clipped + @as(P3I32Vec, @splat(128)));
+    }
 }
 
 fn fillP3Features(
