@@ -122,10 +122,12 @@ pub fn handleLogFileChange(self: *Uci, value: []const u8) UciError!void {
 pub fn handleUseNnueChange(self: *Uci, value: []const u8) UciError!void {
     if (std.mem.eql(u8, value, "true")) {
         self.use_nnue = true;
+        self.invalidateEvaluation();
         return;
     }
     if (std.mem.eql(u8, value, "false")) {
         self.use_nnue = false;
+        self.invalidateEvaluation();
         return;
     }
     return UciError.InvalidArgument;
@@ -137,6 +139,7 @@ pub fn handleEvalFileChange(self: *Uci, value: []const u8) UciError!void {
             self.allocator.free(old_path);
             self.eval_file_path = null;
         }
+        self.invalidateEvaluation();
         self.reloadEmbeddedNetwork();
         return;
     }
@@ -158,6 +161,7 @@ pub fn handleEvalFileChange(self: *Uci, value: []const u8) UciError!void {
         return UciError.OutOfMemory;
     };
 
+    self.invalidateEvaluation();
     if (self.nnue_network) |*old_network| {
         old_network.deinit();
     }
@@ -175,6 +179,7 @@ pub fn handleNnueBlendChange(self: *Uci, value: []const u8) UciError!void {
         return UciError.InvalidArgument;
     }
     self.nnue_blend = parsed;
+    self.invalidateEvaluation();
 }
 
 pub fn handleNnueScaleChange(self: *Uci, value: []const u8) UciError!void {
@@ -183,6 +188,7 @@ pub fn handleNnueScaleChange(self: *Uci, value: []const u8) UciError!void {
         return UciError.InvalidArgument;
     }
     self.nnue_scale = parsed;
+    self.invalidateEvaluation();
 }
 
 pub fn handleThreadsChange(self: *Uci, value: []const u8) UciError!void {

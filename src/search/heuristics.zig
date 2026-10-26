@@ -3,7 +3,7 @@ const Move = board.Move;
 const piece = @import("../piece.zig");
 const std = @import("std");
 
-pub const MAX_PLY = 64;
+pub const MAX_PLY = 128;
 pub const MAX_KILLER_MOVES = 2;
 pub const CONTINUATION_KEY_COUNT = 2 * 6 * 64;
 pub const INVALID_CONTINUATION_KEY = std.math.maxInt(u16);
@@ -85,9 +85,7 @@ pub const HistoryTable = struct {
         const bonus = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
         const current = entry.*;
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        entry.* = @max(-16384, @min(16384, current + adjusted_bonus));
+        entry.* = historyGravity(current, bonus);
     }
 
     pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color, max_bonus: u32) void {
@@ -95,9 +93,7 @@ pub const HistoryTable = struct {
         const penalty = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
         const current = entry.*;
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        entry.* = @max(-16384, @min(16384, current - adjusted_penalty));
+        entry.* = historyGravity(current, -penalty);
     }
 
     pub fn get(self: *const HistoryTable, move: Move) i32 {
@@ -203,15 +199,37 @@ pub const ContinuationHistoryTable = struct {
 
     fn updateCell(cell: *i16, bonus: i32) void {
         const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_bonus = bonus - @divTrunc(bonus * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current + adjusted_bonus)));
+        cell.* = @intCast(historyGravity(current, bonus));
     }
 
     fn penalizeCell(cell: *i16, penalty: i32) void {
         const current = @as(i32, cell.*);
-        const abs_current: i32 = @intCast(@abs(current));
-        const adjusted_penalty = penalty - @divTrunc(penalty * abs_current, 16384);
-        cell.* = @intCast(@max(-16384, @min(16384, current - adjusted_penalty)));
+        cell.* = @intCast(historyGravity(current, -penalty));
     }
 };
+
+// Signed evidence must pull saturated history back toward the opposite sign.
+fn historyGravity(current: i32, bonus: i32) i32 {
+    const bounded = std.math.clamp(bonus, -16384, 16384);
+    return std.math.clamp(current + bounded - @divTrunc(current * @as(i32, @intCast(@abs(bounded))), 16384), -16384, 16384);
+}
+
+test "contradictory evidence moves saturated quiet and continuation history" {
+    const m = Move.init(12, 28, null);
+    var history = HistoryTable.init();
+    history.scores[0][12][28] = 16000;
+    history.penalize(m, 10, .white, 100);
+    try std.testing.expectEqual(@as(i32, 15803), history.getForColor(m, .white));
+    history.scores[0][12][28] = -16384;
+    history.update(m, 10, .white, 100);
+    try std.testing.expectEqual(@as(i32, -16184), history.getForColor(m, .white));
+    history.scores[0][12][28] = 16384;
+    history.penalize(m, 10, .white, 100);
+    try std.testing.expectEqual(@as(i32, 16184), history.getForColor(m, .white));
+    var cell: i16 = 16384;
+    ContinuationHistoryTable.penalizeCell(&cell, 100);
+    try std.testing.expectEqual(@as(i16, 16184), cell);
+    cell = -16384;
+    ContinuationHistoryTable.updateCell(&cell, 100);
+    try std.testing.expectEqual(@as(i16, -16184), cell);
+}

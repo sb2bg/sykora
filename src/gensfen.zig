@@ -5,6 +5,7 @@ const Move = board_mod.Move;
 const MoveList = board_mod.MoveList;
 const piece = @import("piece.zig");
 const eval = @import("evaluation.zig");
+const nnue = @import("nnue.zig");
 const search_mod = @import("search.zig");
 const SearchEngine = search_mod.SearchEngine;
 const SearchOptions = search_mod.SearchOptions;
@@ -28,10 +29,10 @@ pub const Options = struct {
 /// ------  --------  --------  -----
 /// 0-7     occ       u64       8      Occupancy bitboard
 /// 8-23    pcs       [16]u8    16     Piece nibbles (2 per byte)
-/// 24-25   score     i16       2      Eval in cp, white-relative
-/// 26      result    u8        1      0=Black win, 1=Draw, 2=White win
+/// 24-25   score     i16       2      Eval in cp, STM-relative
+/// 26      result    u8        1      0=STM loss, 1=Draw, 2=STM win
 /// 27      ksq       u8        1      STM king square
-/// 28      opp_ksq   u8        1      Opponent king square
+/// 28      opp_ksq   u8        1      Opponent king square, rank-flipped
 /// 29-31   extra     [3]u8     3      Reserved (zero)
 const BulletRecord = extern struct {
     occ: u64,
@@ -63,11 +64,20 @@ fn pieceNibble(color: piece.Color, pt: piece.Type) u4 {
 }
 
 fn boardToBulletRecord(b: *Board, score_white_cp: i16) BulletRecord {
-    const state = b.board;
+    var state = b.board;
+    const black_to_move = state.move == .black;
+    if (black_to_move) {
+        for (&state.kind_sets) |*bb| bb.* = @byteSwap(bb.*);
+        const white = @byteSwap(state.color_sets[0]);
+        state.color_sets[0] = @byteSwap(state.color_sets[1]);
+        state.color_sets[1] = white;
+        state.move = .white;
+    }
+    const oriented_score: i32 = if (black_to_move) -@as(i32, score_white_cp) else score_white_cp;
     var rec: BulletRecord = .{
         .occ = state.occupied(),
         .pcs = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-        .score = score_white_cp,
+        .score = @intCast(std.math.clamp(oriented_score, -32767, 32767)),
         .result = 1, // placeholder, set later
         .ksq = 0,
         .opp_ksq = 0,
@@ -110,7 +120,7 @@ fn boardToBulletRecord(b: *Board, score_white_cp: i16) BulletRecord {
     const stm_king_bb = state.getColorBitboard(stm) & state.getKindBitboard(.king);
     const nstm_king_bb = state.getColorBitboard(nstm) & state.getKindBitboard(.king);
     rec.ksq = @intCast(@ctz(stm_king_bb));
-    rec.opp_ksq = @intCast(@ctz(nstm_king_bb));
+    rec.opp_ksq = @as(u8, @intCast(@ctz(nstm_king_bb))) ^ 56;
 
     return rec;
 }
@@ -127,6 +137,8 @@ fn eprint(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
+    var network = try nnue.Network.loadFromBytes(allocator, nnue.EMBEDDED_NET);
+    defer network.deinit();
 
     // Open output file
     const file = try std.fs.cwd().createFile(opts.output, .{});
@@ -153,10 +165,11 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     while (game_num < opts.games) : (game_num += 1) {
         var b = Board.startpos();
         var game_hashes: [512]u64 = undefined;
-        var hash_count: usize = 0;
+        game_hashes[0] = b.zobrist_hasher.zobrist_hash;
+        var hash_count: usize = 1;
 
         // Buffer positions until game result is known
-        var positions = std.ArrayList(BulletRecord).empty;
+        var positions = std.ArrayList(struct { record: BulletRecord, black_to_move: bool }).empty;
         defer positions.deinit(allocator);
 
         // Random opening phase
@@ -215,7 +228,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 while (i < hash_count) : (i += 1) {
                     if (game_hashes[i] == current_hash) rep_count += 1;
                 }
-                if (rep_count >= 2) {
+                if (rep_count >= 3) {
                     game_result = RESULT_DRAW;
                     break;
                 }
@@ -224,7 +237,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
             // Search
             stop_flag.store(false, .seq_cst);
             var search_board = b;
-            var engine = try SearchEngine.init(&search_board, allocator, &stop_flag, null, &tt, true, null, 100, 100);
+            var engine = try SearchEngine.init(&search_board, allocator, &stop_flag, null, &tt, true, &network, 100, 100);
             defer engine.deinit();
             engine.uci_output = null;
             if (hash_count > 0) {
@@ -273,7 +286,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
                 const stm = b.board.move;
                 if (!b.isInCheck(stm)) {
                     if (random.intRangeLessThan(u32, 0, 100) < opts.sample_pct) {
-                        try positions.append(allocator, boardToBulletRecord(&b, score_white));
+                        try positions.append(allocator, .{ .record = boardToBulletRecord(&b, score_white), .black_to_move = b.board.move == .black });
                     }
                 }
             }
@@ -295,8 +308,9 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
 
         // Write all buffered positions with final game result
         const result = game_result orelse RESULT_DRAW;
-        for (positions.items) |*rec| {
-            rec.result = result;
+        for (positions.items) |*sample| {
+            const rec = &sample.record;
+            rec.result = if (sample.black_to_move) 2 - result else result;
             const bytes: *const [32]u8 = @ptrCast(rec);
             try bw.interface.writeAll(bytes);
         }
@@ -372,4 +386,27 @@ pub fn parseArgs(args: []const []const u8) !Options {
     }
 
     return opts;
+}
+
+test "Bullet records normalize side to move and opponent king square" {
+    var white = Board.startpos();
+    var black = try Board.fromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+    const w = boardToBulletRecord(&white, 100);
+    const b = boardToBulletRecord(&black, 100);
+    try std.testing.expectEqual(@as(u8, 4), w.ksq);
+    try std.testing.expectEqual(@as(u8, 4), w.opp_ksq);
+    try std.testing.expectEqual(w.occ, b.occ);
+    try std.testing.expectEqualSlices(u8, &w.pcs, &b.pcs);
+    try std.testing.expectEqual(@as(i16, -100), b.score);
+    try std.testing.expectEqual(w.ksq, b.ksq);
+    try std.testing.expectEqual(w.opp_ksq, b.opp_ksq);
+    // Asymmetric position checks piece ordering and colour/rank orientation.
+    black = try Board.fromFen("4k3/8/3p4/8/8/1Q6/8/6K1 b - - 0 1");
+    const asymmetric = boardToBulletRecord(&black, -321);
+    try std.testing.expectEqual(@as(u64, 0x4000020000080010), asymmetric.occ);
+    try std.testing.expectEqual(@as(u8, 0x05), asymmetric.pcs[0]);
+    try std.testing.expectEqual(@as(u8, 0xdc), asymmetric.pcs[1]);
+    try std.testing.expectEqual(@as(i16, 321), asymmetric.score);
+    try std.testing.expectEqual(@as(u8, 4), asymmetric.ksq);
+    try std.testing.expectEqual(@as(u8, 6), asymmetric.opp_ksq);
 }

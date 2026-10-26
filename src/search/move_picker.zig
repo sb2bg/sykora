@@ -27,11 +27,6 @@ pub inline fn seePieceValue(piece_type: piece.Type) i32 {
     };
 }
 
-const SeeAttacker = struct {
-    from_sq: u6,
-    piece_type: piece.Type,
-};
-
 inline fn attackersToSquare(b: *const board.BitBoard, square: u6, occupied: u64) u64 {
     const white = b.getColorBitboard(.white) & occupied;
     const black = b.getColorBitboard(.black) & occupied;
@@ -62,113 +57,67 @@ inline fn attackersToSquare(b: *const board.BitBoard, square: u6, occupied: u64)
     return attackers;
 }
 
-fn leastValuableAttacker(b: *const board.BitBoard, attackers: u64, color: piece.Color) ?SeeAttacker {
-    const own_attackers = attackers & b.getColorBitboard(color);
-    if (own_attackers == 0) return null;
-
+fn staticExchangeRec(b: *const board.BitBoard, square: u6, side_to_move: piece.Color, captured_value: i32) i32 {
+    const own_attackers = attackersToSquare(b, square, b.occupied()) & b.getColorBitboard(side_to_move);
+    if (own_attackers == 0) return 0;
+    const opponent = oppositeColor(side_to_move);
     const order = [_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen, .king };
-    inline for (order) |piece_type| {
-        const set = own_attackers & b.getKindBitboard(piece_type);
-        if (set != 0) {
-            return SeeAttacker{
-                .from_sq = @intCast(@ctz(set)),
-                .piece_type = piece_type,
-            };
+    for (order) |piece_type| {
+        var candidates = own_attackers & b.getKindBitboard(piece_type);
+        while (candidates != 0) {
+            const from: u6 = @intCast(@ctz(candidates));
+            candidates &= candidates - 1;
+            var next = b.*;
+            next.clearSquare(from);
+            next.clearSquare(square);
+            const promotion = piece_type == .pawn and (square / 8 == 0 or square / 8 == 7);
+            const moved_type: piece.Type = if (promotion) .queen else piece_type;
+            next.setPieceAt(square, side_to_move, moved_type);
+            const king = next.getKindBitboard(.king) & next.getColorBitboard(side_to_move);
+            if (king != 0 and (attackersToSquare(&next, @intCast(@ctz(king)), next.occupied()) & next.getColorBitboard(opponent)) != 0) {
+                continue;
+            }
+            // A legal king recapture ends the exchange: the king cannot be captured.
+            if (piece_type == .king) return captured_value;
+            const promotion_gain = if (promotion) seePieceValue(.queen) - seePieceValue(.pawn) else 0;
+            const gain = captured_value + promotion_gain - staticExchangeRec(&next, square, opponent, seePieceValue(moved_type));
+            return @max(gain, 0);
         }
     }
-
-    return null;
-}
-
-fn staticExchangeRec(
-    b: *const board.BitBoard,
-    occupied: u64,
-    square: u6,
-    side_to_move: piece.Color,
-    captured_value: i32,
-) i32 {
-    const attackers = attackersToSquare(b, square, occupied);
-    const next = leastValuableAttacker(b, attackers, side_to_move) orelse return 0;
-
-    const from_mask = @as(u64, 1) << @intCast(next.from_sq);
-    const next_occupied = occupied & ~from_mask;
-
-    const gain = captured_value - staticExchangeRec(
-        b,
-        next_occupied,
-        square,
-        oppositeColor(side_to_move),
-        seePieceValue(next.piece_type),
-    );
-    return @max(gain, 0);
+    return 0;
 }
 
 pub fn staticExchangeEvalPosition(b: *const board.BitBoard, move: Move) i32 {
     const us = b.move;
     const them = oppositeColor(us);
-    const from_sq = move.from();
-    const to_sq = move.to();
-
-    const moving_piece = b.getPieceAt(from_sq, us) orelse return 0;
-    var captured_piece = b.getPieceAt(to_sq, them);
-    const is_en_passant = moving_piece == .pawn and b.en_passant_square == to_sq and captured_piece == null;
-    if (is_en_passant) {
-        captured_piece = .pawn;
-    }
-
-    const promotion = move.promotion();
-    if (captured_piece == null and promotion == null) {
-        return 0;
-    }
-
-    var occupied = b.occupied();
-    const from_mask = @as(u64, 1) << @intCast(from_sq);
-    const to_mask = @as(u64, 1) << @intCast(to_sq);
-
-    occupied &= ~from_mask;
-    if (is_en_passant) {
-        const ep_capture_sq: u8 = if (us == .white) to_sq - 8 else to_sq + 8;
-        occupied &= ~(@as(u64, 1) << @intCast(ep_capture_sq));
-    }
-    occupied |= to_mask;
-
-    const captured_value = if (captured_piece) |cp| seePieceValue(cp) else 0;
-    const moved_value = if (promotion) |promo| seePieceValue(promo) else seePieceValue(moving_piece);
-    const promotion_gain: i32 = if (promotion != null and moving_piece == .pawn)
-        moved_value - seePieceValue(.pawn)
-    else
-        0;
-
-    const reply_gain = staticExchangeRec(b, occupied, @intCast(to_sq), them, moved_value);
-    return captured_value + promotion_gain - reply_gain;
+    const moving_piece = b.getPieceAt(move.from(), us) orelse return 0;
+    const captured_piece = b.getPieceAt(move.to(), them);
+    const en_passant = moving_piece == .pawn and b.en_passant_square == move.to() and captured_piece == null;
+    if (captured_piece == null and !en_passant and move.promotion() == null) return 0;
+    var next = b.*;
+    next.clearSquare(move.from());
+    next.clearSquare(move.to());
+    if (en_passant) next.clearSquare(if (us == .white) move.to() - 8 else move.to() + 8);
+    const moved_piece = move.promotion() orelse moving_piece;
+    next.setPieceAt(move.to(), us, moved_piece);
+    const captured_value = if (en_passant) seePieceValue(.pawn) else if (captured_piece) |cp| seePieceValue(cp) else 0;
+    const promotion_gain = if (move.promotion() != null) seePieceValue(moved_piece) - seePieceValue(.pawn) else 0;
+    return captured_value + promotion_gain - staticExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moved_piece));
 }
 
-/// Evaluate the material risk of placing a piece on an empty square.
+/// Material risk of a legal move to an empty square, including pinned replies.
 pub fn staticExchangeEvalQuietPosition(b: *const board.BitBoard, move: Move) i32 {
     const us = b.move;
     const them = oppositeColor(us);
-    const from_sq = move.from();
-    const to_sq = move.to();
-
-    const moving_piece = b.getPieceAt(from_sq, us) orelse return 0;
-    if (move.promotion() != null or b.getPieceAt(to_sq, them) != null) return 0;
-    if (moving_piece == .pawn and b.en_passant_square == to_sq) return 0;
-
-    const from_mask = @as(u64, 1) << @intCast(from_sq);
-    const to_mask = @as(u64, 1) << @intCast(to_sq);
-    const occupied = (b.occupied() & ~from_mask) | to_mask;
-    const reply_gain = staticExchangeRec(
-        b,
-        occupied,
-        @intCast(to_sq),
-        them,
-        seePieceValue(moving_piece),
-    );
-    return -reply_gain;
+    const moving_piece = b.getPieceAt(move.from(), us) orelse return 0;
+    if (moving_piece == .king or move.promotion() != null or b.getPieceAt(move.to(), them) != null) return 0;
+    if (moving_piece == .pawn and b.en_passant_square == move.to()) return 0;
+    var next = b.*;
+    next.clearSquare(move.from());
+    next.setPieceAt(move.to(), us, moving_piece);
+    return -staticExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moving_piece));
 }
 
-/// Staged move picker for efficient move ordering
-/// Generates moves lazily in stages: TT move -> Good captures -> Killers -> Quiet moves -> Bad captures
 pub const MovePicker = struct {
     const Self = @This();
 

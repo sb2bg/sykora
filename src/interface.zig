@@ -50,6 +50,8 @@ pub const Uci = struct {
     move_overhead_ms: u64,
     helper_threads: [smp.MAX_HELPERS]?std.Thread,
     helper_results: [smp.MAX_HELPERS]smp.HelperResult,
+    worker_engines: [smp.MAX_HELPERS + 1]?*SearchEngine,
+    worker_boards: [smp.MAX_HELPERS + 1]Board,
 
     pub fn init(stdin: std.fs.File, stdout: std.fs.File, allocator: std.mem.Allocator) !*Self {
         const uci_ptr = try allocator.create(Self);
@@ -82,6 +84,8 @@ pub const Uci = struct {
             .num_threads = 1,
             .hash_size_mb = default_hash_mb,
             .move_overhead_ms = 30,
+            .worker_engines = [_]?*SearchEngine{null} ** (smp.MAX_HELPERS + 1),
+            .worker_boards = undefined,
             .helper_threads = [_]?std.Thread{null} ** smp.MAX_HELPERS,
             .helper_results = [_]smp.HelperResult{.{ .best_move = board.Move.init(0, 0, null), .score = 0, .depth = 0, .nodes = 0 }} ** smp.MAX_HELPERS,
         };
@@ -99,6 +103,48 @@ pub const Uci = struct {
         return uci_ptr;
     }
 
+    /// Worker-owned learning survives go commands and is reset at game/config boundaries.
+    pub fn workerEngine(self: *Self, index: usize) !*SearchEngine {
+        self.worker_boards[index] = self.board;
+        if (self.worker_engines[index] == null) {
+            const engine = try self.allocator.create(SearchEngine);
+            errdefer self.allocator.destroy(engine);
+            const net: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
+            engine.* = try SearchEngine.init(
+                &self.worker_boards[index],
+                self.allocator,
+                &self.stop_search,
+                if (self.num_threads > 1) &self.search_nodes else null,
+                &self.tt,
+                self.use_nnue and net != null,
+                net,
+                self.nnue_blend,
+                self.nnue_scale,
+            );
+            self.worker_engines[index] = engine;
+        }
+        const engine = self.worker_engines[index].?;
+        engine.shared_nodes = if (self.num_threads > 1) &self.search_nodes else null;
+        engine.tuning = self.search_tuning;
+        return engine;
+    }
+
+    /// Call only once searches have joined.
+    pub fn clearWorkerState(self: *Self) void {
+        for (&self.worker_engines) |*slot| {
+            if (slot.*) |engine| {
+                engine.deinit();
+                self.allocator.destroy(engine);
+                slot.* = null;
+            }
+        }
+    }
+
+    pub fn invalidateEvaluation(self: *Self) void {
+        self.tt.clear();
+        self.clearWorkerState();
+    }
+
     pub fn reloadEmbeddedNetwork(self: *Self) void {
         if (self.nnue_network) |*network| {
             network.deinit();
@@ -113,6 +159,8 @@ pub const Uci = struct {
             thread.join();
             self.search_thread = null;
         }
+
+        self.clearWorkerState();
 
         if (self.log_file) |file| {
             file.close();
@@ -195,8 +243,10 @@ pub const Uci = struct {
                 self.board = Board.startpos();
                 self.resetPositionHistory();
                 self.tt.clear();
+                self.clearWorkerState();
             },
             .position => |pos_opts| {
+                try smp.terminateSearch(self);
                 switch (pos_opts.value) {
                     .startpos => {
                         self.board = Board.startpos();
@@ -245,6 +295,7 @@ pub const Uci = struct {
                 return error.Unimplemented;
             },
             .setoption => |opts| {
+                try smp.terminateSearch(self);
                 defer self.allocator.free(opts.name);
                 const opt_name = opts.name;
 
@@ -386,3 +437,33 @@ pub const Uci = struct {
         self.position_hash_history[self.position_hash_history.len - 1] = hash;
     }
 };
+
+test "worker histories persist across positions and reset on new games or evaluator changes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const sink = try temporary.dir.createFile("uci-output", .{ .read = true });
+    defer sink.close();
+    const uci = try Uci.init(sink, sink, std.testing.allocator);
+    defer uci.deinit();
+    try std.testing.expect(uci.nnue_network != null);
+    const main_worker = try uci.workerEngine(0);
+    main_worker.history.scores[0][12][28] = 1234;
+    const helper = try uci.workerEngine(1);
+    try std.testing.expectEqual(@as(i32, 0), helper.history.scores[0][12][28]);
+    try uci.board.makeStrMove("e2e4");
+    const reused = try uci.workerEngine(0);
+    try std.testing.expectEqual(main_worker, reused);
+    try std.testing.expectEqual(@as(i32, 1234), reused.history.scores[0][12][28]);
+    try std.testing.expectEqual(uci.board.zobrist_hasher.zobrist_hash, reused.board.zobrist_hasher.zobrist_hash);
+    const hash = uci.board.zobrist_hasher.zobrist_hash;
+    uci.tt.store(hash, 4, 123, .exact, board.Move.init(1, 18, null), 456);
+    try option_handlers.handleNnueScaleChange(uci, "400");
+    try std.testing.expectEqual(@as(i32, 400), uci.nnue_scale);
+    try std.testing.expect(uci.tt.probe(hash) == null);
+    try std.testing.expect(uci.worker_engines[0] == null and uci.worker_engines[1] == null);
+    const new_worker = try uci.workerEngine(0);
+    try std.testing.expectEqual(@as(i32, 0), new_worker.history.scores[0][12][28]);
+    try std.testing.expectEqual(@as(i32, 400), new_worker.nnue_scale);
+    try uci.handleCommand(.ucinewgame);
+    try std.testing.expect(uci.worker_engines[0] == null);
+}

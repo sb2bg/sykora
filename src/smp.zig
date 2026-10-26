@@ -6,7 +6,6 @@ const UciError = uciErr.UciError;
 const search_module = @import("search.zig");
 const SearchEngine = search_module.SearchEngine;
 const SearchOptions = search_module.SearchOptions;
-const nnue = @import("nnue.zig");
 const Uci = @import("interface.zig").Uci;
 
 pub const MAX_HELPERS = 63;
@@ -47,9 +46,6 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
     try self.writeInfoString("search thread started", .{});
     self.search_nodes.store(0, .monotonic);
 
-    const net_ptr: ?*const nnue.Network = if (self.nnue_network) |*network| network else null;
-    const use_nnue_for_search = self.use_nnue and net_ptr != null;
-
     const prior_count = self.position_hash_count;
 
     self.tt.setConcurrent(self.num_threads > 1);
@@ -66,8 +62,6 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
             self,
             i,
             go_opts,
-            net_ptr,
-            use_nnue_for_search,
             prior_count,
             start_time,
         }) catch {
@@ -77,24 +71,11 @@ pub fn search(self: *Uci, go_opts: uci_command.GoOptions, start_time: std.time.I
         };
     }
 
-    var search_board = self.board;
-    const shared_node_counter: ?*std.atomic.Value(u64) = if (self.num_threads > 1)
-        &self.search_nodes
-    else
-        null;
-    var search_engine = SearchEngine.init(
-        &search_board,
-        self.allocator,
-        &self.stop_search,
-        shared_node_counter,
-        &self.tt,
-        use_nnue_for_search,
-        net_ptr,
-        self.nnue_blend,
-        self.nnue_scale,
-    ) catch return UciError.OutOfMemory;
-    defer search_engine.deinit();
-    search_engine.tuning = self.search_tuning;
+    const search_engine = self.workerEngine(0) catch {
+        self.stop_search.store(true, .monotonic);
+        joinHelpers(self, num_helpers);
+        return UciError.OutOfMemory;
+    };
 
     search_engine.uci_output = self.stdout;
     if (prior_count > 0) {
@@ -154,28 +135,13 @@ fn helperSearch(
     self: *Uci,
     idx: usize,
     go_opts: uci_command.GoOptions,
-    net_ptr: ?*const nnue.Network,
-    use_nnue_for_search: bool,
     prior_count: usize,
     start_time: std.time.Instant,
 ) void {
-    var helper_board = self.board;
-    var search_engine = SearchEngine.init(
-        &helper_board,
-        self.allocator,
-        &self.stop_search,
-        &self.search_nodes,
-        &self.tt,
-        use_nnue_for_search,
-        net_ptr,
-        self.nnue_blend,
-        self.nnue_scale,
-    ) catch {
+    const search_engine = self.workerEngine(idx + 1) catch {
         self.helper_results[idx] = EMPTY_HELPER_RESULT;
         return;
     };
-    defer search_engine.deinit();
-    search_engine.tuning = self.search_tuning;
 
     search_engine.uci_output = null;
     if (prior_count > 0) {
@@ -184,7 +150,7 @@ fn helperSearch(
         search_engine.setGameHistory(&.{});
     }
 
-    const max_depth: u32 = if (go_opts.depth) |d| @intCast(d) else 64;
+    const max_depth: u32 = @intCast(@min(go_opts.depth orelse 64, @import("search/heuristics.zig").MAX_PLY - 1));
     const start_depth: u32 = @min(maxDepthStagger(idx), max_depth);
 
     const search_opts = SearchOptions{
