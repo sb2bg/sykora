@@ -6,7 +6,7 @@ const board = @import("bitboard.zig");
 const Board = board.Board;
 const piece = @import("piece.zig");
 
-pub const EMBEDDED_NET = @embedFile("net.sknnue");
+pub const EMBEDDED_NET = @embedFile("embedded_net");
 
 pub const PSQ_INPUT_SIZE: usize = 768; // 2 colors * 6 piece types * 64 squares
 pub const MAX_HIDDEN_SIZE: usize = 2048;
