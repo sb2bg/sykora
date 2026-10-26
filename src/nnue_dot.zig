@@ -17,6 +17,10 @@ else
     16;
 
 pub const output_lanes: comptime_int = byte_lanes / 4;
+
+/// ARM `sdot` multiplies signed bytes. Activations that can exceed 127 must be
+/// stored as signed bytes on this path instead of with an unsigned zero point.
+pub const signed_inputs = has_dotprod;
 pub const U8Vec = @Vector(byte_lanes, u8);
 pub const I8Vec = @Vector(byte_lanes, i8);
 pub const I16Vec = @Vector(byte_lanes / 2, i16);
