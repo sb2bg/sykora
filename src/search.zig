@@ -304,6 +304,7 @@ const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
 
 // Reverse futility pruning parameters
 const REVERSE_FUTILITY_MARGIN_PER_PLY: i32 = 100;
+const REVERSE_FUTILITY_MAX_DEPTH: u32 = 7;
 // Razoring parameters
 const RAZOR_MARGIN: i32 = 500;
 const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
@@ -1269,9 +1270,11 @@ pub const SearchEngine = struct {
         search_depth: u32,
         static_eval: i32,
         beta_adj: i32,
+        improving: bool,
     ) ?i32 {
-        if (!is_pv_node and !in_check and search_depth <= 5) {
-            const rfp_margin = REVERSE_FUTILITY_MARGIN_PER_PLY * @as(i32, @intCast(search_depth));
+        if (!is_pv_node and !in_check and search_depth <= REVERSE_FUTILITY_MAX_DEPTH and !eval.isMateScore(beta_adj)) {
+            const improving_plies: i32 = if (improving) 1 else 0;
+            const rfp_margin = REVERSE_FUTILITY_MARGIN_PER_PLY * (@as(i32, @intCast(search_depth)) - improving_plies);
             if (static_eval - rfp_margin >= beta_adj) {
                 return static_eval;
             }
@@ -1619,7 +1622,7 @@ pub const SearchEngine = struct {
         const improving = eval_ctx.improving;
         const futile = eval_ctx.futile;
 
-        if (tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj)) |pruned| {
+        if (tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj, improving)) |pruned| {
             return pruned;
         }
 
