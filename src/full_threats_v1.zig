@@ -23,7 +23,12 @@ pub const RelativeColour = enum(u1) {
     theirs = 1,
 };
 
-const GeometryIndices = [2][5][64][64]i16;
+/// Valid targets of one (attacker colour, type, source) and the geometry index
+/// of its first target; later targets follow in square order, so a target's
+/// index is `base + popcount(targets below it)`. 6 KB in total, so it stays in
+/// L1 where the equivalent dense [64][64] table would not.
+const GeometryRow = struct { base: u16, targets: u64 };
+const GeometryRows = [2][5][64]GeometryRow;
 const GeometryPair = struct { source: u8 = 0, target: u8 = 0 };
 const GeometryPairs = [2][5][1456]GeometryPair;
 
@@ -57,20 +62,21 @@ fn validGeometry(
     };
 }
 
-fn initGeometryIndices() GeometryIndices {
+fn initGeometryRows() GeometryRows {
     @setEvalBranchQuota(2_000_000);
-    var result = [_][5][64][64]i16{[_][64][64]i16{[_][64]i16{[_]i16{-1} ** 64} ** 64} ** 5} ** 2;
+    var result: GeometryRows = undefined;
     for (0..2) |colour_index| {
         const colour: RelativeColour = @enumFromInt(colour_index);
         for (0..5) |type_index| {
             const attacker_type: piece.Type = @enumFromInt(type_index);
-            var geometry: i16 = 0;
+            var geometry: u16 = 0;
             for (0..64) |source| {
+                var targets: u64 = 0;
                 for (0..64) |target| {
-                    if (!validGeometry(colour, attacker_type, source, target)) continue;
-                    result[colour_index][type_index][source][target] = geometry;
-                    geometry += 1;
+                    if (validGeometry(colour, attacker_type, source, target)) targets |= @as(u64, 1) << target;
                 }
+                result[colour_index][type_index][source] = .{ .base = geometry, .targets = targets };
+                geometry += @popCount(targets);
             }
             if (geometry != geometry_counts[type_index]) {
                 @compileError("full_threats_v1 geometry count mismatch");
@@ -80,7 +86,14 @@ fn initGeometryIndices() GeometryIndices {
     return result;
 }
 
-const geometry_indices = initGeometryIndices();
+const geometry_rows = initGeometryRows();
+
+inline fn geometryIndex(attacker_colour: RelativeColour, type_index: usize, source: u8, target: u8) ?u16 {
+    const row = geometry_rows[@intFromEnum(attacker_colour)][type_index][source];
+    const bit = @as(u64, 1) << @intCast(target);
+    if (row.targets & bit == 0) return null;
+    return row.base + @as(u16, @popCount(row.targets & (bit - 1)));
+}
 
 fn initGeometryPairs() GeometryPairs {
     @setEvalBranchQuota(2_000_000);
@@ -170,8 +183,7 @@ pub fn encode(
 ) ?u16 {
     if (attacker_type == .king or target_type == .king) return null;
     const type_index: usize = @intFromEnum(attacker_type);
-    const geometry = geometry_indices[@intFromEnum(attacker_colour)][type_index][source][target];
-    if (geometry < 0) return null;
+    const geometry = geometryIndex(attacker_colour, type_index, source, target) orelse return null;
     const type_rank = targetTypeRank(attacker_type, target_type) orelse return null;
     if (!structurallyReachable(
         attacker_colour,
@@ -185,7 +197,7 @@ pub fn encode(
     const types_per_colour = target_slot_counts[type_index] / 2;
     const slot = @as(usize, @intFromEnum(target_colour)) * types_per_colour + type_rank;
     const feature = @as(usize, @intFromEnum(attacker_colour)) * features_per_attacker_colour +
-        type_bases[type_index] + @as(usize, @intCast(geometry)) * target_slot_counts[type_index] + slot;
+        type_bases[type_index] + @as(usize, geometry) * target_slot_counts[type_index] + slot;
     std.debug.assert(feature < feature_count);
     return @intCast(feature);
 }
