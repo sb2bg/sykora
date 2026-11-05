@@ -2331,6 +2331,12 @@ fn addP3L1Contribution(
     }
 }
 
+/// High half of the signed 16x16 product; lowers to pmulhw / smull+shrn.
+inline fn mulHigh16(a: WeightVec, b: WeightVec) WeightVec {
+    const product = @as(I32Vec, a) * @as(I32Vec, b);
+    return @intCast(product >> @splat(16));
+}
+
 inline fn poolSplitAccumulatorBlock(
     net: *const Network,
     psq: anytype,
@@ -2343,6 +2349,18 @@ inline fn poolSplitAccumulatorBlock(
     const psq_b: *align(1) const PsqVec = @ptrCast(&psq[offset + half]);
     const threat_a: *align(1) const WeightVec = @ptrCast(&threat[offset]);
     const threat_b: *align(1) const WeightVec = @ptrCast(&threat[offset + half]);
+    if (comptime PsqVec == WeightVec) {
+        // Stay in i16 lanes. Saturation cannot change the result because the
+        // sum is clipped to [0, Q0] next, and with Q0 = 255 (enforced at load)
+        // a << 7 still fits i16, so mulhi(a << 7, b) == (a * b) >> 9 exactly.
+        comptime std.debug.assert((Q0 << 7) <= std.math.maxInt(i16));
+        const zero: WeightVec = @splat(0);
+        const max_vec: WeightVec = @splat(Q0);
+        // Explicit types: @min against a comptime bound would narrow to u8.
+        const a: WeightVec = @min(@max(psq_a.* +| threat_a.*, zero), max_vec);
+        const b: WeightVec = @min(@max(psq_b.* +| threat_b.*, zero), max_vec);
+        return @intCast(mulHigh16(a << @splat(7), b));
+    }
     const a = clampVecToActivationRange(
         @as(I32Vec, @intCast(psq_a.*)) + @as(I32Vec, @intCast(threat_a.*)),
         net.q0,
