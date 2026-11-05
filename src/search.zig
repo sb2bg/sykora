@@ -2116,11 +2116,7 @@ pub const SearchEngine = struct {
             if (moves.count == 0) return -eval.mateIn(ply);
         } else {
             self.board.generateLegalCaptures(&moves);
-            if (moves.count == 0) {
-                var quiets = MoveList.init();
-                self.board.generateLegalQuietMoves(&quiets);
-                if (quiets.count == 0) return DRAW_SCORE;
-            }
+            if (moves.count == 0 and !self.board.hasLegalQuietMove()) return DRAW_SCORE;
         }
 
         var alpha = alpha_in;

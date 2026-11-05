@@ -688,6 +688,11 @@ pub const Board = struct {
         legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .captures);
     }
 
+    pub fn hasLegalQuietMove(self: *Self) bool {
+        const ctx = legal_context_mod.computeLegalContext(self.board);
+        return legal_movegen.hasLegalQuietMove(self.board, &ctx);
+    }
+
     pub fn generateLegalQuietMoves(self: *Self, moves: *MoveList) void {
         const ctx = legal_context_mod.computeLegalContext(self.board);
         legal_movegen.generateLegalMovesFast(self.board, moves, &ctx, .quiets);

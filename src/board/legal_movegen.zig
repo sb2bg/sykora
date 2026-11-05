@@ -449,6 +449,43 @@ fn emitBlackEnPassant(b: board.BitBoard, moves: anytype, ctx: *const LegalContex
 }
 
 /// Public entry point: emit all legal moves matching `mode`.
+/// Counts appended moves without storing them.
+const CountingSink = struct {
+    moves: [1]board.Move = undefined,
+    count: usize = 0,
+
+    inline fn append(self: *CountingSink, move: board.Move) void {
+        _ = move;
+        self.count += 1;
+    }
+};
+
+/// Whether the side to move has any legal non-capture, checking piece types
+/// cheapest first and stopping at the first that has one.
+pub fn hasLegalQuietMove(b: board.BitBoard, ctx: *const LegalContext) bool {
+    var sink = CountingSink{};
+    if (ctx.checkCount() >= 2) {
+        generateKingMovesFast(b, &sink, ctx, .quiets);
+        return sink.count != 0;
+    }
+    const us = b.move;
+    const ours = b.getColorBitboard(us);
+    const enemy = b.getColorBitboard(oppositeColor(us));
+    const target = modeTarget(.quiets, ~ours, enemy, ~(ours | enemy));
+    generateKnightMovesFast(b, &sink, ctx, target);
+    if (sink.count != 0) return true;
+    generatePawnMovesFast(b, &sink, ctx, .quiets);
+    if (sink.count != 0) return true;
+    generateBishopMovesFast(b, &sink, ctx, target);
+    if (sink.count != 0) return true;
+    generateRookMovesFast(b, &sink, ctx, target);
+    if (sink.count != 0) return true;
+    generateQueenMovesFast(b, &sink, ctx, target);
+    if (sink.count != 0) return true;
+    generateKingMovesFast(b, &sink, ctx, .quiets);
+    return sink.count != 0;
+}
+
 pub fn generateLegalMovesFast(
     b: board.BitBoard,
     moves: anytype,
