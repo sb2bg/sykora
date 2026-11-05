@@ -10,6 +10,8 @@ HistoryBonusScale, int, 100, 30, 300, 13.5, 0.002
 HistoryMaxBonus, int, 490, 50, 1600, 77.5, 0.002
 CorrPawnWeight, int, 200, 0, 400, 20.0, 0.002
 CorrNonPawnWeight, int, 100, 0, 300, 15.0, 0.002
+CorrMinorWeight, int, 100, 0, 300, 15.0, 0.002
+CorrMajorWeight, int, 100, 0, 300, 15.0, 0.002
 AspDelta, int, 25, 8, 60, 2.6, 0.002
 AspWidenPct, int, 200, 130, 300, 8.5, 0.002
 RFPMargin, int, 100, 40, 200, 8.0, 0.002
