@@ -1,0 +1,4 @@
+TMNodeBase, int, 1480, 1200, 1800, 30.0, 0.002
+TMNodeScale, int, 1680, 1000, 2500, 75.0, 0.002
+TMStabilityBase, int, 1100, 900, 1400, 25.0, 0.002
+TMStabilityStep, int, 30, 0, 60, 3.0, 0.002

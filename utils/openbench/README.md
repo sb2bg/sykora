@@ -38,24 +38,30 @@ defaults. They are starting points, not promotion criteria.
 
 ## SPSA input
 
-Paste `spsa.txt` into OpenBench's SPSA Input field. Every parameter is declared
-as `int` because UCI `spin` options are integral. The three scale parameters use
-fixed point: `100` means logical `1.00`, `105` means `1.05`.
-The checked-in starting values are the latest candidate accepted by SPRT.
+Every tunable is declared once in `src/search/tuning.zig`, which drives the UCI
+spin options, their range checks, and the SPSA input. Regenerate the checked-in
+inputs after changing that table:
 
-The initial tune intentionally contains only relatively smooth search-shape
-parameters:
+```bash
+./zig-out/bin/sykora spsa > utils/openbench/spsa.txt
+./zig-out/bin/sykora spsa time > utils/openbench/spsa-time.txt
+```
 
-- `LMRScale`
-- `LMRHistoryScale`
-- `LMPMoveScale`
-- `HistoryMaxBonus`
+Paste one file into OpenBench's SPSA Input field. Every parameter is declared
+as `int` because UCI `spin` options are integral. Scale parameters use fixed
+point (`100` means `1.00`), LMR relief terms use 1/1024 ply, and margins are
+centipawns. The defaults are the latest candidate accepted by SPRT.
 
-Raw reductions, shallow-depth gates, and null-move depth thresholds are omitted.
-Their tiny discrete domains can dominate paired outcomes and contaminate every
-simultaneous SPSA gradient. Test those separately with focused SPRTs or first
-reparameterize them into a genuinely smoother search formula.
+Tunables belong to one of four groups:
 
-The supplied `C_end` values are approximately one twentieth of each allowed
-range and `R_end` is `0.002`, matching OpenBench's documented starting guidance.
-Review the resulting perturbation digest before committing distributed compute.
+- `search` (`spsa.txt`): smooth margins, scales, and reduction terms.
+- `time` (`spsa-time.txt`): adaptive soft-limit factors. Tune these separately;
+  they interact with every search parameter through depth reached.
+- `discrete`: depth gates and move-count thresholds. Their tiny integer domains
+  let rounding noise dominate simultaneous SPSA gradients, so test changes with
+  focused SPRTs instead. They remain settable over UCI for that purpose.
+- `mode`: switches such as `CheckExtension`; never tuned.
+
+`C_end` defaults to one twentieth of each allowed range and `R_end` is `0.002`,
+matching OpenBench's documented starting guidance. Review the resulting
+perturbation digest before committing distributed compute.

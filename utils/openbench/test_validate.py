@@ -17,9 +17,10 @@ SPEC.loader.exec_module(validate)
 
 class OpenBenchValidationTests(unittest.TestCase):
     def test_repository_parameters_are_valid(self):
-        parameters = validate.load_parameters(Path(__file__).with_name("spsa.txt"))
-        self.assertEqual(4, len(parameters))
-        self.assertTrue(all(parameter.kind == "int" for parameter in parameters))
+        for name in ("spsa.txt", "spsa-time.txt"):
+            parameters = validate.load_parameters(Path(__file__).with_name(name))
+            self.assertTrue(parameters)
+            self.assertTrue(all(parameter.kind == "int" for parameter in parameters))
 
     def test_parameter_names_must_be_openbench_safe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
