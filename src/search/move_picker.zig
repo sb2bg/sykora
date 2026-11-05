@@ -193,6 +193,8 @@ pub const MovePicker = struct {
     prev_continuation_key: ?u16,
     prev2_continuation_key: ?u16,
     ply: u32,
+    /// Squares the opponent attacks, for the threat-bucketed quiet history.
+    threats: u64,
 
     captures: MoveList,
     quiets: MoveList,
@@ -216,6 +218,7 @@ pub const MovePicker = struct {
         prev_continuation_key: ?u16,
         prev2_continuation_key: ?u16,
         ply: u32,
+        threats: u64,
     ) Self {
         return Self{
             .board_ptr = board_ptr,
@@ -228,6 +231,7 @@ pub const MovePicker = struct {
             .prev_continuation_key = prev_continuation_key,
             .prev2_continuation_key = prev2_continuation_key,
             .ply = ply,
+            .threats = threats,
             .captures = MoveList.init(),
             .quiets = MoveList.init(),
             .bad_captures = MoveList.init(),
@@ -368,7 +372,7 @@ pub const MovePicker = struct {
         const friendly = self.board_ptr.board.getColorBitboard(self.board_ptr.board.move);
 
         for (self.quiets.slice(), 0..) |move, i| {
-            var score = self.history.getForColor(move, self.board_ptr.board.move);
+            var score = self.history.getForColor(move, self.board_ptr.board.move, self.threats);
 
             if (self.counter_move) |cm| {
                 if (cm.from() == move.from() and cm.to() == move.to()) {

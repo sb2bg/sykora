@@ -1043,8 +1043,9 @@ pub const SearchEngine = struct {
         move: Move,
         color: piece.Color,
         ply: u32,
+        threats: u64,
     ) i32 {
-        var score = self.history.getForColor(move, color);
+        var score = self.history.getForColor(move, color, threats);
         if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
             const ctx = self.continuationContext(ply);
             score += self.continuation_history.get(
@@ -1176,6 +1177,7 @@ pub const SearchEngine = struct {
             continuation_ctx.prev,
             continuation_ctx.prev2,
             ply,
+            self.board.board.attackedBy(oppositeColor(self.board.board.move)),
         );
 
         var beaters: u32 = 0;
@@ -1494,10 +1496,11 @@ pub const SearchEngine = struct {
         color: piece.Color,
         old_previous: ?Move,
         quiets_tried: []const Move,
+        threats: u64,
     ) void {
         const bonus = self.historyBonus(search_depth);
         self.killer_moves.add(move, ply);
-        self.history.update(move, bonus, color);
+        self.history.update(move, bonus, color, threats);
 
         if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
             const ctx = self.continuationContext(ply);
@@ -1521,7 +1524,7 @@ pub const SearchEngine = struct {
 
         for (quiets_tried) |quiet| {
             if (quiet.from() != move.from() or quiet.to() != move.to()) {
-                self.history.penalize(quiet, bonus, color);
+                self.history.penalize(quiet, bonus, color, threats);
             }
         }
     }
@@ -1670,6 +1673,7 @@ pub const SearchEngine = struct {
         const killers = if (ply < MAX_PLY) &self.killer_moves.moves[ply] else &[_]Move{Move.init(0, 0, null)} ** MAX_KILLER_MOVES;
         const counter_move: ?Move = if (self.previous_move) |prev| self.counter_moves.get(prev) else null;
         const continuation_ctx = self.continuationContext(ply);
+        const threats = self.board.board.attackedBy(oppositeColor(self.board.board.move));
         var move_picker = MovePicker.init(
             self.board,
             tt_move,
@@ -1680,6 +1684,7 @@ pub const SearchEngine = struct {
             continuation_ctx.prev,
             continuation_ctx.prev2,
             ply,
+            threats,
         );
 
         var best_move: ?Move = null;
@@ -1721,7 +1726,7 @@ pub const SearchEngine = struct {
                 }
             }
 
-            const quiet_history_score = if (!is_capture and !is_promotion) self.quietHeuristicScore(move, color, ply) else 0;
+            const quiet_history_score = if (!is_capture and !is_promotion) self.quietHeuristicScore(move, color, ply, threats) else 0;
             if (!is_capture and !is_promotion) {
                 quiets_seen += 1;
                 const is_killer = self.killer_moves.isKiller(move, ply);
@@ -1944,6 +1949,7 @@ pub const SearchEngine = struct {
                         color,
                         old_previous,
                         quiets_tried[0..quiets_tried_count],
+                        threats,
                     );
                 }
                 break;
@@ -2283,6 +2289,7 @@ pub const SearchEngine = struct {
 
         const move_color = self.board.board.move;
         const opponent_color = oppositeColor(move_color);
+        var threats: ?u64 = null;
 
         for (move_slice, 0..) |move, i| {
             var score = staticExchangeEvalPosition(&self.board.board, move) * SEE_CAPTURE_SCALE;
@@ -2304,7 +2311,8 @@ pub const SearchEngine = struct {
                 score += seePieceValue(promo) * 4;
             } else {
                 // In-check quiescence can include quiet evasions.
-                score += self.history.getForColor(move, move_color);
+                if (threats == null) threats = self.board.board.attackedBy(opponent_color);
+                score += self.history.getForColor(move, move_color, threats.?);
             }
 
             scores[i] = score;

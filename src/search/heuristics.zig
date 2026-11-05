@@ -68,57 +68,54 @@ pub const CounterMoveTable = struct {
     }
 };
 
+/// Butterfly history split by whether the move leaves and/or enters a square
+/// the opponent attacks, so escaping a threat and walking into one learn
+/// separate scores.
 pub const HistoryTable = struct {
-    scores: [2][64][64]i32,
+    scores: [2][4][64][64]i32,
+
+    inline fn threatBucket(move: Move, threats: u64) usize {
+        const from_threatened: usize = @intCast((threats >> @intCast(move.from())) & 1);
+        const to_threatened: usize = @intCast((threats >> @intCast(move.to())) & 1);
+        return from_threatened * 2 + to_threatened;
+    }
 
     // Keep runtime-selected cells in lvalue context. Reading through chained
     // value indexing makes Zig 0.15 materialize the entire 16 KiB color row.
 
     pub fn init() HistoryTable {
         return HistoryTable{
-            .scores = [_][64][64]i32{[_][64]i32{[_]i32{0} ** 64} ** 64} ** 2,
+            .scores = [_][4][64][64]i32{[_][64][64]i32{[_][64]i32{[_]i32{0} ** 64} ** 64} ** 4} ** 2,
         };
     }
 
-    pub fn update(self: *HistoryTable, move: Move, bonus: i32, color: piece.Color) void {
+    pub fn update(self: *HistoryTable, move: Move, bonus: i32, color: piece.Color, threats: u64) void {
         const c: usize = @intFromEnum(color);
-        const entry = &self.scores[c][move.from()][move.to()];
+        const entry = &self.scores[c][threatBucket(move, threats)][move.from()][move.to()];
         const current = entry.*;
         entry.* = historyGravity(current, bonus);
     }
 
-    pub fn penalize(self: *HistoryTable, move: Move, penalty: i32, color: piece.Color) void {
+    pub fn penalize(self: *HistoryTable, move: Move, penalty: i32, color: piece.Color, threats: u64) void {
         const c: usize = @intFromEnum(color);
-        const entry = &self.scores[c][move.from()][move.to()];
+        const entry = &self.scores[c][threatBucket(move, threats)][move.from()][move.to()];
         const current = entry.*;
         entry.* = historyGravity(current, -penalty);
     }
 
-    pub fn get(self: *const HistoryTable, move: Move) i32 {
-        const white_entry = &self.scores[0][move.from()][move.to()];
-        const black_entry = &self.scores[1][move.from()][move.to()];
-        return white_entry.* + black_entry.*;
-    }
-
-    pub fn getForColor(self: *const HistoryTable, move: Move, color: piece.Color) i32 {
+    pub fn getForColor(self: *const HistoryTable, move: Move, color: piece.Color, threats: u64) i32 {
         const c: usize = @intFromEnum(color);
-        const entry = &self.scores[c][move.from()][move.to()];
+        const entry = &self.scores[c][threatBucket(move, threats)][move.from()][move.to()];
         return entry.*;
     }
 
     pub fn clear(self: *HistoryTable) void {
-        self.scores = [_][64][64]i32{[_][64]i32{[_]i32{0} ** 64} ** 64} ** 2;
+        @memset(std.mem.asBytes(&self.scores), 0);
     }
 
     pub fn age(self: *HistoryTable) void {
-        for (0..2) |c| {
-            for (0..64) |from| {
-                for (0..64) |to| {
-                    const entry = &self.scores[c][from][to];
-                    entry.* = @divTrunc(entry.*, 2);
-                }
-            }
-        }
+        const cells: *[2 * 4 * 64 * 64]i32 = @ptrCast(&self.scores);
+        for (cells) |*cell| cell.* = @divTrunc(cell.*, 2);
     }
 };
 
@@ -298,15 +295,15 @@ fn historyGravity(current: i32, bonus: i32) i32 {
 test "contradictory evidence moves saturated quiet and continuation history" {
     const m = Move.init(12, 28, null);
     var history = HistoryTable.init();
-    history.scores[0][12][28] = 16000;
-    history.penalize(m, 100, .white);
-    try std.testing.expectEqual(@as(i32, 15803), history.getForColor(m, .white));
-    history.scores[0][12][28] = -16384;
-    history.update(m, 100, .white);
-    try std.testing.expectEqual(@as(i32, -16184), history.getForColor(m, .white));
-    history.scores[0][12][28] = 16384;
-    history.penalize(m, 100, .white);
-    try std.testing.expectEqual(@as(i32, 16184), history.getForColor(m, .white));
+    history.scores[0][0][12][28] = 16000;
+    history.penalize(m, 100, .white, 0);
+    try std.testing.expectEqual(@as(i32, 15803), history.getForColor(m, .white, 0));
+    history.scores[0][0][12][28] = -16384;
+    history.update(m, 100, .white, 0);
+    try std.testing.expectEqual(@as(i32, -16184), history.getForColor(m, .white, 0));
+    history.scores[0][0][12][28] = 16384;
+    history.penalize(m, 100, .white, 0);
+    try std.testing.expectEqual(@as(i32, 16184), history.getForColor(m, .white, 0));
     var cell: i16 = 16384;
     ContinuationHistoryTable.penalizeCell(&cell, 100);
     try std.testing.expectEqual(@as(i16, 16184), cell);
