@@ -517,6 +517,7 @@ fn changedRelations(
     old_piece_map: *const PieceMap,
     new_piece_map: *const PieceMap,
     candidate_attackers: u64,
+    changed_squares: u64,
     builder: *FeatureChangeBuilder,
 ) void {
     var candidates = candidate_attackers;
@@ -529,7 +530,9 @@ fn changedRelations(
         const new_targets = relationTargets(new, source, new_attacker);
 
         if (piecesEqual(old_attacker, new_attacker)) {
-            var targets = old_targets | new_targets;
+            // A target attacked before and after can only change if the
+            // piece on it did, so skip the others without comparing them.
+            var targets = (old_targets ^ new_targets) | (old_targets & new_targets & changed_squares);
             while (targets != 0) {
                 const target: u8 = @intCast(@ctz(targets));
                 const target_bit = @as(u64, 1) << @intCast(target);
@@ -693,6 +696,7 @@ pub fn changedIndicesPair(
         old_piece_map,
         new_piece_map,
         candidates,
+        changedSquares(old, new),
         &builder,
     );
 
