@@ -69,7 +69,7 @@ pub const Network = struct {
     l1_biases: []i32, // [O, D1]
     l1_weights_grouped: []i8, // [O, H/4, D1, 4]
     l2_biases: []i32, // [O, D2]
-    l2_weights: []i8, // [O, 2*D1, D2]
+    l2_weights: []i8, // [O, 2*D1/4, D2, 4], regrouped at load from [O, 2*D1, D2]
     output_biases: []i32, // [O]
     output_weights: []i8, // [O, D2]
     p3_pawn_weights: []i8, // [128, R]
@@ -571,6 +571,22 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     errdefer allocator.free(l2_biases);
     const l2_weights = try allocSectionInts(i8, allocator, data, l2_weight_section);
     errdefer allocator.free(l2_weights);
+    {
+        // Group four inputs per output so L2 runs on packed dot products.
+        const ungrouped = allocator.dupe(i8, l2_weights) catch return error.OutOfMemory;
+        defer allocator.free(ungrouped);
+        for (0..8) |bucket| {
+            for (0..8) |group| {
+                for (0..32) |output| {
+                    for (0..4) |lane| {
+                        const input = group * 4 + lane;
+                        l2_weights[((bucket * 8 + group) * 32 + output) * 4 + lane] =
+                            ungrouped[(bucket * 32 + input) * 32 + output];
+                    }
+                }
+            }
+        }
+    }
     const output_biases = try allocSectionInts(i32, allocator, data, output_bias_section);
     errdefer allocator.free(output_biases);
     const output_weights = try allocSectionInts(i8, allocator, data, output_weight_section);
@@ -2344,14 +2360,21 @@ fn finishPairwiseMlpTail16x32(
         }
     }
 
-    const l2_bias_ptr: *align(1) const Dense2Vec = @ptrCast(&l2_biases[bucket * 32]);
-    var l2_sums = l2_bias_ptr.*;
-    for (0..32) |input| {
-        const weight_index = (bucket * 32 + input) * 32;
-        const weight_ptr: *align(1) const Dense2WeightVec = @ptrCast(&l2_weights[weight_index]);
-        const input_vec: Dense2Vec = @splat(dense1_activated[input]);
-        l2_sums += input_vec * @as(Dense2Vec, @intCast(weight_ptr.*));
+    // Activations lie in [0, q] with q = 64, so they fit the packed-byte
+    // dot products used by L1; i32 sums make the result exact.
+    var dense1_bytes: [32]u8 = undefined;
+    for (&dense1_bytes, dense1_activated) |*byte, value| byte.* = @intCast(value);
+    var l2_array: [32]i32 = l2_biases[bucket * 32 ..][0..32].*;
+    inline for (0..8) |group| {
+        const inputs = nnue_dot.splatGroup(dense1_bytes[group * 4 ..][0..4]);
+        inline for (0..32 / nnue_dot.output_lanes) |chunk| {
+            const output = chunk * nnue_dot.output_lanes;
+            const weights: *align(1) const nnue_dot.I8Vec = @ptrCast(&l2_weights[((bucket * 8 + group) * 32 + output) * 4]);
+            const sums: *align(1) nnue_dot.I32Vec = @ptrCast(&l2_array[output]);
+            sums.* = nnue_dot.dotAdd(sums.*, inputs, weights.*);
+        }
     }
+    const l2_sums: Dense2Vec = l2_array;
 
     var dense2_activated: Dense2Vec = undefined;
     inline for (0..8) |block| {
