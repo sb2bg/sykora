@@ -5,7 +5,8 @@ const search = @import("search.zig");
 
 pub const BenchError = error{BenchFailed};
 
-const BENCH_DEPTH: u64 = 10;
+/// Default depth; OpenBench runs `bench` without arguments.
+pub const DEFAULT_DEPTH: u64 = 10;
 const BENCH_HASH_MB: usize = 16;
 
 const POSITIONS = [_][]const u8{
@@ -20,7 +21,7 @@ const POSITIONS = [_][]const u8{
 /// Deterministic fixed-depth benchmark used by OpenBench for build identity
 /// and worker speed normalization. The final line intentionally matches the
 /// node/NPS patterns parsed by OpenBench's Client/bench.py.
-pub fn run(allocator: std.mem.Allocator) BenchError!void {
+pub fn run(allocator: std.mem.Allocator, depth: u64) BenchError!void {
     var network = nnue.Network.loadFromBytes(allocator, nnue.EMBEDDED_NET) catch return error.BenchFailed;
     defer network.deinit();
 
@@ -49,7 +50,7 @@ pub fn run(allocator: std.mem.Allocator) BenchError!void {
         ) catch return error.BenchFailed;
         defer engine.deinit();
 
-        const result = engine.search(.{ .depth = BENCH_DEPTH }) catch return error.BenchFailed;
+        const result = engine.search(.{ .depth = depth }) catch return error.BenchFailed;
         total_nodes += @intCast(result.nodes);
     }
 

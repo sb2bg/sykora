@@ -42,7 +42,12 @@ fn tryMain() MainError!void {
             return runNnueCheckFromSlice(args[2..], allocator);
         }
         if (std.mem.eql(u8, args[1], "bench")) {
-            return bench.run(allocator);
+            // An optional depth gives longer, search-dominated runs for profiling.
+            const depth = if (args.len > 2)
+                std.fmt.parseInt(u64, args[2], 10) catch return error.BenchFailed
+            else
+                bench.DEFAULT_DEPTH;
+            return bench.run(allocator, depth);
         }
         if (std.mem.eql(u8, args[1], "spsa")) {
             return printSpsaInput(args[2..]);
