@@ -2373,6 +2373,8 @@ inline fn poolSplitAccumulatorBlock(
     return @intCast(@divTrunc(a * b, divisor));
 }
 
+const L1_ACCUMULATORS = 4;
+
 fn evaluatePairwiseMlpTail16x32FromSplit(
     net: *const Network,
     us_psq: anytype,
@@ -2389,7 +2391,9 @@ fn evaluatePairwiseMlpTail16x32FromSplit(
     std.debug.assert(SIMD_LANES % 4 == 0);
     const bucket = outputBucket(net, b);
     const l1_bias_ptr: *align(1) const Dense1Vec = @ptrCast(&net.l1_biases[bucket * 16]);
-    var l1_sums = l1_bias_ptr.*;
+    // Independent partial sums break the dot-product dependency chain;
+    // integer addition makes the final reduction order irrelevant.
+    var partial_sums = [_]Dense1Vec{@splat(0)} ** L1_ACCUMULATORS;
 
     var offset: usize = 0;
     while (offset < half) : (offset += SIMD_LANES) {
@@ -2414,17 +2418,19 @@ fn evaluatePairwiseMlpTail16x32FromSplit(
                 bucket,
                 (offset + lane) / 4,
                 @ptrCast(&us_pooled[lane]),
-                &l1_sums,
+                &partial_sums[(2 * group_in_block) % L1_ACCUMULATORS],
             );
             accumulatePairwiseL1Group(
                 net,
                 bucket,
                 (half + offset + lane) / 4,
                 @ptrCast(&them_pooled[lane]),
-                &l1_sums,
+                &partial_sums[(2 * group_in_block + 1) % L1_ACCUMULATORS],
             );
         }
     }
+    var l1_sums = l1_bias_ptr.*;
+    for (partial_sums) |partial| l1_sums += partial;
     if (net.is_p3) {
         addP3L1Contribution(
             net,
