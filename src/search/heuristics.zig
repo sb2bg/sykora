@@ -205,10 +205,13 @@ const CORRECTION_WEIGHT_SCALE = 256;
 const CORRECTION_MAX = 64 * CORRECTION_GRAIN;
 
 /// Learns the residual between searched scores and static eval, keyed by pawn
-/// structure and by each side's non-pawn placement.
+/// structure, by each side's non-pawn placement, and by the minor-piece and
+/// major-piece configurations of both sides.
 pub const CorrectionHistory = struct {
     pawn: [2][CORRECTION_SIZE]i16,
     non_pawn: [2][2][CORRECTION_SIZE]i16,
+    minor: [2][CORRECTION_SIZE]i16,
+    major: [2][CORRECTION_SIZE]i16,
 
     pub fn initInPlace(self: *CorrectionHistory) void {
         @memset(std.mem.asBytes(self), 0);
@@ -217,6 +220,15 @@ pub const CorrectionHistory = struct {
     pub const Keys = struct {
         pawn: u64,
         non_pawn: [2]u64,
+        minor: u64,
+        major: u64,
+    };
+
+    pub const Weights = struct {
+        pawn: i32,
+        non_pawn: i32,
+        minor: i32,
+        major: i32,
     };
 
     pub fn keys(b: anytype) Keys {
@@ -224,12 +236,16 @@ pub const CorrectionHistory = struct {
         const white = b.getColorBitboard(.white);
         const black = b.getColorBitboard(.black);
         const non_pawn = ~pawns;
+        const minors = b.getKindBitboard(.knight) | b.getKindBitboard(.bishop);
+        const majors = b.getKindBitboard(.rook) | b.getKindBitboard(.queen);
         return .{
             .pawn = mix(pawns & white) ^ mix((pawns & black) ^ 0x9E3779B97F4A7C15),
             .non_pawn = .{
                 pieceSetKey(b, white & non_pawn),
                 pieceSetKey(b, black & non_pawn),
             },
+            .minor = mix(minors & white) ^ mix((minors & black) ^ 0x3C6EF372FE94F82A),
+            .major = mix(majors & white) ^ mix((majors & black) ^ 0xA54FF53A5F1D36F1),
         };
     }
 
@@ -257,16 +273,22 @@ pub const CorrectionHistory = struct {
         @prefetch(&self.pawn[c][index(k.pawn)], .{});
         @prefetch(&self.non_pawn[c][0][index(k.non_pawn[0])], .{});
         @prefetch(&self.non_pawn[c][1][index(k.non_pawn[1])], .{});
+        @prefetch(&self.minor[c][index(k.minor)], .{});
+        @prefetch(&self.major[c][index(k.major)], .{});
     }
 
-    /// Weights are percentages; the defaults 200/100 count pawn structure twice.
-    pub fn correction(self: *const CorrectionHistory, stm: piece.Color, k: Keys, pawn_weight: i32, non_pawn_weight: i32) i32 {
+    /// Weights are percentages; the defaults count pawn structure twice.
+    pub fn correction(self: *const CorrectionHistory, stm: piece.Color, k: Keys, w: Weights) i32 {
         const c = @intFromEnum(stm);
         const pawn_entry = &self.pawn[c][index(k.pawn)];
         const white_entry = &self.non_pawn[c][0][index(k.non_pawn[0])];
         const black_entry = &self.non_pawn[c][1][index(k.non_pawn[1])];
-        const sum = pawn_weight * @as(i32, pawn_entry.*) +
-            non_pawn_weight * (@as(i32, white_entry.*) + @as(i32, black_entry.*));
+        const minor_entry = &self.minor[c][index(k.minor)];
+        const major_entry = &self.major[c][index(k.major)];
+        const sum = w.pawn * @as(i32, pawn_entry.*) +
+            w.non_pawn * (@as(i32, white_entry.*) + @as(i32, black_entry.*)) +
+            w.minor * @as(i32, minor_entry.*) +
+            w.major * @as(i32, major_entry.*);
         return @divTrunc(sum, 200 * CORRECTION_GRAIN);
     }
 
@@ -277,6 +299,8 @@ pub const CorrectionHistory = struct {
         updateCell(&self.pawn[c][index(k.pawn)], scaled, weight);
         updateCell(&self.non_pawn[c][0][index(k.non_pawn[0])], scaled, weight);
         updateCell(&self.non_pawn[c][1][index(k.non_pawn[1])], scaled, weight);
+        updateCell(&self.minor[c][index(k.minor)], scaled, weight);
+        updateCell(&self.major[c][index(k.major)], scaled, weight);
     }
 
     fn updateCell(cell: *i16, scaled: i32, weight: i32) void {

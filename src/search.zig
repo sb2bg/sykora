@@ -690,8 +690,12 @@ pub const SearchEngine = struct {
         const corrected = raw_eval + self.correction_history.correction(
             self.board.board.move,
             keys,
-            self.tuning.corr_pawn_weight,
-            self.tuning.corr_non_pawn_weight,
+            .{
+                .pawn = self.tuning.corr_pawn_weight,
+                .non_pawn = self.tuning.corr_non_pawn_weight,
+                .minor = self.tuning.corr_minor_weight,
+                .major = self.tuning.corr_major_weight,
+            },
         );
         return std.math.clamp(corrected, -eval.MATE_BOUND + 1, eval.MATE_BOUND - 1);
     }

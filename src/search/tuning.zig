@@ -29,6 +29,8 @@ pub const SearchTuning = struct {
     // Static-eval correction history weights (pawn, per-side non-pawn).
     corr_pawn_weight: i32 = 200,
     corr_non_pawn_weight: i32 = 100,
+    corr_minor_weight: i32 = 100,
+    corr_major_weight: i32 = 100,
 
     // Aspiration windows.
     asp_delta: i32 = 25,
@@ -141,6 +143,8 @@ pub const tunables = [_]Tunable{
     .{ .name = "HistoryMaxBonus", .field = "history_max_bonus", .min = 50, .max = 1600 },
     .{ .name = "CorrPawnWeight", .field = "corr_pawn_weight", .min = 0, .max = 400 },
     .{ .name = "CorrNonPawnWeight", .field = "corr_non_pawn_weight", .min = 0, .max = 300 },
+    .{ .name = "CorrMinorWeight", .field = "corr_minor_weight", .min = 0, .max = 300 },
+    .{ .name = "CorrMajorWeight", .field = "corr_major_weight", .min = 0, .max = 300 },
     .{ .name = "AspDelta", .field = "asp_delta", .min = 8, .max = 60 },
     .{ .name = "AspWidenPct", .field = "asp_widen_pct", .min = 130, .max = 300 },
     .{ .name = "RFPMargin", .field = "rfp_margin", .min = 40, .max = 200 },
