@@ -227,21 +227,12 @@ inline fn isPurePawnEndgame(b: board.BitBoard) bool {
     return b.occupied() == (kings | pawns);
 }
 
-inline fn lmpQuietMoveLimit(depth: u32, scale_pct: i32) u32 {
-    const base: u32 = switch (depth) {
-        0 => 0,
-        1 => 5,
-        2 => 10,
-        3 => 16,
-        else => std.math.maxInt(u32),
-    };
-    if (base == std.math.maxInt(u32)) return base;
-    const scaled = @divTrunc(@as(i64, base) * @as(i64, scale_pct), 100);
-    return @intCast(@max(scaled, 0));
-}
-
-inline fn addLmpQuietMoveBonus(limit: u32, bonus: u32) u32 {
-    return std.math.add(u32, limit, bonus) catch std.math.maxInt(u32);
+/// Quiet moves searched before late-move pruning: (3 + depth^2) scaled,
+/// halved when the static eval is not improving.
+inline fn lmpQuietMoveLimit(depth: u32, scale_pct: i32, improving: bool) u32 {
+    const base = @as(i64, 3 + depth * depth) * @as(i64, scale_pct);
+    const divisor: i64 = if (improving) 100 else 200;
+    return @intCast(@max(@divTrunc(base, divisor), 0));
 }
 
 inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
@@ -1722,21 +1713,16 @@ pub const SearchEngine = struct {
                 quiets_seen += 1;
                 const is_killer = self.killer_moves.isKiller(move, ply);
                 const is_counter_move = if (counter_move) |counter| movesEqual(move, counter) else false;
-                const improving_lmp_bonus: u32 = if (improving) self.tuning.lmp_improving_bonus else 0;
-                const quiet_lmp_limit = addLmpQuietMoveBonus(
-                    lmpQuietMoveLimit(search_depth, self.tuning.lmp_move_scale_pct),
-                    improving_lmp_bonus,
-                );
-
-                // Late Move Pruning (LMP): at shallow non-PV nodes, trim low-history late quiets.
+                // Late Move Pruning (LMP): at non-PV nodes, skip quiets beyond a
+                // depth-dependent count, half as many when not improving.
                 if (!is_pv_node and
                     !in_check and
                     search_depth <= self.tuning.lmp_max_depth and
                     moves_searched > 0 and
-                    quiets_seen > quiet_lmp_limit and
+                    quiets_seen > lmpQuietMoveLimit(search_depth, self.tuning.lmp_move_scale_pct, improving) and
                     !is_killer)
                 {
-                    if (quiet_history_score <= 0) continue;
+                    continue;
                 }
 
                 // Quiet SEE pruning: trim late moves that leave material hanging.
