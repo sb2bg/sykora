@@ -2407,6 +2407,24 @@ fn finishPairwiseMlpTail16x32(
     return @intCast(divRoundNearestSignedPow2(sum * SCALE, 12));
 }
 
+inline fn accumulatePairwiseL1Word(
+    net: *const Network,
+    bucket: usize,
+    group: usize,
+    word: u32,
+    l1_sums: *Dense1Vec,
+) void {
+    const groups = @as(usize, net.ft_hidden_size) / 4;
+    const inputs = nnue_dot.splatWord(std.mem.littleToNative(u32, word));
+    var output: usize = 0;
+    while (output < 16) : (output += nnue_dot.output_lanes) {
+        const weight_index = ((bucket * groups + group) * 16 + output) * 4;
+        const weight_ptr: *align(1) const nnue_dot.I8Vec = @ptrCast(&net.l1_weights_grouped[weight_index]);
+        const sum_ptr: *align(1) nnue_dot.I32Vec = @ptrCast(&l1_sums[output]);
+        sum_ptr.* = nnue_dot.dotAdd(sum_ptr.*, inputs, weight_ptr.*);
+    }
+}
+
 inline fn accumulatePairwiseL1Group(
     net: *const Network,
     bucket: usize,
@@ -2499,9 +2517,30 @@ fn addP3L1Contribution(
     }
 }
 
-/// High half of the signed 16x16 product; lowers to pmulhw / smull+shrn.
-inline fn mulHigh16(a: WeightVec, b: WeightVec) WeightVec {
-    const product = @as(I32Vec, a) * @as(I32Vec, b);
+/// (a * b) >> 9 for a, b in [0, Q0], as a single multiply-high. LLVM does
+/// not recognize the generic widen-multiply-shift form on x86 or ARM.
+inline fn pooledProduct(a: WeightVec, b: WeightVec) WeightVec {
+    const x86_pmulh: ?[]const u8 = comptime if (builtin.cpu.arch != .x86_64)
+        null
+    else if (SIMD_LANES == 32 and builtin.cpu.has(.x86, .avx512bw))
+        "llvm.x86.avx512.pmulh.w.512"
+    else if (SIMD_LANES == 16 and builtin.cpu.has(.x86, .avx2))
+        "llvm.x86.avx2.pmulh.w"
+    else if (SIMD_LANES == 8)
+        "llvm.x86.sse2.pmulh.w"
+    else
+        null;
+    if (comptime x86_pmulh) |name| {
+        // mulhi(a << 7, b) == (a * b) >> 9 since a << 7 still fits i16.
+        return @extern(*const fn (WeightVec, WeightVec) callconv(.c) WeightVec, .{ .name = name }).*(a << @splat(7), b);
+    }
+    if (comptime builtin.cpu.arch == .aarch64 and SIMD_LANES == 8) {
+        // sqdmulh doubles the product, so pre-shift by 6; it cannot saturate.
+        return @extern(*const fn (WeightVec, WeightVec) callconv(.c) WeightVec, .{
+            .name = "llvm.aarch64.neon.sqdmulh.v8i16",
+        }).*(a << @splat(6), b);
+    }
+    const product = @as(I32Vec, a << @splat(7)) * @as(I32Vec, b);
     return @intCast(product >> @splat(16));
 }
 
@@ -2527,7 +2566,7 @@ inline fn poolSplitAccumulatorBlock(
         // Explicit types: @min against a comptime bound would narrow to u8.
         const a: WeightVec = @min(@max(psq_a.* +| threat_a.*, zero), max_vec);
         const b: WeightVec = @min(@max(psq_b.* +| threat_b.*, zero), max_vec);
-        return @intCast(mulHigh16(a << @splat(7), b));
+        return @intCast(pooledProduct(a, b));
     }
     const a = clampVecToActivationRange(
         @as(I32Vec, @intCast(psq_a.*)) + @as(I32Vec, @intCast(threat_a.*)),
@@ -2563,38 +2602,50 @@ fn evaluatePairwiseMlpTail16x32FromSplit(
     // integer addition makes the final reduction order irrelevant.
     var partial_sums = [_]Dense1Vec{@splat(0)} ** L1_ACCUMULATORS;
 
-    var offset: usize = 0;
-    while (offset < half) : (offset += SIMD_LANES) {
-        const us_pooled: [SIMD_LANES]u8 = poolSplitAccumulatorBlock(
-            net,
-            us_psq,
-            us_threat,
-            offset,
-            half,
-        );
-        const them_pooled: [SIMD_LANES]u8 = poolSplitAccumulatorBlock(
-            net,
-            them_psq,
-            them_threat,
-            offset,
-            half,
-        );
-        inline for (0..SIMD_LANES / 4) |group_in_block| {
-            const lane = group_in_block * 4;
-            accumulatePairwiseL1Group(
-                net,
-                bucket,
-                (offset + lane) / 4,
-                @ptrCast(&us_pooled[lane]),
-                &partial_sums[(2 * group_in_block) % L1_ACCUMULATORS],
-            );
-            accumulatePairwiseL1Group(
-                net,
-                bucket,
-                (half + offset + lane) / 4,
-                @ptrCast(&them_pooled[lane]),
-                &partial_sums[(2 * group_in_block + 1) % L1_ACCUMULATORS],
-            );
+    if (comptime builtin.cpu.arch == .x86_64) {
+        // Pool into memory first so each four-byte group reaches the dot
+        // products as a broadcast load rather than shuffle-port work.
+        var pooled: [MAX_HIDDEN_SIZE]u8 align(64) = undefined;
+        var offset: usize = 0;
+        while (offset < half) : (offset += SIMD_LANES) {
+            @as(*align(1) PoolVec, @ptrCast(&pooled[offset])).* =
+                poolSplitAccumulatorBlock(net, us_psq, us_threat, offset, half);
+            @as(*align(1) PoolVec, @ptrCast(&pooled[half + offset])).* =
+                poolSplitAccumulatorBlock(net, them_psq, them_threat, offset, half);
+        }
+        const pooled_words: []align(4) const u32 = @as([*]align(4) const u32, @ptrCast(&pooled))[0 .. hidden_size / 4];
+        var group: usize = 0;
+        while (group + L1_ACCUMULATORS <= pooled_words.len) : (group += L1_ACCUMULATORS) {
+            inline for (0..L1_ACCUMULATORS) |k| {
+                accumulatePairwiseL1Word(net, bucket, group + k, pooled_words[group + k], &partial_sums[k]);
+            }
+        }
+        while (group < pooled_words.len) : (group += 1) {
+            accumulatePairwiseL1Word(net, bucket, group, pooled_words[group], &partial_sums[0]);
+        }
+    } else {
+        // On NEON, duplicating lanes straight from registers is cheaper.
+        var offset: usize = 0;
+        while (offset < half) : (offset += SIMD_LANES) {
+            const us_pooled: [SIMD_LANES]u8 = poolSplitAccumulatorBlock(net, us_psq, us_threat, offset, half);
+            const them_pooled: [SIMD_LANES]u8 = poolSplitAccumulatorBlock(net, them_psq, them_threat, offset, half);
+            inline for (0..SIMD_LANES / 4) |group_in_block| {
+                const lane = group_in_block * 4;
+                accumulatePairwiseL1Group(
+                    net,
+                    bucket,
+                    (offset + lane) / 4,
+                    @ptrCast(&us_pooled[lane]),
+                    &partial_sums[(2 * group_in_block) % L1_ACCUMULATORS],
+                );
+                accumulatePairwiseL1Group(
+                    net,
+                    bucket,
+                    (half + offset + lane) / 4,
+                    @ptrCast(&them_pooled[lane]),
+                    &partial_sums[(2 * group_in_block + 1) % L1_ACCUMULATORS],
+                );
+            }
         }
     }
     var l1_sums = l1_bias_ptr.*;

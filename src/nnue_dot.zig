@@ -26,6 +26,13 @@ pub const I8Vec = @Vector(byte_lanes, i8);
 pub const I16Vec = @Vector(byte_lanes / 2, i16);
 pub const I32Vec = @Vector(output_lanes, i32);
 
+/// Repeat one four-byte activation group, packed little-endian into `word`,
+/// once for each output lane; a splat of a loaded word lowers to a broadcast
+/// load instead of shuffles.
+pub inline fn splatWord(word: u32) U8Vec {
+    return @bitCast(@as(@Vector(output_lanes, u32), @splat(word)));
+}
+
 /// Repeat one four-byte activation group once for each output lane.
 pub inline fn splatGroup(group: *align(1) const [4]u8) U8Vec {
     @setEvalBranchQuota(10_000);
