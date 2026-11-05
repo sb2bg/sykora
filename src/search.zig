@@ -11,6 +11,7 @@ const nnue = @import("nnue.zig");
 const move_picker_mod = @import("search/move_picker.zig");
 const tt_mod = @import("search/tt.zig");
 const heuristics = @import("search/heuristics.zig");
+const tuning_mod = @import("search/tuning.zig");
 
 const KillerMoves = heuristics.KillerMoves;
 const CounterMoveTable = heuristics.CounterMoveTable;
@@ -76,19 +77,7 @@ pub const SearchResult = struct {
     depth: u32,
 };
 
-/// Smooth search-shape controls exposed through UCI for OpenBench tuning.
-/// Percentage fields are fixed-point integers where 100 represents 1.00.
-/// Defaults track the latest accepted SPSA candidate.
-pub const SearchTuning = struct {
-    lmr_scale_pct: i32 = 140,
-    lmr_history_scale_pct: i32 = 95,
-    lmr_full_depth_moves: u32 = 3,
-    lmp_move_scale_pct: i32 = 90,
-    history_max_bonus: u32 = 490,
-    /// 0 disables check extensions, 1 extends every checked node, and 2 only
-    /// extends checked PV nodes.
-    check_extension_mode: u32 = 2,
-};
+pub const SearchTuning = tuning_mod.SearchTuning;
 
 const MAX_PLY = heuristics.MAX_PLY;
 const MAX_KILLER_MOVES = 2;
@@ -184,6 +173,7 @@ fn adaptiveSoftLimit(
     iteration_nodes: usize,
     best_move_stability: u32,
     score_delta: ?u32,
+    tuning: *const SearchTuning,
 ) u64 {
     if (depth < 5 or iteration_nodes == 0) return budget.soft_ms;
 
@@ -191,9 +181,13 @@ fn adaptiveSoftLimit(
         (@as(u128, best_move_nodes) * 1000) / @as(u128, iteration_nodes),
         1000,
     ));
-    const node_factor = std.math.clamp(((1480 - node_share) * 1680) / 1000, 500, 2000);
+    const node_base: u64 = @intCast(tuning.tm_node_base);
+    const node_scale: u64 = @intCast(tuning.tm_node_scale);
+    const node_factor = std.math.clamp(((node_base - node_share) * node_scale) / 1000, 500, 2000);
     const stable_plies = @min(best_move_stability, 14);
-    const stability_factor = @max(@as(u64, 700), 1100 - @as(u64, stable_plies) * 30);
+    const stability_base: u64 = @intCast(tuning.tm_stability_base);
+    const stability_step: u64 = @intCast(tuning.tm_stability_step);
+    const stability_factor = @max(@as(u64, 700), stability_base -| @as(u64, stable_plies) * stability_step);
 
     var factor = (node_factor * stability_factor) / 1000;
     if (score_delta) |delta| {
@@ -260,7 +254,6 @@ inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
 
 // Pre-computed fixed-point LMR table. Keeping two decimal places lets the
 // runtime scale option make useful sub-integer changes before final rounding.
-const LMR_MIN_DEPTH: u32 = 3;
 const LMR_TABLE_MAX_DEPTH = 64;
 const LMR_TABLE_MAX_MOVES = 64;
 const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
@@ -281,37 +274,11 @@ const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
     break :blk table;
 };
 
-const LMP_MAX_DEPTH: u32 = 3;
-const LMP_IMPROVING_BONUS: u32 = 2;
-
-const NULL_MOVE_MIN_DEPTH: u32 = 3;
-const NULL_MOVE_REDUCTION: u32 = 3;
 const NULL_MOVE_DEEP_DEPTH: u32 = 6;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
-const NULL_MOVE_STATIC_EVAL_MARGIN: i32 = 80;
-const PROBCUT_MIN_DEPTH: u32 = 6;
 const PROBCUT_REDUCTION: u32 = 4;
-const PROBCUT_MARGIN_CP: i32 = 200;
-const SINGULAR_MIN_DEPTH: u32 = 8;
 const SINGULAR_REDUCTION: u32 = 2;
-const SINGULAR_MARGIN_BASE_CP: i32 = 30;
-const SINGULAR_MARGIN_PER_PLY_CP: i32 = 25;
 const SINGULAR_MULTICUT_MIN_BEATERS: u32 = 2;
-
-// Futility pruning parameters
-const FUTILITY_MARGIN: i32 = 200;
-const FUTILITY_MARGIN_MULTIPLIER: i32 = 120;
-
-// Reverse futility pruning parameters
-const REVERSE_FUTILITY_MARGIN_PER_PLY: i32 = 100;
-const REVERSE_FUTILITY_MAX_DEPTH: u32 = 7;
-// Razoring parameters
-const RAZOR_MARGIN: i32 = 500;
-const QS_SEE_PRUNE_MARGIN_CP: i32 = -80;
-const MAIN_SEE_PRUNE_MAX_DEPTH: u32 = 4;
-const MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 70;
-const QUIET_SEE_PRUNE_MAX_DEPTH: u32 = 7;
-const QUIET_SEE_PRUNE_MARGIN_PER_PLY_CP: i32 = 20;
 
 pub const SearchEngine = struct {
     const Self = @This();
@@ -681,7 +648,12 @@ pub const SearchEngine = struct {
     }
 
     inline fn correctEval(self: *Self, raw_eval: i32, keys: CorrectionHistory.Keys) i32 {
-        const corrected = raw_eval + self.correction_history.correction(self.board.board.move, keys);
+        const corrected = raw_eval + self.correction_history.correction(
+            self.board.board.move,
+            keys,
+            self.tuning.corr_pawn_weight,
+            self.tuning.corr_non_pawn_weight,
+        );
         return std.math.clamp(corrected, -eval.MATE_BOUND + 1, eval.MATE_BOUND - 1);
     }
 
@@ -891,7 +863,7 @@ pub const SearchEngine = struct {
             // Aspiration windows - narrow search window around previous score
             var asp_alpha: i32 = -INF;
             var asp_beta: i32 = INF;
-            var asp_delta: i32 = 25;
+            var asp_delta: i32 = self.tuning.asp_delta;
 
             if (depth >= 4 and !eval.isMateScore(best_score)) {
                 asp_alpha = @max(best_score - asp_delta, -INF);
@@ -909,11 +881,11 @@ pub const SearchEngine = struct {
                 if (score <= asp_alpha) {
                     // Fail low - widen alpha
                     asp_alpha = @max(asp_alpha - asp_delta, -INF);
-                    asp_delta *= 2;
+                    asp_delta = @max(asp_delta + 1, @divTrunc(asp_delta * self.tuning.asp_widen_pct, 100));
                 } else if (score >= asp_beta) {
                     // Fail high - widen beta
                     asp_beta = @min(asp_beta + asp_delta, INF);
-                    asp_delta *= 2;
+                    asp_delta = @max(asp_delta + 1, @divTrunc(asp_delta * self.tuning.asp_widen_pct, 100));
                 } else {
                     break; // Score within window
                 }
@@ -970,6 +942,7 @@ pub const SearchEngine = struct {
                         iteration_nodes,
                         best_move_stability,
                         score_delta,
+                        &self.tuning,
                     );
                     if (total_time_ms >= soft_limit or total_time_ms +| (iter_time_ms *| 2) >= soft_limit) {
                         break;
@@ -1140,11 +1113,11 @@ pub const SearchEngine = struct {
         if (tt_bound != .exact and tt_bound != .lower_bound) {
             return .{ .extension = 0, .cutoff = null };
         }
-        if (tt_probe.tt_depth < search_depth or search_depth < SINGULAR_MIN_DEPTH or eval.isMateScore(tt_score)) {
+        if (tt_probe.tt_depth < search_depth or search_depth < self.tuning.singular_min_depth or eval.isMateScore(tt_score)) {
             return .{ .extension = 0, .cutoff = null };
         }
 
-        const singular_margin = SINGULAR_MARGIN_BASE_CP + SINGULAR_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+        const singular_margin = self.tuning.singular_margin_base + self.tuning.singular_margin_per_ply * @as(i32, @intCast(search_depth));
         const singular_beta = @max(tt_score - singular_margin, -INF);
         if (search_depth <= SINGULAR_REDUCTION + 1) {
             return .{ .extension = 0, .cutoff = null };
@@ -1246,9 +1219,9 @@ pub const SearchEngine = struct {
         }
 
         var futile = false;
-        if (!is_pv_node and !in_check and search_depth <= 3) {
-            var futility_margin = FUTILITY_MARGIN + FUTILITY_MARGIN_MULTIPLIER * @as(i32, @intCast(search_depth));
-            if (improving) futility_margin += 80;
+        if (!is_pv_node and !in_check and search_depth <= self.tuning.futility_max_depth) {
+            var futility_margin = self.tuning.futility_base + self.tuning.futility_mult * @as(i32, @intCast(search_depth));
+            if (improving) futility_margin += self.tuning.futility_improving;
             if (static_eval + futility_margin < alpha) {
                 futile = true;
             }
@@ -1265,6 +1238,7 @@ pub const SearchEngine = struct {
     }
 
     inline fn tryReverseFutilityPrune(
+        self: *const Self,
         is_pv_node: bool,
         in_check: bool,
         search_depth: u32,
@@ -1272,9 +1246,9 @@ pub const SearchEngine = struct {
         beta_adj: i32,
         improving: bool,
     ) ?i32 {
-        if (!is_pv_node and !in_check and search_depth <= REVERSE_FUTILITY_MAX_DEPTH and !eval.isMateScore(beta_adj)) {
-            const improving_plies: i32 = if (improving) 1 else 0;
-            const rfp_margin = REVERSE_FUTILITY_MARGIN_PER_PLY * (@as(i32, @intCast(search_depth)) - improving_plies);
+        if (!is_pv_node and !in_check and search_depth <= self.tuning.rfp_max_depth and !eval.isMateScore(beta_adj)) {
+            const improving_margin: i32 = if (improving) self.tuning.rfp_improving_margin else 0;
+            const rfp_margin = self.tuning.rfp_margin * @as(i32, @intCast(search_depth)) - improving_margin;
             if (static_eval - rfp_margin >= beta_adj) {
                 return static_eval;
             }
@@ -1292,7 +1266,7 @@ pub const SearchEngine = struct {
         beta_adj: i32,
         ply: u32,
     ) !?i32 {
-        if (!is_pv_node and !in_check and search_depth <= 2 and static_eval + RAZOR_MARGIN < alpha) {
+        if (!is_pv_node and !in_check and search_depth <= 2 and static_eval + self.tuning.razor_margin < alpha) {
             const razor_score = try self.quiescence(alpha, beta_adj, ply);
             if (razor_score < alpha) {
                 return razor_score;
@@ -1315,8 +1289,8 @@ pub const SearchEngine = struct {
             !is_pv_node and
             !in_check and
             self.ttScoreUsable() and
-            search_depth >= NULL_MOVE_MIN_DEPTH and
-            static_eval >= beta_adj + NULL_MOVE_STATIC_EVAL_MARGIN))
+            search_depth >= self.tuning.nmp_min_depth and
+            static_eval >= beta_adj + self.tuning.nmp_eval_margin))
         {
             return null;
         }
@@ -1350,9 +1324,9 @@ pub const SearchEngine = struct {
             self.continuation_keys[ply] = INVALID_CONTINUATION_KEY;
         }
 
-        var reduction: u32 = NULL_MOVE_REDUCTION;
+        var reduction: u32 = self.tuning.nmp_base_reduction;
         if (search_depth > NULL_MOVE_DEEP_DEPTH) reduction += 1;
-        if (static_eval - beta_adj > 200) reduction += 1;
+        if (static_eval - beta_adj > self.tuning.nmp_eval_reduce_margin) reduction += 1;
         reduction = @min(reduction, search_depth - 1);
 
         const old_hist_count = self.history_count;
@@ -1399,14 +1373,14 @@ pub const SearchEngine = struct {
             is_pv_node or
             in_check or
             ply == 0 or
-            search_depth < PROBCUT_MIN_DEPTH or
-            beta_adj <= -eval.MATE_BOUND + PROBCUT_MARGIN_CP or
-            beta_adj >= eval.MATE_BOUND - PROBCUT_MARGIN_CP)
+            search_depth < self.tuning.probcut_min_depth or
+            beta_adj <= -eval.MATE_BOUND + self.tuning.probcut_margin or
+            beta_adj >= eval.MATE_BOUND - self.tuning.probcut_margin)
         {
             return null;
         }
 
-        const probcut_beta = beta_adj + PROBCUT_MARGIN_CP;
+        const probcut_beta = beta_adj + self.tuning.probcut_margin;
         const see_threshold = @max(@as(i32, 0), probcut_beta - static_eval);
 
         var tactical_moves = MoveList.init();
@@ -1460,6 +1434,11 @@ pub const SearchEngine = struct {
         return null;
     }
 
+    inline fn historyBonus(self: *const Self, depth: u32) i32 {
+        const scaled = @divTrunc(@as(i64, depth) * @as(i64, depth) * @as(i64, self.tuning.history_bonus_scale_pct), 100);
+        return @intCast(std.math.clamp(scaled, 0, @as(i64, self.tuning.history_max_bonus)));
+    }
+
     fn updateQuietHeuristicsOnBetaCutoff(
         self: *Self,
         move: Move,
@@ -1469,13 +1448,14 @@ pub const SearchEngine = struct {
         old_previous: ?Move,
         quiets_tried: []const Move,
     ) void {
+        const bonus = self.historyBonus(search_depth);
         self.killer_moves.add(move, ply);
-        self.history.update(move, search_depth, color, self.tuning.history_max_bonus);
+        self.history.update(move, bonus, color);
 
         if (self.board.board.getPieceAt(move.from(), color)) |piece_type| {
             const ctx = self.continuationContext(ply);
             const best_key = continuationKey(color, piece_type, move.to());
-            self.continuation_history.update(ctx.prev, ctx.prev2, best_key, search_depth, self.tuning.history_max_bonus);
+            self.continuation_history.update(ctx.prev, ctx.prev2, best_key, bonus);
 
             for (quiets_tried) |quiet| {
                 if ((quiet.from() != move.from() or quiet.to() != move.to()) and
@@ -1483,7 +1463,7 @@ pub const SearchEngine = struct {
                 {
                     const quiet_piece = self.board.board.getPieceAt(quiet.from(), color).?;
                     const quiet_key = continuationKey(color, quiet_piece, quiet.to());
-                    self.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, search_depth, self.tuning.history_max_bonus);
+                    self.continuation_history.penalize(ctx.prev, ctx.prev2, quiet_key, bonus);
                 }
             }
         }
@@ -1494,7 +1474,7 @@ pub const SearchEngine = struct {
 
         for (quiets_tried) |quiet| {
             if (quiet.from() != move.from() or quiet.to() != move.to()) {
-                self.history.penalize(quiet, search_depth, color, self.tuning.history_max_bonus);
+                self.history.penalize(quiet, bonus, color);
             }
         }
     }
@@ -1622,7 +1602,7 @@ pub const SearchEngine = struct {
         const improving = eval_ctx.improving;
         const futile = eval_ctx.futile;
 
-        if (tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj, improving)) |pruned| {
+        if (self.tryReverseFutilityPrune(is_pv_node, in_check, search_depth, static_eval, beta_adj, improving)) |pruned| {
             return pruned;
         }
 
@@ -1698,7 +1678,7 @@ pub const SearchEngine = struct {
                 quiets_seen += 1;
                 const is_killer = self.killer_moves.isKiller(move, ply);
                 const is_counter_move = if (counter_move) |counter| movesEqual(move, counter) else false;
-                const improving_lmp_bonus: u32 = if (improving) LMP_IMPROVING_BONUS else 0;
+                const improving_lmp_bonus: u32 = if (improving) self.tuning.lmp_improving_bonus else 0;
                 const quiet_lmp_limit = addLmpQuietMoveBonus(
                     lmpQuietMoveLimit(search_depth, self.tuning.lmp_move_scale_pct),
                     improving_lmp_bonus,
@@ -1707,7 +1687,7 @@ pub const SearchEngine = struct {
                 // Late Move Pruning (LMP): at shallow non-PV nodes, trim low-history late quiets.
                 if (!is_pv_node and
                     !in_check and
-                    search_depth <= LMP_MAX_DEPTH and
+                    search_depth <= self.tuning.lmp_max_depth and
                     moves_searched > 0 and
                     quiets_seen > quiet_lmp_limit and
                     !is_killer)
@@ -1719,12 +1699,12 @@ pub const SearchEngine = struct {
                 if (!is_pv_node and
                     !in_check and
                     moves_searched > 0 and
-                    search_depth <= QUIET_SEE_PRUNE_MAX_DEPTH and
+                    search_depth <= self.tuning.quiet_see_max_depth and
                     !is_killer and
                     !is_counter_move and
                     !self.moveGivesCheck(move))
                 {
-                    const see_margin = QUIET_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+                    const see_margin = self.tuning.quiet_see_margin * @as(i32, @intCast(search_depth));
                     if (staticExchangeEvalQuietPosition(&self.board.board, move) < -see_margin) {
                         continue;
                     }
@@ -1737,12 +1717,12 @@ pub const SearchEngine = struct {
                 is_capture and
                 !is_promotion and
                 moves_searched > 0 and
-                search_depth <= MAIN_SEE_PRUNE_MAX_DEPTH)
+                search_depth <= self.tuning.main_see_max_depth)
             {
                 const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
                 if (!is_tt_move) {
                     const see_score = staticExchangeEvalPosition(&self.board.board, move);
-                    const see_margin = MAIN_SEE_PRUNE_MARGIN_PER_PLY_CP * @as(i32, @intCast(search_depth));
+                    const see_margin = self.tuning.main_see_margin * @as(i32, @intCast(search_depth));
                     if (see_score < -see_margin and !self.moveGivesCheck(move)) {
                         continue;
                     }
@@ -1789,7 +1769,7 @@ pub const SearchEngine = struct {
 
             // Late Move Reductions (LMR) — logarithmic formula with history modulation
             if (moves_searched >= self.tuning.lmr_full_depth_moves and
-                search_depth >= LMR_MIN_DEPTH and
+                search_depth >= self.tuning.lmr_min_depth and
                 !in_check and
                 !is_capture and
                 !is_promotion and
@@ -1800,7 +1780,8 @@ pub const SearchEngine = struct {
                 const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
                 const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
                 var reduction: i32 = @intCast(@divTrunc(
-                    @as(i64, lmr_table_x100[d_idx][m_idx]) * @as(i64, self.tuning.lmr_scale_pct),
+                    @as(i64, self.tuning.lmr_base_x100) * 100 +
+                        @as(i64, lmr_table_x100[d_idx][m_idx]) * @as(i64, self.tuning.lmr_scale_pct),
                     10_000,
                 ));
 
@@ -2176,8 +2157,7 @@ pub const SearchEngine = struct {
                 else
                     0;
 
-                // Delta pruning margin increased to 300 to avoid being too aggressive
-                if (stand_pat + captured_value + promo_value + 300 < alpha) {
+                if (stand_pat + captured_value + promo_value + self.tuning.qs_delta_margin < alpha) {
                     continue; // Futile capture
                 }
 
@@ -2185,7 +2165,7 @@ pub const SearchEngine = struct {
                 if (move.promotion() == null) {
                     const is_tt_move = tt_move != null and movesEqual(move, tt_move.?);
                     if (!is_tt_move and
-                        staticExchangeEvalPosition(&self.board.board, move) < QS_SEE_PRUNE_MARGIN_CP and
+                        staticExchangeEvalPosition(&self.board.board, move) < self.tuning.qs_see_threshold and
                         !self.moveGivesCheck(move))
                     {
                         continue;
@@ -2347,16 +2327,16 @@ test "time budget stays inside usable clock and preserves fixed movetime" {
 
 test "adaptive soft limit spends more on unstable roots and less on stable roots" {
     const budget = TimeBudget{ .soft_ms = 100, .hard_ms = 400 };
-    try std.testing.expectEqual(@as(u64, 100), adaptiveSoftLimit(budget, 4, 300, 1000, 0, 40));
+    try std.testing.expectEqual(@as(u64, 100), adaptiveSoftLimit(budget, 4, 300, 1000, 0, 40, &SearchTuning{}));
 
-    const unstable = adaptiveSoftLimit(budget, 8, 300, 1000, 0, 40);
-    const stable = adaptiveSoftLimit(budget, 8, 900, 1000, 14, 0);
+    const unstable = adaptiveSoftLimit(budget, 8, 300, 1000, 0, 40, &SearchTuning{});
+    const stable = adaptiveSoftLimit(budget, 8, 900, 1000, 14, 0, &SearchTuning{});
     try std.testing.expect(unstable > budget.soft_ms);
     try std.testing.expect(stable < budget.soft_ms);
     try std.testing.expect(unstable <= budget.hard_ms);
     try std.testing.expect(stable <= budget.hard_ms);
 
-    const capped = adaptiveSoftLimit(.{ .soft_ms = 500, .hard_ms = 600 }, 8, 300, 1000, 0, 40);
+    const capped = adaptiveSoftLimit(.{ .soft_ms = 500, .hard_ms = 600 }, 8, 300, 1000, 0, 40, &SearchTuning{});
     try std.testing.expectEqual(@as(u64, 600), capped);
 }
 test "quiet SEE detects hanging pieces without changing safe quiets" {

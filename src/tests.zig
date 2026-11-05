@@ -6,6 +6,7 @@ test {
         @import("search/heuristics.zig"),
         @import("search/move_picker.zig"),
         @import("search/tt.zig"),
+        @import("search/tuning.zig"),
         @import("gensfen.zig"),
         @import("nnue.zig"),
         @import("full_threats_v1.zig"),

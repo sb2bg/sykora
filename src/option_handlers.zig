@@ -5,6 +5,7 @@ const Option = options.Option;
 const uciErr = @import("uci_error.zig");
 const UciError = uciErr.UciError;
 const Uci = @import("interface.zig").Uci;
+const tuning = @import("search/tuning.zig");
 
 pub fn registerOptions(uci: *Uci) !void {
     try uci.options.items.append(uci.allocator, Option{
@@ -76,12 +77,18 @@ pub fn registerOptions(uci: *Uci) !void {
 
     // OpenBench parameter names must be single whitespace-free tokens. Scale
     // options are fixed-point integers where 100 represents logical 1.00.
-    try registerSpin(uci, "LMRScale", "140", 50, 200, handleLmrScaleChange);
-    try registerSpin(uci, "LMRHistoryScale", "95", 0, 300, handleLmrHistoryScaleChange);
-    try registerSpin(uci, "LMRFullDepthMoves", "3", 1, 8, handleLmrFullDepthMovesChange);
-    try registerSpin(uci, "LMPMoveScale", "90", 50, 200, handleLmpMoveScaleChange);
-    try registerSpin(uci, "HistoryMaxBonus", "490", 50, 1600, handleHistoryMaxBonusChange);
-    try registerSpin(uci, "CheckExtension", "2", 0, 2, handleCheckExtensionChange);
+    inline for (tuning.tunables) |t| {
+        try registerSpin(uci, t.name, t.defaultString(), t.min, t.max, tuningHandler(t));
+    }
+}
+
+fn tuningHandler(comptime t: tuning.Tunable) *const fn (*Uci, []const u8) UciError!void {
+    return &struct {
+        fn handle(self: *Uci, value: []const u8) UciError!void {
+            const field = &@field(self.search_tuning, t.field);
+            field.* = @intCast(try parseTuningInt(value, t.min, t.max));
+        }
+    }.handle;
 }
 
 fn registerSpin(
@@ -218,28 +225,4 @@ fn parseTuningInt(value: []const u8, min_value: i32, max_value: i32) UciError!i3
     const parsed = std.fmt.parseInt(i32, value, 10) catch return UciError.InvalidArgument;
     if (parsed < min_value or parsed > max_value) return UciError.InvalidArgument;
     return parsed;
-}
-
-pub fn handleLmrScaleChange(self: *Uci, value: []const u8) UciError!void {
-    self.search_tuning.lmr_scale_pct = try parseTuningInt(value, 50, 200);
-}
-
-pub fn handleLmrHistoryScaleChange(self: *Uci, value: []const u8) UciError!void {
-    self.search_tuning.lmr_history_scale_pct = try parseTuningInt(value, 0, 300);
-}
-
-pub fn handleLmrFullDepthMovesChange(self: *Uci, value: []const u8) UciError!void {
-    self.search_tuning.lmr_full_depth_moves = @intCast(try parseTuningInt(value, 1, 8));
-}
-
-pub fn handleLmpMoveScaleChange(self: *Uci, value: []const u8) UciError!void {
-    self.search_tuning.lmp_move_scale_pct = try parseTuningInt(value, 50, 200);
-}
-
-pub fn handleHistoryMaxBonusChange(self: *Uci, value: []const u8) UciError!void {
-    self.search_tuning.history_max_bonus = @intCast(try parseTuningInt(value, 50, 1600));
-}
-
-pub fn handleCheckExtensionChange(self: *Uci, value: []const u8) UciError!void {
-    self.search_tuning.check_extension_mode = @intCast(try parseTuningInt(value, 0, 2));
 }

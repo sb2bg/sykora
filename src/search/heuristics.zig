@@ -80,17 +80,15 @@ pub const HistoryTable = struct {
         };
     }
 
-    pub fn update(self: *HistoryTable, move: Move, depth: u32, color: piece.Color, max_bonus: u32) void {
+    pub fn update(self: *HistoryTable, move: Move, bonus: i32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
-        const bonus = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
         const current = entry.*;
         entry.* = historyGravity(current, bonus);
     }
 
-    pub fn penalize(self: *HistoryTable, move: Move, depth: u32, color: piece.Color, max_bonus: u32) void {
+    pub fn penalize(self: *HistoryTable, move: Move, penalty: i32, color: piece.Color) void {
         const c: usize = @intFromEnum(color);
-        const penalty = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         const entry = &self.scores[c][move.from()][move.to()];
         const current = entry.*;
         entry.* = historyGravity(current, -penalty);
@@ -143,10 +141,8 @@ pub const ContinuationHistoryTable = struct {
         prev_key: ?u16,
         prev2_key: ?u16,
         current_key: u16,
-        depth: u32,
-        max_bonus: u32,
+        bonus: i32,
     ) void {
-        const bonus = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         if (prev_key) |key| {
             updateCell(&self.prev_scores[key][current_key], bonus);
         }
@@ -160,10 +156,8 @@ pub const ContinuationHistoryTable = struct {
         prev_key: ?u16,
         prev2_key: ?u16,
         current_key: u16,
-        depth: u32,
-        max_bonus: u32,
+        penalty: i32,
     ) void {
-        const penalty = @as(i32, @intCast(@min(depth * depth, max_bonus)));
         if (prev_key) |key| {
             penalizeCell(&self.prev_scores[key][current_key], penalty);
         }
@@ -261,13 +255,15 @@ pub const CorrectionHistory = struct {
         return @intCast(key & (CORRECTION_SIZE - 1));
     }
 
-    pub fn correction(self: *const CorrectionHistory, stm: piece.Color, k: Keys) i32 {
+    /// Weights are percentages; the defaults 200/100 count pawn structure twice.
+    pub fn correction(self: *const CorrectionHistory, stm: piece.Color, k: Keys, pawn_weight: i32, non_pawn_weight: i32) i32 {
         const c = @intFromEnum(stm);
         const pawn_entry = &self.pawn[c][index(k.pawn)];
         const white_entry = &self.non_pawn[c][0][index(k.non_pawn[0])];
         const black_entry = &self.non_pawn[c][1][index(k.non_pawn[1])];
-        const sum = 2 * @as(i32, pawn_entry.*) + @as(i32, white_entry.*) + @as(i32, black_entry.*);
-        return @divTrunc(sum, 2 * CORRECTION_GRAIN);
+        const sum = pawn_weight * @as(i32, pawn_entry.*) +
+            non_pawn_weight * (@as(i32, white_entry.*) + @as(i32, black_entry.*));
+        return @divTrunc(sum, 200 * CORRECTION_GRAIN);
     }
 
     pub fn update(self: *CorrectionHistory, stm: piece.Color, k: Keys, depth: u32, diff: i32) void {
@@ -296,13 +292,13 @@ test "contradictory evidence moves saturated quiet and continuation history" {
     const m = Move.init(12, 28, null);
     var history = HistoryTable.init();
     history.scores[0][12][28] = 16000;
-    history.penalize(m, 10, .white, 100);
+    history.penalize(m, 100, .white);
     try std.testing.expectEqual(@as(i32, 15803), history.getForColor(m, .white));
     history.scores[0][12][28] = -16384;
-    history.update(m, 10, .white, 100);
+    history.update(m, 100, .white);
     try std.testing.expectEqual(@as(i32, -16184), history.getForColor(m, .white));
     history.scores[0][12][28] = 16384;
-    history.penalize(m, 10, .white, 100);
+    history.penalize(m, 100, .white);
     try std.testing.expectEqual(@as(i32, 16184), history.getForColor(m, .white));
     var cell: i16 = 16384;
     ContinuationHistoryTable.penalizeCell(&cell, 100);

@@ -6,6 +6,7 @@ const UciError = uciErr.UciError;
 const gensfen = @import("gensfen.zig");
 const nnue_check = @import("nnue_check.zig");
 const bench = @import("bench.zig");
+const tuning = @import("search/tuning.zig");
 
 pub fn main() void {
     tryMain() catch |err| {
@@ -43,6 +44,9 @@ fn tryMain() MainError!void {
         if (std.mem.eql(u8, args[1], "bench")) {
             return bench.run(allocator);
         }
+        if (std.mem.eql(u8, args[1], "spsa")) {
+            return printSpsaInput(args[2..]);
+        }
         // "uci" or unrecognized → fall through to UCI mode
     }
 
@@ -54,6 +58,31 @@ fn tryMain() MainError!void {
     );
     defer uci_interface.deinit();
     try uci_interface.run();
+}
+
+/// Prints OpenBench SPSA input for the named tunable groups (default: search).
+fn printSpsaInput(args: []const [:0]u8) MainError!void {
+    var groups: [@typeInfo(tuning.Group).@"enum".fields.len]tuning.Group = undefined;
+    var count: usize = 0;
+    for (args) |arg| {
+        const group = std.meta.stringToEnum(tuning.Group, arg) orelse {
+            std.log.err("Usage: sykora spsa [search] [time] [discrete] [mode]\n", .{});
+            return error.InvalidArgument;
+        };
+        if (std.mem.indexOfScalar(tuning.Group, groups[0..count], group) == null) {
+            groups[count] = group;
+            count += 1;
+        }
+    }
+    if (count == 0) {
+        groups[0] = .search;
+        count = 1;
+    }
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    tuning.writeSpsaInput(&stdout_writer.interface, groups[0..count]) catch return error.IOError;
+    stdout_writer.interface.flush() catch return error.IOError;
 }
 
 fn runGensfenFromSlice(args: []const [:0]u8, allocator: std.mem.Allocator) MainError!void {
