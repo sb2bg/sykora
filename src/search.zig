@@ -278,7 +278,6 @@ const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
     break :blk table;
 };
 
-const NULL_MOVE_DEEP_DEPTH: u32 = 6;
 const NULL_MOVE_VERIFICATION_DEPTH: u32 = 8;
 const PROBCUT_REDUCTION: u32 = 4;
 const SINGULAR_REDUCTION: u32 = 2;
@@ -1367,9 +1366,10 @@ pub const SearchEngine = struct {
             self.continuation_keys[ply] = INVALID_CONTINUATION_KEY;
         }
 
-        var reduction: u32 = self.tuning.nmp_base_reduction;
-        if (search_depth > NULL_MOVE_DEEP_DEPTH) reduction += 1;
-        if (static_eval - beta_adj > self.tuning.nmp_eval_reduce_margin) reduction += 1;
+        // Reduce more at higher depth and when the static eval clears beta
+        // by a wide margin.
+        const eval_surplus: u32 = @intCast(@divTrunc(static_eval - beta_adj, self.tuning.nmp_eval_reduce_margin));
+        var reduction: u32 = self.tuning.nmp_base_reduction + search_depth / self.tuning.nmp_depth_divisor + @min(eval_surplus, 3);
         reduction = @min(reduction, search_depth - 1);
 
         const old_hist_count = self.history_count;

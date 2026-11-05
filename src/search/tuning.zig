@@ -51,6 +51,7 @@ pub const SearchTuning = struct {
     nmp_base_reduction: u32 = 3,
     nmp_eval_margin: i32 = 80,
     nmp_eval_reduce_margin: i32 = 200,
+    nmp_depth_divisor: u32 = 3,
 
     // ProbCut.
     probcut_min_depth: u32 = 6,
@@ -152,6 +153,7 @@ pub const tunables = [_]Tunable{
     .{ .name = "NMPBaseReduction", .field = "nmp_base_reduction", .min = 1, .max = 6, .group = .discrete },
     .{ .name = "NMPEvalMargin", .field = "nmp_eval_margin", .min = 0, .max = 200 },
     .{ .name = "NMPEvalReduceMargin", .field = "nmp_eval_reduce_margin", .min = 50, .max = 400 },
+    .{ .name = "NMPDepthDivisor", .field = "nmp_depth_divisor", .min = 2, .max = 8, .group = .discrete },
     .{ .name = "ProbCutMinDepth", .field = "probcut_min_depth", .min = 3, .max = 10, .group = .discrete },
     .{ .name = "ProbCutMargin", .field = "probcut_margin", .min = 80, .max = 350 },
     .{ .name = "SingularMinDepth", .field = "singular_min_depth", .min = 4, .max = 12, .group = .discrete },
