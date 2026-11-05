@@ -362,6 +362,8 @@ pub const SearchEngine = struct {
     acc_refresh_cache: ?*nnue.AccumulatorRefreshCache,
     acc_ply: u32,
     acc_valid: [128]bool,
+    /// Children pushed from each ply since that ply was entered.
+    acc_children: [128]u16,
     acc_updates: [128]AccumulatorUpdate,
     eval_cache: [EVAL_CACHE_SIZE]EvalCacheEntry,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
@@ -425,6 +427,7 @@ pub const SearchEngine = struct {
             .acc_refresh_cache = null,
             .acc_ply = 0,
             .acc_valid = [_]bool{false} ** 128,
+            .acc_children = [_]u16{0} ** 128,
             .acc_updates = undefined,
             .eval_cache = [_]EvalCacheEntry{.{ .key = EVAL_CACHE_EMPTY_KEY, .value = 0 }} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
@@ -497,6 +500,7 @@ pub const SearchEngine = struct {
             self.acc_ply = 0;
             self.acc_valid = [_]bool{false} ** 128;
             self.acc_valid[0] = true;
+            self.acc_children = [_]u16{0} ** 128;
         }
     }
 
@@ -528,8 +532,27 @@ pub const SearchEngine = struct {
         if (self.acc_valid[self.acc_ply]) return;
 
         std.debug.assert(self.acc_ply > 0);
-        std.debug.assert(self.acc_valid[self.acc_ply - 1]);
         const update = self.acc_updates[self.acc_ply];
+        if (!self.acc_valid[self.acc_ply - 1]) {
+            // The parent was skipped (see prepareAccumulatorForMove), so apply
+            // both moves to the grandparent and leave the parent unbuilt.
+            const ply = self.acc_ply;
+            std.debug.assert(ply >= 2 and self.acc_valid[ply - 2] and self.p3_pawn_acc_stack == null);
+            nnue.updateAccumulatorsTwoMoves(
+                self.nnue_net.?,
+                self.board,
+                &stack[ply - 2],
+                &stack[ply],
+                self.acc_updates[ply - 1],
+                update,
+                self.acc_refresh_cache,
+            );
+            if (self.threat_acc_stack) |threat_stack| {
+                nnue.updateThreatAccumulators(self.nnue_net.?, self.board, &threat_stack[ply - 2], &threat_stack[ply]);
+            }
+            self.acc_valid[ply] = true;
+            return;
+        }
         nnue.updateAccumulators(
             self.nnue_net.?,
             self.board,
@@ -616,9 +639,15 @@ pub const SearchEngine = struct {
 
     /// A child accumulator depends on this position, so make it current before
     /// mutating the board. Nodes that cut off before this point avoid the work.
+    /// The first child may instead update straight from the grandparent, so
+    /// this accumulator is only built once a second child shows it is shared.
     inline fn prepareAccumulatorForMove(self: *Self) void {
         if (self.acc_stack != null and !self.acc_valid[self.acc_ply]) {
-            self.materializeCurrentAccumulator();
+            const ply = self.acc_ply;
+            const defer_to_child = self.acc_children[ply] == 0 and
+                self.acc_valid[ply - 1] and
+                self.p3_pawn_acc_stack == null;
+            if (!defer_to_child) self.materializeCurrentAccumulator();
         }
     }
 
@@ -626,7 +655,9 @@ pub const SearchEngine = struct {
     /// evaluation or until a searched child needs this accumulator as a base.
     inline fn pushAccumulator(self: *Self, move: Move, undo: Board.Undo) void {
         if (self.acc_stack != null) {
+            self.acc_children[self.acc_ply] += 1;
             self.acc_ply += 1;
+            self.acc_children[self.acc_ply] = 0;
             self.acc_updates[self.acc_ply] = .{
                 .from_sq = move.from(),
                 .to_sq = move.to(),

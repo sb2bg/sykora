@@ -2086,6 +2086,139 @@ pub fn updateAccumulators(
     }
 }
 
+/// Most rows two consecutive moves can add or remove for one perspective:
+/// castling (two each way) followed by a capture-promotion (one add, two subs).
+const MAX_TWO_MOVE_ROWS = 4;
+
+const FeatureRows = struct {
+    adds: [MAX_TWO_MOVE_ROWS][]const i16 = undefined,
+    subs: [MAX_TWO_MOVE_ROWS][]const i16 = undefined,
+    add_count: usize = 0,
+    sub_count: usize = 0,
+
+    inline fn add(self: *FeatureRows, row: []const i16) void {
+        // A row removed earlier and added back cancels out.
+        for (self.subs[0..self.sub_count], 0..) |removed, i| {
+            if (removed.ptr == row.ptr) {
+                self.sub_count -= 1;
+                self.subs[i] = self.subs[self.sub_count];
+                return;
+            }
+        }
+        self.adds[self.add_count] = row;
+        self.add_count += 1;
+    }
+
+    inline fn sub(self: *FeatureRows, row: []const i16) void {
+        for (self.adds[0..self.add_count], 0..) |added, i| {
+            if (added.ptr == row.ptr) {
+                self.add_count -= 1;
+                self.adds[i] = self.adds[self.add_count];
+                return;
+            }
+        }
+        self.subs[self.sub_count] = row;
+        self.sub_count += 1;
+    }
+};
+
+inline fn moveRefreshesPerspective(net: *const Network, perspective: piece.Color, update: anytype) bool {
+    return update.moved_piece == .king and update.moved_color == perspective and
+        perspectiveLayoutChanged(net, perspective, update.from_sq, update.to_sq);
+}
+
+inline fn appendMoveRows(
+    net: *const Network,
+    perspective: piece.Color,
+    king_sq: u8,
+    update: anytype,
+    rows: *FeatureRows,
+    hidden_size: usize,
+) void {
+    const color = update.moved_color;
+    rows.sub(perspectiveFeatureWeights(net, perspective, king_sq, update.from_sq, update.moved_piece, color, hidden_size));
+    rows.add(perspectiveFeatureWeights(net, perspective, king_sq, update.to_sq, update.promotion orelse update.moved_piece, color, hidden_size));
+    if (update.captured_piece) |captured| {
+        rows.sub(perspectiveFeatureWeights(net, perspective, king_sq, update.capture_sq.?, captured, oppositeColor(color), hidden_size));
+    }
+    if (update.rook_from) |rook_from| {
+        rows.sub(perspectiveFeatureWeights(net, perspective, king_sq, rook_from, .rook, color, hidden_size));
+        rows.add(perspectiveFeatureWeights(net, perspective, king_sq, update.rook_to.?, .rook, color, hidden_size));
+    }
+}
+
+/// dest = prev + sum(adds) - sum(subs), accumulated tile by tile in registers.
+fn applyFeatureRowsFromPrev(dest: []i16, prev: []const i16, rows: *const FeatureRows) void {
+    std.debug.assert(dest.len == prev.len);
+    std.debug.assert(dest.len % SIMD_LANES == 0);
+    var offset: usize = 0;
+    while (offset + 8 * SIMD_LANES <= dest.len) : (offset += 8 * SIMD_LANES) {
+        applyFeatureRowsTile(8, dest, prev, rows, offset);
+    }
+    while (offset < dest.len) : (offset += SIMD_LANES) {
+        applyFeatureRowsTile(1, dest, prev, rows, offset);
+    }
+}
+
+inline fn applyFeatureRowsTile(
+    comptime registers: usize,
+    dest: []i16,
+    prev: []const i16,
+    rows: *const FeatureRows,
+    offset: usize,
+) void {
+    var accumulators: [registers]WeightVec = undefined;
+    inline for (0..registers) |register| {
+        accumulators[register] = @as(*align(1) const WeightVec, @ptrCast(&prev[offset + register * SIMD_LANES])).*;
+    }
+    for (rows.adds[0..rows.add_count]) |row| {
+        inline for (0..registers) |register| {
+            accumulators[register] +%= @as(*align(1) const WeightVec, @ptrCast(&row[offset + register * SIMD_LANES])).*;
+        }
+    }
+    for (rows.subs[0..rows.sub_count]) |row| {
+        inline for (0..registers) |register| {
+            accumulators[register] -%= @as(*align(1) const WeightVec, @ptrCast(&row[offset + register * SIMD_LANES])).*;
+        }
+    }
+    inline for (0..registers) |register| {
+        @as(*align(1) WeightVec, @ptrCast(&dest[offset + register * SIMD_LANES])).* = accumulators[register];
+    }
+}
+
+/// Apply two consecutive moves to the PSQ accumulators of the position two
+/// plies back, skipping the intermediate accumulator entirely. A perspective
+/// whose king layout changed during either move is refreshed from the
+/// current board instead. Integer wrap-around makes the result identical to
+/// two single-move updates for any net that passes the load-time bound check.
+pub fn updateAccumulatorsTwoMoves(
+    net: *const Network,
+    b: *Board,
+    prev: *const AccumulatorPair,
+    result: *AccumulatorPair,
+    first: anytype,
+    second: anytype,
+    refresh_cache: ?*AccumulatorRefreshCache,
+) void {
+    const hidden_size: usize = @intCast(net.ft_hidden_size);
+    inline for ([_]piece.Color{ .white, .black }) |perspective| {
+        const dest = result.slice(perspective, hidden_size);
+        if (moveRefreshesPerspective(net, perspective, first) or moveRefreshesPerspective(net, perspective, second)) {
+            if (refresh_cache) |cache| {
+                refreshPerspectiveAccumulatorCached(net, b, perspective, dest, cache);
+            } else {
+                initPerspectiveAccumulator(net, b, perspective, dest);
+            }
+        } else {
+            const king_sq = perspectiveKingSquareOnBoard(b, perspective);
+            var rows = FeatureRows{};
+            appendMoveRows(net, perspective, king_sq, first, &rows, hidden_size);
+            appendMoveRows(net, perspective, king_sq, second, &rows, hidden_size);
+            applyFeatureRowsFromPrev(dest, prev.sliceConst(perspective, hidden_size), &rows);
+        }
+    }
+}
+
 inline fn outputBucket(net: *const Network, b: *Board) usize {
     std.debug.assert(net.output_bucket_count == 8);
     const piece_count = @popCount(b.board.occupied()); // includes kings, 2..32
