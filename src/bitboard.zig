@@ -409,13 +409,20 @@ pub const Board = struct {
         const color = undo.mover_color;
         const opponent_color = if (color == .white) pieceInfo.Color.black else pieceInfo.Color.white;
 
-        self.board.clearSquare(to_sq);
-        self.board.setPieceAt(from_sq, color, undo.moved_piece);
+        // The undo record names every piece involved, so touch only the
+        // affected bitboards instead of clearing a square across all eight.
+        const color_idx: usize = @intFromEnum(color);
+        const from_mask = @as(u64, 1) << @intCast(from_sq);
+        const to_mask = @as(u64, 1) << @intCast(to_sq);
+        const final_piece = move.promotion() orelse undo.moved_piece;
+        self.board.color_sets[color_idx] ^= from_mask | to_mask;
+        self.board.kind_sets[@intFromEnum(final_piece)] &= ~to_mask;
+        self.board.kind_sets[@intFromEnum(undo.moved_piece)] |= from_mask;
 
         if (undo.castle_rook_from) |rook_from| {
-            const rook_to = undo.castle_rook_to.?;
-            self.board.clearSquare(rook_to);
-            self.board.setPieceAt(rook_from, color, .rook);
+            const rook_masks = (@as(u64, 1) << @intCast(rook_from)) | (@as(u64, 1) << @intCast(undo.castle_rook_to.?));
+            self.board.color_sets[color_idx] ^= rook_masks;
+            self.board.kind_sets[@intFromEnum(pieceInfo.Type.rook)] ^= rook_masks;
         }
 
         if (undo.captured_piece) |cp| {
