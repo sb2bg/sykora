@@ -22,8 +22,9 @@ pub const SearchTuning = struct {
     lmp_improving_bonus: u32 = 2,
 
     // History.
-    history_bonus_scale_pct: i32 = 100,
-    history_max_bonus: u32 = 490,
+    history_bonus_mult: i32 = 160,
+    history_bonus_offset: i32 = 96,
+    history_max_bonus: u32 = 1600,
 
     // Static-eval correction history weights (pawn, per-side non-pawn).
     corr_pawn_weight: i32 = 200,
@@ -134,8 +135,9 @@ pub const tunables = [_]Tunable{
     .{ .name = "LMPMoveScale", .field = "lmp_move_scale_pct", .min = 50, .max = 200 },
     .{ .name = "LMPMaxDepth", .field = "lmp_max_depth", .min = 0, .max = 3, .group = .discrete },
     .{ .name = "LMPImprovingBonus", .field = "lmp_improving_bonus", .min = 0, .max = 8, .group = .discrete },
-    .{ .name = "HistoryBonusScale", .field = "history_bonus_scale_pct", .min = 30, .max = 300 },
-    .{ .name = "HistoryMaxBonus", .field = "history_max_bonus", .min = 50, .max = 1600 },
+    .{ .name = "HistoryBonusMult", .field = "history_bonus_mult", .min = 40, .max = 400 },
+    .{ .name = "HistoryBonusOffset", .field = "history_bonus_offset", .min = 0, .max = 400 },
+    .{ .name = "HistoryMaxBonus", .field = "history_max_bonus", .min = 400, .max = 4000 },
     .{ .name = "CorrPawnWeight", .field = "corr_pawn_weight", .min = 0, .max = 400 },
     .{ .name = "CorrNonPawnWeight", .field = "corr_non_pawn_weight", .min = 0, .max = 300 },
     .{ .name = "AspDelta", .field = "asp_delta", .min = 8, .max = 60 },
