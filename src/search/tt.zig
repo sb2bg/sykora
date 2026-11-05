@@ -154,6 +154,11 @@ pub const TranspositionTable = struct {
         ));
     }
 
+    /// Start loading a bucket that a probe will soon need.
+    pub inline fn prefetch(self: *Self, hash: u64) void {
+        @prefetch(&self.buckets[self.bucketIndex(hash)], .{});
+    }
+
     pub fn probe(self: *Self, hash: u64) ?TTEntry {
         const idx = self.bucketIndex(hash);
         return probeBucket(&self.buckets[idx], hash);

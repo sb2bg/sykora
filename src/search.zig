@@ -1152,6 +1152,7 @@ pub const SearchEngine = struct {
 
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
             self.pushAccumulator(move, undo);
             self.previous_move = move;
             if (ply < MAX_PLY and moving_piece != null) {
@@ -1399,6 +1400,7 @@ pub const SearchEngine = struct {
 
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
             self.pushAccumulator(move, undo);
             self.previous_move = move;
             if (ply < MAX_PLY) {
@@ -1742,6 +1744,7 @@ pub const SearchEngine = struct {
             // Make move
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
             self.pushAccumulator(move, undo);
             self.previous_move = move;
             const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
@@ -2180,6 +2183,7 @@ pub const SearchEngine = struct {
             // Make move
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
+            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
             self.pushAccumulator(move, undo);
 
             const old_hist_count = self.history_count;
