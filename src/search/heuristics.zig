@@ -255,6 +255,13 @@ pub const CorrectionHistory = struct {
         return @intCast(key & (CORRECTION_SIZE - 1));
     }
 
+    pub inline fn prefetch(self: *const CorrectionHistory, stm: piece.Color, k: Keys) void {
+        const c = @intFromEnum(stm);
+        @prefetch(&self.pawn[c][index(k.pawn)], .{});
+        @prefetch(&self.non_pawn[c][0][index(k.non_pawn[0])], .{});
+        @prefetch(&self.non_pawn[c][1][index(k.non_pawn[1])], .{});
+    }
+
     /// Weights are percentages; the defaults 200/100 count pawn structure twice.
     pub fn correction(self: *const CorrectionHistory, stm: piece.Color, k: Keys, pawn_weight: i32, non_pawn_weight: i32) i32 {
         const c = @intFromEnum(stm);

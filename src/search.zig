@@ -84,7 +84,10 @@ const MAX_KILLER_MOVES = 2;
 const ROOT_MOVE_BUCKETS = 64 * 64;
 const STATIC_EVAL_STACK_SIZE = MAX_PLY;
 const EVAL_CACHE_SIZE = 262144; // Must be power-of-two for fast masking.
-const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u64);
+const EVAL_CACHE_EMPTY_KEY = std.math.maxInt(u32);
+/// Key and value share one 8-byte slot so a probe costs one miss, not two.
+/// The index supplies the low hash bits; `key` holds the high 32.
+const EvalCacheEntry = extern struct { key: u32, value: i32 };
 const SEE_CAPTURE_SCALE: i32 = 128;
 
 const INF: i32 = 32000;
@@ -360,8 +363,7 @@ pub const SearchEngine = struct {
     acc_ply: u32,
     acc_valid: [128]bool,
     acc_updates: [128]AccumulatorUpdate,
-    eval_cache_keys: [EVAL_CACHE_SIZE]u64,
-    eval_cache_values: [EVAL_CACHE_SIZE]i32,
+    eval_cache: [EVAL_CACHE_SIZE]EvalCacheEntry,
     static_eval_stack: [STATIC_EVAL_STACK_SIZE]i32,
     search_start: std.time.Instant,
     hard_deadline_ns: ?u64,
@@ -424,8 +426,7 @@ pub const SearchEngine = struct {
             .acc_ply = 0,
             .acc_valid = [_]bool{false} ** 128,
             .acc_updates = undefined,
-            .eval_cache_keys = [_]u64{EVAL_CACHE_EMPTY_KEY} ** EVAL_CACHE_SIZE,
-            .eval_cache_values = [_]i32{0} ** EVAL_CACHE_SIZE,
+            .eval_cache = [_]EvalCacheEntry{.{ .key = EVAL_CACHE_EMPTY_KEY, .value = 0 }} ** EVAL_CACHE_SIZE,
             .static_eval_stack = [_]i32{-INF} ** STATIC_EVAL_STACK_SIZE,
             .search_start = std.time.Instant.now() catch unreachable,
             .hard_deadline_ns = null,
@@ -440,22 +441,29 @@ pub const SearchEngine = struct {
         self.allocator.destroy(self.correction_history);
     }
 
+    /// Start loading the TT bucket and eval-cache entry of the position just
+    /// reached; both are probed shortly after the recursive call begins.
+    inline fn prefetchChildEntries(self: *Self) void {
+        const hash = self.board.zobrist_hasher.zobrist_hash;
+        self.tt.prefetch(hash);
+        @prefetch(&self.eval_cache[evalCacheIndex(hash)], .{});
+    }
+
+    inline fn evalCacheKey(hash: u64) u32 {
+        return @truncate(hash >> 32);
+    }
+
     inline fn evalCacheIndex(hash: u64) usize {
         return @intCast(hash & (EVAL_CACHE_SIZE - 1));
     }
 
     inline fn evalCacheGet(self: *Self, hash: u64) ?i32 {
-        const idx = evalCacheIndex(hash);
-        if (self.eval_cache_keys[idx] == hash) {
-            return self.eval_cache_values[idx];
-        }
-        return null;
+        const entry = &self.eval_cache[evalCacheIndex(hash)];
+        return if (entry.key == evalCacheKey(hash)) entry.value else null;
     }
 
     inline fn evalCachePut(self: *Self, hash: u64, value: i32) void {
-        const idx = evalCacheIndex(hash);
-        self.eval_cache_keys[idx] = hash;
-        self.eval_cache_values[idx] = value;
+        self.eval_cache[evalCacheIndex(hash)] = .{ .key = evalCacheKey(hash), .value = value };
     }
 
     /// Allocate and initialize the incremental accumulator stack for NNUE.
@@ -1152,7 +1160,7 @@ pub const SearchEngine = struct {
 
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
-            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
+            self.prefetchChildEntries();
             self.pushAccumulator(move, undo);
             self.previous_move = move;
             if (ply < MAX_PLY and moving_piece != null) {
@@ -1203,11 +1211,13 @@ pub const SearchEngine = struct {
         beta_adj: i32,
         cached_static_eval: ?i32,
     ) StaticEvalContext {
+        // Start the correction-history loads before the (slow) NNUE eval.
+        const correction_keys = CorrectionHistory.keys(&self.board.board);
+        if (!in_check) self.correction_history.prefetch(self.board.board.move, correction_keys);
         const raw_eval = if (!in_check)
             cached_static_eval orelse self.evaluatePosition()
         else
             -INF;
-        const correction_keys = CorrectionHistory.keys(&self.board.board);
         const static_eval = if (!in_check) self.correctEval(raw_eval, correction_keys) else -INF;
         const improving = blk: {
             if (in_check or ply < 2 or ply >= STATIC_EVAL_STACK_SIZE) {
@@ -1400,7 +1410,7 @@ pub const SearchEngine = struct {
 
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
-            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
+            self.prefetchChildEntries();
             self.pushAccumulator(move, undo);
             self.previous_move = move;
             if (ply < MAX_PLY) {
@@ -1744,7 +1754,7 @@ pub const SearchEngine = struct {
             // Make move
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
-            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
+            self.prefetchChildEntries();
             self.pushAccumulator(move, undo);
             self.previous_move = move;
             const old_continuation_key = if (ply < MAX_PLY) self.continuation_keys[ply] else INVALID_CONTINUATION_KEY;
@@ -2112,8 +2122,10 @@ pub const SearchEngine = struct {
         var stand_pat: i32 = -INF;
         var raw_eval: i32 = -INF;
         if (!in_check) {
+            const correction_keys = CorrectionHistory.keys(&self.board.board);
+            self.correction_history.prefetch(self.board.board.move, correction_keys);
             raw_eval = tt_static_eval orelse self.evaluatePosition();
-            stand_pat = self.correctEval(raw_eval, CorrectionHistory.keys(&self.board.board));
+            stand_pat = self.correctEval(raw_eval, correction_keys);
 
             if (stand_pat >= beta) {
                 self.storeQuiescenceResult(stand_pat, original_alpha, beta, ply, tt_move, raw_eval);
@@ -2183,7 +2195,7 @@ pub const SearchEngine = struct {
             // Make move
             self.prepareAccumulatorForMove();
             const undo = self.board.makeMoveWithUndoUnchecked(move);
-            self.tt.prefetch(self.board.zobrist_hasher.zobrist_hash);
+            self.prefetchChildEntries();
             self.pushAccumulator(move, undo);
 
             const old_hist_count = self.history_count;
