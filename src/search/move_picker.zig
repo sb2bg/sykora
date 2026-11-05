@@ -1,3 +1,4 @@
+const std = @import("std");
 const board = @import("../bitboard.zig");
 const Board = board.Board;
 const Move = board.Move;
@@ -116,6 +117,45 @@ pub fn staticExchangeEvalQuietPosition(b: *const board.BitBoard, move: Move) i32
     next.clearSquare(move.from());
     next.setPieceAt(move.to(), us, moving_piece);
     return -staticExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moving_piece));
+}
+
+const SELECT_LANES = 8;
+const SelectVec = @Vector(SELECT_LANES, i32);
+const SelectIndexVec = @Vector(SELECT_LANES, u32);
+const select_lane_index: SelectIndexVec = std.simd.iota(u32, SELECT_LANES);
+
+/// Index of the first maximum of scores[start..end], as a linear scan with a
+/// strict `>` would find it, using a vector max followed by a vector match.
+fn selectBest(scores: *const [256]i32, start: usize, end: usize) usize {
+    std.debug.assert(start < end and end <= scores.len);
+    const lowest: SelectVec = @splat(std.math.minInt(i32));
+    var best = lowest;
+    var chunk = start;
+    while (chunk < end) : (chunk += SELECT_LANES) {
+        best = @max(best, loadSelectChunk(scores, chunk, end));
+    }
+    const best_score: SelectVec = @splat(@reduce(.Max, best));
+    chunk = start;
+    while (true) : (chunk += SELECT_LANES) {
+        const mask: u8 = @bitCast(loadSelectChunk(scores, chunk, end) == best_score);
+        if (mask != 0) return chunk + @ctz(mask);
+    }
+}
+
+/// Lanes past `end` read as minInt and are never selected: scores at or
+/// above minInt only tie with them when every remaining score is minInt,
+/// and the first such lane is always in range.
+inline fn loadSelectChunk(scores: *const [256]i32, chunk: usize, end: usize) SelectVec {
+    var values: SelectVec = @splat(std.math.minInt(i32));
+    if (chunk + SELECT_LANES <= scores.len) {
+        values = @as(*align(1) const SelectVec, @ptrCast(&scores[chunk])).*;
+    } else {
+        for (0..SELECT_LANES) |lane| {
+            if (chunk + lane < scores.len) values[lane] = scores[chunk + lane];
+        }
+    }
+    const remaining: SelectIndexVec = @splat(@intCast(end - chunk));
+    return @select(i32, select_lane_index < remaining, values, @as(SelectVec, @splat(std.math.minInt(i32))));
 }
 
 pub const MovePicker = struct {
@@ -372,31 +412,11 @@ pub const MovePicker = struct {
     }
 
     fn selectBestCapture(self: *Self) usize {
-        var best_idx = self.capture_idx;
-        var best_score = self.capture_scores[self.capture_idx];
-
-        for (self.capture_idx + 1..self.captures.count) |i| {
-            if (self.capture_scores[i] > best_score) {
-                best_score = self.capture_scores[i];
-                best_idx = i;
-            }
-        }
-
-        return best_idx;
+        return selectBest(&self.capture_scores, self.capture_idx, self.captures.count);
     }
 
     fn selectBestQuiet(self: *Self) usize {
-        var best_idx = self.quiet_idx;
-        var best_score = self.quiet_scores[self.quiet_idx];
-
-        for (self.quiet_idx + 1..self.quiets.count) |i| {
-            if (self.quiet_scores[i] > best_score) {
-                best_score = self.quiet_scores[i];
-                best_idx = i;
-            }
-        }
-
-        return best_idx;
+        return selectBest(&self.quiet_scores, self.quiet_idx, self.quiets.count);
     }
 
     fn isTTMove(self: *Self, move: Move) bool {
@@ -604,3 +624,22 @@ pub const MovePicker = struct {
         return legal;
     }
 };
+
+test "vector move selection matches the first-maximum linear scan" {
+    var prng = std.Random.DefaultPrng.init(0x5e1ec7);
+    const random = prng.random();
+    var scores: [256]i32 = undefined;
+    for (0..20_000) |_| {
+        const end = random.intRangeAtMost(usize, 1, 256);
+        const start = random.uintLessThan(usize, end);
+        const spread = random.intRangeAtMost(i32, 1, 6);
+        for (&scores) |*score| {
+            score.* = if (random.uintLessThan(u8, 16) == 0) std.math.minInt(i32) else random.intRangeLessThan(i32, -spread, spread);
+        }
+        var expected = start;
+        for (start + 1..end) |i| {
+            if (scores[i] > scores[expected]) expected = i;
+        }
+        try std.testing.expectEqual(expected, selectBest(&scores, start, end));
+    }
+}
