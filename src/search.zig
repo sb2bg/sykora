@@ -255,6 +255,7 @@ inline fn speculativeSacPenalty(see_score: i32, depth: u32) i32 {
 // Pre-computed fixed-point LMR table. Keeping two decimal places lets the
 // runtime scale option make useful sub-integer changes before final rounding.
 const LMR_TABLE_MAX_DEPTH = 64;
+const LMR_GRAIN = 1024;
 const LMR_TABLE_MAX_MOVES = 64;
 const lmr_table_x100: [LMR_TABLE_MAX_DEPTH][LMR_TABLE_MAX_MOVES]i32 = blk: {
     @setEvalBranchQuota(10000);
@@ -1775,22 +1776,24 @@ pub const SearchEngine = struct {
                 !is_promotion and
                 !gives_check)
             {
-                // Base reduction from pre-computed log table
+                // Base reduction from pre-computed log table, accumulated in
+                // 1/LMR_GRAIN plies so every adjustment is a smooth tuning knob.
                 const move_number = moves_searched + 1;
                 const d_idx = @min(search_depth, LMR_TABLE_MAX_DEPTH - 1);
                 const m_idx = @min(move_number, LMR_TABLE_MAX_MOVES - 1);
-                var reduction: i32 = @intCast(@divTrunc(
-                    @as(i64, self.tuning.lmr_base_x100) * 100 +
-                        @as(i64, lmr_table_x100[d_idx][m_idx]) * @as(i64, self.tuning.lmr_scale_pct),
+                var reduction: i64 = @divTrunc(
+                    (@as(i64, self.tuning.lmr_base_x100) * 100 +
+                        @as(i64, lmr_table_x100[d_idx][m_idx]) * @as(i64, self.tuning.lmr_scale_pct)) * LMR_GRAIN,
                     10_000,
-                ));
+                );
 
                 // History modulation: good history reduces less, bad history reduces more
+                // (819200 history at 100% scale is one ply).
                 const history_score = quiet_history_score;
-                reduction -= @intCast(@divTrunc(
+                reduction -= @divTrunc(
                     @as(i64, history_score) * @as(i64, self.tuning.lmr_history_scale_pct),
-                    819_200,
-                ));
+                    819_200 / LMR_GRAIN,
+                );
 
                 // Killer and counter moves get reduced less
                 const is_killer = self.killer_moves.isKiller(move, ply);
@@ -1799,21 +1802,22 @@ pub const SearchEngine = struct {
                     is_counter_move = cm.from() == move.from() and cm.to() == move.to();
                 }
                 if (is_killer) {
-                    reduction -= 1;
+                    reduction -= self.tuning.lmr_killer;
                 }
                 if (is_counter_move) {
-                    reduction -= 1;
+                    reduction -= self.tuning.lmr_counter;
                 }
                 if (improving) {
-                    reduction -= 1;
+                    reduction -= self.tuning.lmr_improving;
                 }
 
                 // PV nodes get reduced less
                 if (is_pv_node) {
-                    reduction -= 1;
+                    reduction -= self.tuning.lmr_pv;
                 }
                 // Clamp reduction: at least 1, at most depth-2 (leave at least 1 ply)
-                const r: u32 = @intCast(@max(1, @min(reduction, @as(i32, @intCast(next_depth)) - 1)));
+                const reduction_plies: i64 = @divTrunc(reduction, LMR_GRAIN);
+                const r: u32 = @intCast(@max(1, @min(reduction_plies, @as(i64, next_depth) - 1)));
 
                 // Search with reduced depth
                 score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - r, ply + 1, true);
