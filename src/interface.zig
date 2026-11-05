@@ -447,13 +447,13 @@ test "worker histories persist across positions and reset on new games or evalua
     defer uci.deinit();
     try std.testing.expect(uci.nnue_network != null);
     const main_worker = try uci.workerEngine(0);
-    main_worker.history.scores[0][12][28] = 1234;
+    main_worker.history.scores[0][0][12][28] = 1234;
     const helper = try uci.workerEngine(1);
-    try std.testing.expectEqual(@as(i32, 0), helper.history.scores[0][12][28]);
+    try std.testing.expectEqual(@as(i32, 0), helper.history.scores[0][0][12][28]);
     try uci.board.makeStrMove("e2e4");
     const reused = try uci.workerEngine(0);
     try std.testing.expectEqual(main_worker, reused);
-    try std.testing.expectEqual(@as(i32, 1234), reused.history.scores[0][12][28]);
+    try std.testing.expectEqual(@as(i32, 1234), reused.history.scores[0][0][12][28]);
     try std.testing.expectEqual(uci.board.zobrist_hasher.zobrist_hash, reused.board.zobrist_hasher.zobrist_hash);
     const hash = uci.board.zobrist_hasher.zobrist_hash;
     uci.tt.store(hash, 4, 123, .exact, board.Move.init(1, 18, null), 456);
@@ -462,7 +462,7 @@ test "worker histories persist across positions and reset on new games or evalua
     try std.testing.expect(uci.tt.probe(hash) == null);
     try std.testing.expect(uci.worker_engines[0] == null and uci.worker_engines[1] == null);
     const new_worker = try uci.workerEngine(0);
-    try std.testing.expectEqual(@as(i32, 0), new_worker.history.scores[0][12][28]);
+    try std.testing.expectEqual(@as(i32, 0), new_worker.history.scores[0][0][12][28]);
     try std.testing.expectEqual(@as(i32, 400), new_worker.nnue_scale);
     try uci.handleCommand(.ucinewgame);
     try std.testing.expect(uci.worker_engines[0] == null);
