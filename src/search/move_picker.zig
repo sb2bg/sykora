@@ -58,30 +58,35 @@ inline fn attackersToSquare(b: *const board.BitBoard, square: u6, occupied: u64)
     return attackers;
 }
 
-fn staticExchangeRec(b: *const board.BitBoard, square: u6, side_to_move: piece.Color, captured_value: i32) i32 {
-    const own_attackers = attackersToSquare(b, square, b.occupied()) & b.getColorBitboard(side_to_move);
+/// Exchange on `square` given the board right after the first capture. Later
+/// captures only vacate their origin (`square` stays occupied), so they are
+/// tracked in `occupied` instead of copying the board. `b` still describes
+/// `square` as holding the first capturer, so it is masked out wherever the
+/// piece currently standing there would matter.
+fn staticExchangeRec(b: *const board.BitBoard, occupied: u64, square: u6, side_to_move: piece.Color, captured_value: i32) i32 {
+    const own_attackers = attackersToSquare(b, square, occupied) & b.getColorBitboard(side_to_move);
     if (own_attackers == 0) return 0;
     const opponent = oppositeColor(side_to_move);
+    const square_bit = @as(u64, 1) << square;
     const order = [_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen, .king };
     for (order) |piece_type| {
         var candidates = own_attackers & b.getKindBitboard(piece_type);
         while (candidates != 0) {
             const from: u6 = @intCast(@ctz(candidates));
             candidates &= candidates - 1;
-            var next = b.*;
-            next.clearSquare(from);
-            next.clearSquare(square);
+            const next_occupied = occupied & ~(@as(u64, 1) << from);
             const promotion = piece_type == .pawn and (square / 8 == 0 or square / 8 == 7);
             const moved_type: piece.Type = if (promotion) .queen else piece_type;
-            next.setPieceAt(square, side_to_move, moved_type);
-            const king = next.getKindBitboard(.king) & next.getColorBitboard(side_to_move);
-            if (king != 0 and (attackersToSquare(&next, @intCast(@ctz(king)), next.occupied()) & next.getColorBitboard(opponent)) != 0) {
+            // A recapture may not leave the capturer's king attacked.
+            const king = (b.getKindBitboard(.king) & b.getColorBitboard(side_to_move) & next_occupied & ~square_bit) |
+                (if (moved_type == .king) square_bit else 0);
+            if (king != 0 and (attackersToSquare(b, @intCast(@ctz(king)), next_occupied) & b.getColorBitboard(opponent) & ~square_bit) != 0) {
                 continue;
             }
             // A legal king recapture ends the exchange: the king cannot be captured.
             if (piece_type == .king) return captured_value;
             const promotion_gain = if (promotion) seePieceValue(.queen) - seePieceValue(.pawn) else 0;
-            const gain = captured_value + promotion_gain - staticExchangeRec(&next, square, opponent, seePieceValue(moved_type));
+            const gain = captured_value + promotion_gain - staticExchangeRec(b, next_occupied, square, opponent, seePieceValue(moved_type));
             return @max(gain, 0);
         }
     }
@@ -103,7 +108,7 @@ pub fn staticExchangeEvalPosition(b: *const board.BitBoard, move: Move) i32 {
     next.setPieceAt(move.to(), us, moved_piece);
     const captured_value = if (en_passant) seePieceValue(.pawn) else if (captured_piece) |cp| seePieceValue(cp) else 0;
     const promotion_gain = if (move.promotion() != null) seePieceValue(moved_piece) - seePieceValue(.pawn) else 0;
-    return captured_value + promotion_gain - staticExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moved_piece));
+    return captured_value + promotion_gain - staticExchangeRec(&next, next.occupied(), @intCast(move.to()), them, seePieceValue(moved_piece));
 }
 
 /// Material risk of a legal move to an empty square, including pinned replies.
@@ -116,7 +121,7 @@ pub fn staticExchangeEvalQuietPosition(b: *const board.BitBoard, move: Move) i32
     var next = b.*;
     next.clearSquare(move.from());
     next.setPieceAt(move.to(), us, moving_piece);
-    return -staticExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moving_piece));
+    return -staticExchangeRec(&next, next.occupied(), @intCast(move.to()), them, seePieceValue(moving_piece));
 }
 
 const SELECT_LANES = 8;
@@ -642,4 +647,95 @@ test "vector move selection matches the first-maximum linear scan" {
         }
         try std.testing.expectEqual(expected, selectBest(&scores, start, end));
     }
+}
+
+// The board-copying exchange recursion this file used before; kept to check
+// the occupancy-mask version against it.
+fn referenceExchangeRec(b: *const board.BitBoard, square: u6, side_to_move: piece.Color, captured_value: i32) i32 {
+    const own_attackers = attackersToSquare(b, square, b.occupied()) & b.getColorBitboard(side_to_move);
+    if (own_attackers == 0) return 0;
+    const opponent = oppositeColor(side_to_move);
+    const order = [_]piece.Type{ .pawn, .knight, .bishop, .rook, .queen, .king };
+    for (order) |piece_type| {
+        var candidates = own_attackers & b.getKindBitboard(piece_type);
+        while (candidates != 0) {
+            const from: u6 = @intCast(@ctz(candidates));
+            candidates &= candidates - 1;
+            var next = b.*;
+            next.clearSquare(from);
+            next.clearSquare(square);
+            const promotion = piece_type == .pawn and (square / 8 == 0 or square / 8 == 7);
+            const moved_type: piece.Type = if (promotion) .queen else piece_type;
+            next.setPieceAt(square, side_to_move, moved_type);
+            const king = next.getKindBitboard(.king) & next.getColorBitboard(side_to_move);
+            if (king != 0 and (attackersToSquare(&next, @intCast(@ctz(king)), next.occupied()) & next.getColorBitboard(opponent)) != 0) {
+                continue;
+            }
+            // A legal king recapture ends the exchange: the king cannot be captured.
+            if (piece_type == .king) return captured_value;
+            const promotion_gain = if (promotion) seePieceValue(.queen) - seePieceValue(.pawn) else 0;
+            const gain = captured_value + promotion_gain - referenceExchangeRec(&next, square, opponent, seePieceValue(moved_type));
+            return @max(gain, 0);
+        }
+    }
+    return 0;
+}
+
+
+fn referenceExchangeEval(b: *const board.BitBoard, move: Move, quiet: bool) i32 {
+    const us = b.move;
+    const them = oppositeColor(us);
+    const moving_piece = b.getPieceAt(move.from(), us) orelse return 0;
+    if (quiet) {
+        if (moving_piece == .king or move.promotion() != null or b.getPieceAt(move.to(), them) != null) return 0;
+        if (moving_piece == .pawn and b.en_passant_square == move.to()) return 0;
+        var next = b.*;
+        next.clearSquare(move.from());
+        next.setPieceAt(move.to(), us, moving_piece);
+        return -referenceExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moving_piece));
+    }
+    const captured_piece = b.getPieceAt(move.to(), them);
+    const en_passant = moving_piece == .pawn and b.en_passant_square == move.to() and captured_piece == null;
+    if (captured_piece == null and !en_passant and move.promotion() == null) return 0;
+    var next = b.*;
+    next.clearSquare(move.from());
+    next.clearSquare(move.to());
+    if (en_passant) next.clearSquare(if (us == .white) move.to() - 8 else move.to() + 8);
+    const moved_piece = move.promotion() orelse moving_piece;
+    next.setPieceAt(move.to(), us, moved_piece);
+    const captured_value = if (en_passant) seePieceValue(.pawn) else if (captured_piece) |cp| seePieceValue(cp) else 0;
+    const promotion_gain = if (move.promotion() != null) seePieceValue(moved_piece) - seePieceValue(.pawn) else 0;
+    return captured_value + promotion_gain - referenceExchangeRec(&next, @intCast(move.to()), them, seePieceValue(moved_piece));
+}
+
+test "occupancy SEE matches the board-copying reference on random positions" {
+    const fens = [_][]const u8{
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "2rq1rk1/1b2bppp/p2ppn2/1pn5/3NP3/1BN1B3/PPQ2PPP/2RR2K1 w - - 2 16",
+        "r1bq1rk1/pppn1ppp/2pbpn2/3p4/3P4/2NBPN2/PPQ2PPP/R1B2RK1 w - - 0 9",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "4k3/8/3q4/2b1r3/3N4/2P1P3/4R3/4K2Q w - - 0 1",
+    };
+    var prng = std.Random.DefaultPrng.init(0x5ee5);
+    const random = prng.random();
+    var checked: usize = 0;
+    for (fens) |fen| {
+        for (0..200) |_| {
+            var position = try Board.fromFen(fen);
+            for (0..random.uintLessThan(usize, 24)) |_| {
+                var moves = MoveList.init();
+                try position.generateLegalMoves(&moves);
+                if (moves.count == 0) break;
+                _ = position.makeMoveWithUndoUnchecked(moves.moves[random.uintLessThan(usize, moves.count)]);
+            }
+            var moves = MoveList.init();
+            try position.generateLegalMoves(&moves);
+            for (moves.slice()) |move| {
+                try std.testing.expectEqual(referenceExchangeEval(&position.board, move, false), staticExchangeEvalPosition(&position.board, move));
+                try std.testing.expectEqual(referenceExchangeEval(&position.board, move, true), staticExchangeEvalQuietPosition(&position.board, move));
+                checked += 1;
+            }
+        }
+    }
+    try std.testing.expect(checked > 10_000);
 }
