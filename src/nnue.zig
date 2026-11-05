@@ -1200,12 +1200,70 @@ fn applyThreatFeatureChangesFromPrev(
     }
 }
 
+/// dest = prev + sum(adds) - sum(subs) for i16 accumulators. Row counts are
+/// compile-time so each tile of eight vectors is fully unrolled: LLVM leaves
+/// the equivalent one-vector loop rolled, which is several times slower.
+inline fn applyRowsTiled(
+    comptime add_count: usize,
+    comptime sub_count: usize,
+    dest: []i16,
+    prev: []const i16,
+    adds: [add_count][]const i16,
+    subs: [sub_count][]const i16,
+) void {
+    var offset: usize = 0;
+    while (offset + 8 * SIMD_LANES <= dest.len) : (offset += 8 * SIMD_LANES) {
+        applyRowsTile(8, add_count, sub_count, dest, prev, adds, subs, offset);
+    }
+    while (offset + SIMD_LANES <= dest.len) : (offset += SIMD_LANES) {
+        applyRowsTile(1, add_count, sub_count, dest, prev, adds, subs, offset);
+    }
+    while (offset < dest.len) : (offset += 1) {
+        var value = prev[offset];
+        inline for (adds) |row| value +%= row[offset];
+        inline for (subs) |row| value -%= row[offset];
+        dest[offset] = value;
+    }
+}
+
+inline fn applyRowsTile(
+    comptime registers: usize,
+    comptime add_count: usize,
+    comptime sub_count: usize,
+    dest: []i16,
+    prev: []const i16,
+    adds: [add_count][]const i16,
+    subs: [sub_count][]const i16,
+    offset: usize,
+) void {
+    var accumulators: [registers]WeightVec = undefined;
+    inline for (0..registers) |register| {
+        accumulators[register] = @as(*align(1) const WeightVec, @ptrCast(&prev[offset + register * SIMD_LANES])).*;
+    }
+    inline for (adds) |row| {
+        inline for (0..registers) |register| {
+            accumulators[register] +%= @as(*align(1) const WeightVec, @ptrCast(&row[offset + register * SIMD_LANES])).*;
+        }
+    }
+    inline for (subs) |row| {
+        inline for (0..registers) |register| {
+            accumulators[register] -%= @as(*align(1) const WeightVec, @ptrCast(&row[offset + register * SIMD_LANES])).*;
+        }
+    }
+    inline for (0..registers) |register| {
+        @as(*align(1) WeightVec, @ptrCast(&dest[offset + register * SIMD_LANES])).* = accumulators[register];
+    }
+}
+
 inline fn applyFeatureSlicesFromPrevAddSub(
     dest: anytype,
     prev: anytype,
     add_weights: []const i16,
     sub_weights: []const i16,
 ) void {
+    if (comptime std.meta.Elem(@TypeOf(dest)) == i16) {
+        return applyRowsTiled(1, 1, dest, prev, .{add_weights}, .{sub_weights});
+    }
     const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
@@ -1228,6 +1286,9 @@ inline fn applyFeatureSlicesFromPrevAddSubSub(
     sub_a_weights: []const i16,
     sub_b_weights: []const i16,
 ) void {
+    if (comptime std.meta.Elem(@TypeOf(dest)) == i16) {
+        return applyRowsTiled(1, 2, dest, prev, .{add_weights}, .{ sub_a_weights, sub_b_weights });
+    }
     const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
@@ -1252,6 +1313,9 @@ inline fn applyFeatureSlicesFromPrevAddAddSubSub(
     sub_a_weights: []const i16,
     sub_b_weights: []const i16,
 ) void {
+    if (comptime std.meta.Elem(@TypeOf(dest)) == i16) {
+        return applyRowsTiled(2, 2, dest, prev, .{ add_a_weights, add_b_weights }, .{ sub_a_weights, sub_b_weights });
+    }
     const AccVec = AccVecOf(@TypeOf(dest));
     var h: usize = 0;
     while (h + SIMD_LANES <= dest.len) : (h += SIMD_LANES) {
@@ -1758,7 +1822,11 @@ fn refreshPerspectiveAccumulatorCached(
         return;
     }
 
-    @memcpy(dest, entry.values[0..hidden_size]);
+    // At most 32 pieces leave and 32 arrive, so one pass applies them all.
+    var adds: [32][]const i16 = undefined;
+    var subs: [32][]const i16 = undefined;
+    var add_count: usize = 0;
+    var sub_count: usize = 0;
     inline for ([_]piece.Color{ .white, .black }) |color| {
         const color_idx: usize = @intFromEnum(color);
         const old_color_bb = entry.color_sets[color_idx];
@@ -1773,25 +1841,20 @@ fn refreshPerspectiveAccumulatorCached(
             while (removed != 0) {
                 const sq: u8 = @intCast(@ctz(removed));
                 removed &= removed - 1;
-                applyFeatureSlice(
-                    false,
-                    dest,
-                    perspectiveFeatureWeights(net, perspective, king_sq, sq, pt, color, hidden_size),
-                );
+                subs[sub_count] = perspectiveFeatureWeights(net, perspective, king_sq, sq, pt, color, hidden_size);
+                sub_count += 1;
             }
 
             var added = new_set & ~old_set;
             while (added != 0) {
                 const sq: u8 = @intCast(@ctz(added));
                 added &= added - 1;
-                applyFeatureSlice(
-                    true,
-                    dest,
-                    perspectiveFeatureWeights(net, perspective, king_sq, sq, pt, color, hidden_size),
-                );
+                adds[add_count] = perspectiveFeatureWeights(net, perspective, king_sq, sq, pt, color, hidden_size);
+                add_count += 1;
             }
         }
     }
+    applyFeatureRowsFromPrev(dest, entry.values[0..hidden_size], adds[0..add_count], subs[0..sub_count]);
 
     saveRefreshCachePosition(entry, b, dest);
 }
@@ -2147,16 +2210,17 @@ inline fn appendMoveRows(
     }
 }
 
-/// dest = prev + sum(adds) - sum(subs), accumulated tile by tile in registers.
-fn applyFeatureRowsFromPrev(dest: []i16, prev: []const i16, rows: *const FeatureRows) void {
+/// dest = prev + sum(adds) - sum(subs) for runtime row counts, accumulated
+/// tile by tile in registers.
+fn applyFeatureRowsFromPrev(dest: []i16, prev: []const i16, adds: []const []const i16, subs: []const []const i16) void {
     std.debug.assert(dest.len == prev.len);
     std.debug.assert(dest.len % SIMD_LANES == 0);
     var offset: usize = 0;
     while (offset + 8 * SIMD_LANES <= dest.len) : (offset += 8 * SIMD_LANES) {
-        applyFeatureRowsTile(8, dest, prev, rows, offset);
+        applyFeatureRowsTile(8, dest, prev, adds, subs, offset);
     }
     while (offset < dest.len) : (offset += SIMD_LANES) {
-        applyFeatureRowsTile(1, dest, prev, rows, offset);
+        applyFeatureRowsTile(1, dest, prev, adds, subs, offset);
     }
 }
 
@@ -2164,19 +2228,20 @@ inline fn applyFeatureRowsTile(
     comptime registers: usize,
     dest: []i16,
     prev: []const i16,
-    rows: *const FeatureRows,
+    adds: []const []const i16,
+    subs: []const []const i16,
     offset: usize,
 ) void {
     var accumulators: [registers]WeightVec = undefined;
     inline for (0..registers) |register| {
         accumulators[register] = @as(*align(1) const WeightVec, @ptrCast(&prev[offset + register * SIMD_LANES])).*;
     }
-    for (rows.adds[0..rows.add_count]) |row| {
+    for (adds) |row| {
         inline for (0..registers) |register| {
             accumulators[register] +%= @as(*align(1) const WeightVec, @ptrCast(&row[offset + register * SIMD_LANES])).*;
         }
     }
-    for (rows.subs[0..rows.sub_count]) |row| {
+    for (subs) |row| {
         inline for (0..registers) |register| {
             accumulators[register] -%= @as(*align(1) const WeightVec, @ptrCast(&row[offset + register * SIMD_LANES])).*;
         }
@@ -2214,7 +2279,12 @@ pub fn updateAccumulatorsTwoMoves(
             var rows = FeatureRows{};
             appendMoveRows(net, perspective, king_sq, first, &rows, hidden_size);
             appendMoveRows(net, perspective, king_sq, second, &rows, hidden_size);
-            applyFeatureRowsFromPrev(dest, prev.sliceConst(perspective, hidden_size), &rows);
+            applyFeatureRowsFromPrev(
+                dest,
+                prev.sliceConst(perspective, hidden_size),
+                rows.adds[0..rows.add_count],
+                rows.subs[0..rows.sub_count],
+            );
         }
     }
 }
