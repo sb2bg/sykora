@@ -7,6 +7,7 @@ const Board = board.Board;
 const piece = @import("piece.zig");
 
 pub const EMBEDDED_NET = @embedFile("embedded_net");
+const huge_pages = @import("huge_pages.zig");
 
 pub const PSQ_INPUT_SIZE: usize = 768; // 2 colors * 6 piece types * 64 squares
 pub const MAX_HIDDEN_SIZE: usize = 2048;
@@ -136,6 +137,7 @@ fn allocAndReadInts(
 ) LoadError![]T {
     const values = allocator.alloc(T, len) catch return error.OutOfMemory;
     errdefer allocator.free(values);
+    huge_pages.advise(std.mem.sliceAsBytes(values));
 
     for (values) |*value| {
         value.* = readBytesInt(T, data, pos) orelse return error.InvalidNetwork;

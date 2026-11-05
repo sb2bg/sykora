@@ -1,4 +1,5 @@
 const std = @import("std");
+const huge_pages = @import("../huge_pages.zig");
 const board = @import("../bitboard.zig");
 const Move = board.Move;
 
@@ -92,6 +93,7 @@ pub const TranspositionTable = struct {
         const bucket_divisor_reciprocal = divisorReciprocal(@intCast(num_buckets));
         const bucket_mask = if (std.math.isPowerOfTwo(num_buckets)) num_buckets - 1 else 0;
         const buckets = try allocator.alloc(TTBucket, num_buckets);
+        huge_pages.advise(std.mem.sliceAsBytes(buckets));
 
         for (buckets) |*bucket| {
             bucket.* = TTBucket.init();
@@ -133,6 +135,7 @@ pub const TranspositionTable = struct {
         const bucket_size = @sizeOf(TTBucket);
         const num_buckets = (new_size_mb * 1024 * 1024) / bucket_size;
         const buckets = try self.allocator.alloc(TTBucket, num_buckets);
+        huge_pages.advise(std.mem.sliceAsBytes(buckets));
         for (buckets) |*bucket| {
             bucket.* = TTBucket.init();
         }
