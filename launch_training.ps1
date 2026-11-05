@@ -12,14 +12,22 @@
 #
 # Lower-learning-rate fine-tune from a full-precision v8 checkpoint:
 #   .\launch_training.ps1 -Stage finetune -DataDir D:\nnue-data\finetune -Resume <v8-checkpoint-directory>
+#
+# From-scratch 16-bucket run on BT4-rescored data (one subdirectory per source
+# under <root>\train, so -InterleaveSources can spread them evenly):
+#   .\launch_training.ps1 -Stage scratch -BucketLayout b16 -Wdl 0.1 -SkipTactical -InterleaveSources -DataDir D:\nnue-data\bt4 -Superbatches 1000
 
 param(
     [switch]$Smoke,
     [switch]$DryRun,
     [ValidateSet("v8-t1024", "v8-t768")]
     [string]$Profile = "v8-t1024",
-    [ValidateSet("pilot", "broad", "finetune")]
+    [ValidateSet("pilot", "broad", "finetune", "scratch")]
     [string]$Stage = "pilot",
+    [ValidateSet("v3_10", "b16")]
+    [string]$BucketLayout = "v3_10",
+    [switch]$SkipTactical,
+    [switch]$InterleaveSources,
     [string]$DataDir = "",
     [string]$Resume = "",
     [string]$WarmStart = "",
@@ -136,19 +144,29 @@ $dense2 = 32
 $outputBuckets = 8
 $batchSize = 16384
 $batchesPerSuperbatch = 6104
-$saveRate = if ($Stage -eq "broad") { 25 } else { 10 }
+$saveRate = if ($Stage -in @("broad", "scratch")) { 25 } else { 10 }
 $validationPositions = 262144
 
 if ($Resume -and $WarmStart) {
     Write-Error "-Resume and -WarmStart are mutually exclusive"
     exit 2
 }
+if ($Stage -eq "scratch" -and $WarmStart) {
+    Write-Error "The scratch stage trains from random initialisation; use -Resume to continue one"
+    exit 2
+}
+if ($BucketLayout -ne "v3_10" -and $WarmStart) {
+    Write-Error "-WarmStart predecessors use the v3_10 layout"
+    exit 2
+}
+# A scratch run starts from random weights unless it is being resumed.
+$randomInit = $AllowRandomV8Init -or ($Stage -eq "scratch" -and -not $Resume)
 if ($AllowRandomV8Init -and ($Resume -or $WarmStart)) {
     Write-Error "-AllowRandomV8Init cannot be combined with -Resume or -WarmStart"
     exit 2
 }
-if (-not $Resume -and -not $WarmStart -and -not $AllowRandomV8Init) {
-    Write-Error "v8 requires -WarmStart/-Resume (or -AllowRandomV8Init for a smoke diagnostic)"
+if (-not $Resume -and -not $WarmStart -and -not $randomInit) {
+    Write-Error "v8 requires -WarmStart/-Resume, the scratch stage, or -AllowRandomV8Init for a smoke diagnostic"
     exit 2
 }
 if ($Profile -ne "v8-t1024" -and $WarmStart) {
@@ -200,6 +218,8 @@ if ($Smoke) {
     $endSuperbatch = 200
 } elseif ($Stage -eq "broad") {
     $endSuperbatch = 800
+} elseif ($Stage -eq "scratch") {
+    $endSuperbatch = 1000
 } else {
     $endSuperbatch = $StartSuperbatch + 199
 }
@@ -273,6 +293,9 @@ Write-Host "Run ID:        $runId"
 Write-Host "Profile:       $Profile ($Stage)"
 Write-Host "Architecture:  factorised pairwise-MLP + full_threats_v1"
 Write-Host "Shape:         H=$hidden, $hidden -> $dense1 -> $($dense1 * 2) -> $dense2 -> 1"
+Write-Host "King buckets:  $BucketLayout"
+Write-Host "Filter:        $(if ($SkipTactical) { 'quiet positions only' } else { 'default' })"
+Write-Host "Source mix:    $(if ($InterleaveSources) { 'interleaved by size' } else { 'file order' })"
 Write-Host "Output heads:  $outputBuckets material buckets"
 Write-Host "Superbatches:  $StartSuperbatch -> $endSuperbatch"
 Write-Host "Batch shape:   $batchSize x $batchesPerSuperbatch"
@@ -298,7 +321,7 @@ $arguments = @(
     "--validation-buffer-mb", 512,
     "--network-format", $networkFormat,
     "--architecture", "pairwise-mlp",
-    "--bucket-layout", "v3_10",
+    "--bucket-layout", $BucketLayout,
     "--hidden", $hidden,
     "--dense1", $dense1,
     "--dense2", $dense2,
@@ -332,8 +355,14 @@ if ($Resume) {
 if ($WarmStart) {
     $arguments += @("--warm-start", $WarmStart)
 }
-if ($AllowRandomV8Init) {
+if ($randomInit) {
     $arguments += "--allow-random-v8-init"
+}
+if ($SkipTactical) {
+    $arguments += "--skip-tactical"
+}
+if ($InterleaveSources) {
+    $arguments += "--interleave-sources"
 }
 if ($DryRun) {
     $arguments += "--dry-run"

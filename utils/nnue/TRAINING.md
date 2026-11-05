@@ -32,6 +32,39 @@ are local artifacts. They are ignored under `nnue/` when stored in the
 repository, but metadata should still be kept private if it contains local
 paths that should not be published.
 
+## From-scratch b16 run
+
+The `scratch` stage trains the v8 graph from random weights. The recipe in
+[`specs/syknnue8_b16_profile.md`](../../specs/syknnue8_b16_profile.md) uses
+16 king buckets, WDL 0.1, quiet positions only, and sources interleaved by
+size:
+
+```text
+dataset-root/
+  train/
+    source-a/  *.binpack
+    source-b/  *.binpack
+  validation/
+    held-out-001.binpack
+```
+
+Each subdirectory of `train/` is one source. `-InterleaveSources` orders the
+files so every source is spread across the run in proportion to its bytes,
+instead of being read one source after another. A source stored as a few huge
+files cannot be spread; split it first:
+
+```powershell
+python .\utils\nnue\bullet\split_binpack.py `
+  "D:\bt4\source-a.binpack" --output-dir "D:\nnue-data\bt4\train\source-a"
+
+.\launch_training.ps1 `
+  -Stage scratch -BucketLayout b16 -Wdl 0.1 -SkipTactical -InterleaveSources `
+  -DataDir "D:\nnue-data\bt4" -Superbatches 1000 -DryRun
+```
+
+A scratch run is resumed like any other run, with `-Resume` and the same
+`-BucketLayout`.
+
 ## Fine-tuning
 
 Fine-tuning requires a full-precision checkpoint directory containing

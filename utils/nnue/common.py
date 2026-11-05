@@ -71,6 +71,20 @@ SYKORA16_BUCKET_LAYOUT_32 = [
     14, 14, 15, 15,
 ]
 
+# Sixteen buckets refining v3_10 (matches BUCKET_LAYOUT_B16 in the Bullet
+# runner): rank 2 split into four, ranks 3-8 split into wing and centre halves.
+# Every b16 bucket lies inside one v3_10 bucket.
+B16_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 5, 6, 7,
+    8, 8, 9, 9,
+    10, 10, 11, 11,
+    12, 12, 13, 13,
+    12, 12, 13, 13,
+    14, 14, 15, 15,
+    14, 14, 15, 15,
+]
+
 # Proven v3 10-bucket layout (32-entry mirrored half). Expands via
 # expand_mirrored_bucket_layout() to the spec's baseline 64-entry layout.
 V3_BUCKET_LAYOUT_32 = [
@@ -225,8 +239,10 @@ def write_syk_nnue_v8(
     if len(input_bucket_layout_64) != 64:
         raise ValueError("input_bucket_layout_64 must contain exactly 64 entries")
     input_bucket_count = num_buckets(input_bucket_layout_64)
-    if input_bucket_count != 10 or output_bucket_count != 8:
-        raise ValueError("SYKNNUE8 requires B=10 and O=8")
+    if input_bucket_count not in (10, 16) or output_bucket_count != 8:
+        raise ValueError("SYKNNUE8 requires B=10 or B=16, and O=8")
+    if any(input_bucket_layout_64[sq] != input_bucket_layout_64[sq ^ 7] for sq in range(64)):
+        raise ValueError("SYKNNUE8 bucket layouts must be mirror-symmetric")
     if ft_hidden_size not in (768, 1024, 1408) or ft_hidden_size % 2:
         raise ValueError("SYKNNUE8 registered widths are H=768, H=1024, and H=1408")
     if dense1_size != 16 or dense2_size != 32:
@@ -594,7 +610,7 @@ def read_syk_nnue_v8(path: Path) -> dict:
         or flags != 0
         or architecture != V8_ARCH_PAIRWISE_MLP_THREATS
         or feature_set != FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1
-        or input_bucket_count != 10
+        or input_bucket_count not in (10, 16)
         or output_bucket_count != 8
         or h not in (768, 1024, 1408)
         or d1 != 16

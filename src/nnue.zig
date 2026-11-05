@@ -381,9 +381,8 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
     const dense2_size = readBytesInt(u16, data, &pos) orelse return error.InvalidNetwork;
     if (architecture != (if (is_p3) ARCHITECTURE_PAIRWISE_MLP_P3 else ARCHITECTURE_PAIRWISE_MLP_THREATS) or
         feature_set != FEATURE_SET_MIRRORED_PSQ_FULL_THREATS_V1 or
-        bucket_count_u16 != 10 or output_bucket_count_u16 != 8 or
-        (if (is_p3) hidden_size != 1024 else
-            (hidden_size != 768 and hidden_size != 1024 and hidden_size != 1408)) or
+        !(bucket_count_u16 == 10 or (bucket_count_u16 == 16 and !is_p3)) or output_bucket_count_u16 != 8 or
+        (if (is_p3) hidden_size != 1024 else (hidden_size != 768 and hidden_size != 1024 and hidden_size != 1408)) or
         dense1_size != 16 or dense2_size != 32)
     {
         return error.InvalidNetwork;
@@ -439,6 +438,11 @@ fn loadNetworkFromBytes(allocator: std.mem.Allocator, data: []const u8) LoadErro
         max_bucket = @max(max_bucket, entry.*);
     }
     if (@as(u16, max_bucket) + 1 != bucket_count_u16) return error.InvalidNetwork;
+    // Feature indexing mirrors the board when the king is on files e-h, so the
+    // layout must give mirrored king squares the same bucket.
+    for (bucket_layout, 0..) |bucket, square| {
+        if (bucket != bucket_layout[square ^ 7]) return error.InvalidNetwork;
+    }
 
     if (pos + 32 > data.len or !std.mem.eql(u8, data[pos .. pos + 32], &full_threats_v1.packing_hash)) {
         return error.InvalidNetwork;

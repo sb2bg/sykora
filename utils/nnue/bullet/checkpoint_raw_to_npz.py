@@ -20,6 +20,7 @@ from common import (  # noqa: E402
     NNUE_Q,
     NNUE_Q0,
     SCALE,
+    B16_BUCKET_LAYOUT_32,
     V3_BUCKET_LAYOUT_32,
     expand_mirrored_bucket_layout,
 )
@@ -74,9 +75,10 @@ def parse_network_config(run_meta: dict) -> dict:
         layout = [int(value) for value in network["bucket_layout_64"]]
     else:
         layout_name = network.get("bucket_layout_name") or env.get("SYK_BUCKET_LAYOUT", "v3_10")
-        if layout_name != "v3_10":
+        layouts = {"v3_10": V3_BUCKET_LAYOUT_32, "b16": B16_BUCKET_LAYOUT_32}
+        if layout_name not in layouts:
             raise ValueError(f"unsupported implicit bucket layout: {layout_name!r}")
-        layout = expand_mirrored_bucket_layout(V3_BUCKET_LAYOUT_32)
+        layout = expand_mirrored_bucket_layout(layouts[layout_name])
     if len(layout) != 64:
         raise ValueError(f"bucket layout must contain 64 entries, got {len(layout)}")
 

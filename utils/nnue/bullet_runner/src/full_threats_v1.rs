@@ -1,15 +1,25 @@
 use bullet_lib::game::{
     formats::bulletformat::ChessBoard,
-    inputs::{ChessBucketsMirrored, SparseInputType},
+    inputs::{ChessBucketsMirrored, SparseInputType, get_num_buckets},
 };
 
 pub const SCHEME_ID: u16 = 1;
 pub const FEATURE_COUNT: usize = 60_720;
 pub const MAX_ACTIVE_THREATS: usize = 240;
 pub const PSQ_FACTOR_FEATURES: usize = 768;
-pub const PSQ_RESIDUAL_FEATURES: usize = 7_680;
-pub const THREAT_OFFSET: usize = PSQ_FACTOR_FEATURES + PSQ_RESIDUAL_FEATURES;
-pub const TRAINING_INPUTS: usize = THREAT_OFFSET + FEATURE_COUNT;
+
+/// First threat row: the shared PSQ factor, then one 768-row residual per
+/// king bucket.
+pub const fn threat_offset(buckets: usize) -> usize {
+    PSQ_FACTOR_FEATURES + 768 * buckets
+}
+
+pub const fn training_inputs(buckets: usize) -> usize {
+    threat_offset(buckets) + FEATURE_COUNT
+}
+
+/// Input count for the 10-bucket v3_10 layout, which the P3 adapter is fixed to.
+pub const TRAINING_INPUTS: usize = training_inputs(10);
 pub const MAX_ACTIVE_INPUTS: usize = 64 + MAX_ACTIVE_THREATS;
 pub const PACKING_HASH: [u8; 32] = [
     0x96, 0x45, 0x91, 0xed, 0xbe, 0x85, 0x6c, 0x9f, 0x90, 0x69, 0x4d, 0xcb, 0xfa, 0xbe, 0x42, 0xd5,
@@ -405,12 +415,14 @@ fn enumerate_threats(
 #[derive(Clone, Copy, Debug)]
 pub struct FullThreatInputs {
     psq: ChessBucketsMirrored,
+    threat_offset: usize,
 }
 
 impl FullThreatInputs {
     pub fn new(buckets: [usize; 32]) -> Self {
         Self {
             psq: ChessBucketsMirrored::new(buckets),
+            threat_offset: threat_offset(get_num_buckets(&buckets)),
         }
     }
 }
@@ -419,7 +431,7 @@ impl SparseInputType for FullThreatInputs {
     type RequiredDataType = ChessBoard;
 
     fn num_inputs(&self) -> usize {
-        TRAINING_INPUTS
+        self.threat_offset + FEATURE_COUNT
     }
 
     fn max_active(&self) -> usize {
@@ -441,12 +453,15 @@ impl SparseInputType for FullThreatInputs {
             "full_threats_v1 perspective feature-count mismatch"
         );
         for index in 0..stm_count {
-            f(THREAT_OFFSET + stm[index], THREAT_OFFSET + ntm[index]);
+            f(self.threat_offset + stm[index], self.threat_offset + ntm[index]);
         }
     }
 
     fn shorthand(&self) -> String {
-        "virtual-factorised-psq10+full_threats_v1".to_string()
+        format!(
+            "virtual-factorised-psq{}+full_threats_v1",
+            (self.threat_offset - PSQ_FACTOR_FEATURES) / 768
+        )
     }
 
     fn description(&self) -> String {

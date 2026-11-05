@@ -38,7 +38,46 @@ V3_BUCKET_LAYOUT_32 = [
     9, 9, 9, 9,
 ]
 
-BUCKET_LAYOUTS_32 = {"v3_10": V3_BUCKET_LAYOUT_32}
+# Refines v3_10: every b16 bucket lies inside one v3_10 bucket.
+B16_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 5, 6, 7,
+    8, 8, 9, 9,
+    10, 10, 11, 11,
+    12, 12, 13, 13,
+    12, 12, 13, 13,
+    14, 14, 15, 15,
+    14, 14, 15, 15,
+]
+
+BUCKET_LAYOUTS_32 = {"v3_10": V3_BUCKET_LAYOUT_32, "b16": B16_BUCKET_LAYOUT_32}
+
+
+def interleave_by_source(paths: list[Path]) -> list[Path]:
+    """Order files so each source (parent directory) is spread evenly.
+
+    The binpack loader reads files in sequence through a bounded shuffle
+    buffer, so concatenating sources gives an accidental curriculum in which
+    the last source dominates. This interleaves sources in proportion to their
+    bytes: each next file comes from the source furthest behind its share.
+    Deterministic for a fixed file set.
+    """
+    sources: dict[Path, list[Path]] = {}
+    for path in paths:
+        sources.setdefault(path.parent, []).append(path)
+    queues = {source: sorted(files) for source, files in sorted(sources.items())}
+    totals = {source: sum(f.stat().st_size for f in files) for source, files in queues.items()}
+    consumed = {source: 0 for source in queues}
+    ordered: list[Path] = []
+    while any(queues.values()):
+        source = min(
+            (source for source, files in queues.items() if files),
+            key=lambda s: (consumed[s] / totals[s] if totals[s] else 1.0, str(s)),
+        )
+        file = queues[source].pop(0)
+        consumed[source] += file.stat().st_size
+        ordered.append(file)
+    return ordered
 
 
 def expand_mirrored_bucket_layout(layout_32: list[int]) -> list[int]:
@@ -153,7 +192,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dense1", type=int, default=16, help="First dense width")
     parser.add_argument("--dense2", type=int, default=32, help="Second dense width")
     parser.add_argument(
-        "--bucket-layout", choices=["v3_10"], default="v3_10", help="Input bucket layout"
+        "--bucket-layout",
+        choices=sorted(BUCKET_LAYOUTS_32),
+        default="v3_10",
+        help="Input bucket layout"
     )
     parser.add_argument(
         "--output-buckets", type=int, default=8, choices=[1, 8], help="Output head count"
@@ -207,7 +249,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-random-v8-init",
         action="store_true",
-        help="Allow v8 without a v7 warm start (smoke diagnostics only)",
+        help="Train from random initialisation (scratch runs and smoke diagnostics)",
+    )
+    parser.add_argument(
+        "--skip-tactical",
+        action="store_true",
+        help="Drop binpack positions whose recorded move is a capture or promotion",
+    )
+    parser.add_argument(
+        "--interleave-sources",
+        action="store_true",
+        help="Interleave training files across their parent directories by size",
     )
     parser.add_argument(
         "--export-after",
@@ -381,6 +433,12 @@ def main() -> int:
         return 2
 
     datasets = [Path(path).resolve() for path in args.dataset]
+    if args.interleave_sources:
+        datasets = interleave_by_source(datasets)
+        print(
+            f"Interleaved {len(datasets)} training files across "
+            f"{len({path.parent for path in datasets})} sources"
+        )
     validation_datasets = [Path(path).resolve() for path in args.validation_dataset]
     for dataset in datasets + validation_datasets:
         if not dataset.is_file():
@@ -553,6 +611,7 @@ def main() -> int:
             "SYK_DENSE2": str(args.dense2),
             "SYK_NETWORK_FORMAT": args.network_format,
             "SYK_BUCKET_LAYOUT": args.bucket_layout,
+            "SYK_SKIP_TACTICAL": "1" if args.skip_tactical else "0",
             "SYK_LR_START": str(args.lr_start),
             "SYK_LR_FINAL": str(final_lr),
             "SYK_LR_ORIGIN_SUPERBATCH": str(args.lr_origin_superbatch),
@@ -794,6 +853,8 @@ def main() -> int:
             "lr_origin_superbatch": args.lr_origin_superbatch,
             "lr_final_superbatch": lr_final_superbatch,
             "wdl": args.wdl,
+            "skip_tactical": args.skip_tactical,
+            "interleave_sources": args.interleave_sources,
             "save_rate": args.save_rate,
             "threads": args.threads,
             "backend": args.backend,

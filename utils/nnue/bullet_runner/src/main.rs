@@ -4,7 +4,13 @@ mod p3_inputs;
 use bullet_lib::{
     acyclib::graph::ir::operation::p3::P3Anova,
     game::{
-        formats::{bulletformat::ChessBoard, sfbinpack::TrainingDataEntry},
+        formats::{
+            bulletformat::ChessBoard,
+            sfbinpack::{
+                TrainingDataEntry,
+                chess::{piece::Piece, r#move::MoveType},
+            },
+        },
         inputs::{SparseInputType, get_num_buckets},
         outputs::MaterialCount,
     },
@@ -35,6 +41,29 @@ const BUCKET_LAYOUT_V3_10: [usize; 32] = [
     9, 9, 9, 9,
     9, 9, 9, 9,
 ];
+
+/// Sixteen buckets refining v3_10: rank 2 split into four, ranks 3-8 split
+/// into wing and centre halves. Every bucket lies inside one v3_10 bucket, so a
+/// v3_10 net expands into this layout without changing its output.
+#[rustfmt::skip]
+const BUCKET_LAYOUT_B16: [usize; 32] = [
+     0,  1,  2,  3,
+     4,  5,  6,  7,
+     8,  8,  9,  9,
+    10, 10, 11, 11,
+    12, 12, 13, 13,
+    12, 12, 13, 13,
+    14, 14, 15, 15,
+    14, 14, 15, 15,
+];
+
+fn bucket_layout(name: &str) -> [usize; 32] {
+    match name {
+        "v3_10" => BUCKET_LAYOUT_V3_10,
+        "b16" => BUCKET_LAYOUT_B16,
+        other => panic!("unsupported SYK_BUCKET_LAYOUT={other}; registered layouts are v3_10 and b16"),
+    }
+}
 
 const FT_QUANT: i16 = 255;
 const THREAT_WEIGHT_MIN: f32 = i8::MIN as f32 / FT_QUANT as f32;
@@ -96,6 +125,18 @@ fn binpack_filter(entry: &TrainingDataEntry) -> bool {
     entry.ply >= 16
         && !entry.pos.is_checked(entry.pos.side_to_move())
         && entry.score.unsigned_abs() <= 10000
+}
+
+/// Also drops positions whose recorded move is a capture or promotion: their
+/// static-eval labels describe a pending exchange rather than the position.
+fn binpack_filter_quiet(entry: &TrainingDataEntry) -> bool {
+    let tactical = match entry.mv.mtype() {
+        MoveType::Promotion | MoveType::EnPassant => true,
+        // Castling is encoded as the king capturing its own rook.
+        MoveType::Castle => false,
+        MoveType::Normal => entry.pos.piece_at(entry.mv.to()) != Piece::NONE,
+    };
+    binpack_filter(entry) && !tactical
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +230,8 @@ fn saved_format(with_p3: bool) -> Vec<SavedFormat> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_network<const O: usize>(
+    layout: [usize; 32],
+    skip_tactical: bool,
     num_input_buckets: usize,
     dataset_paths: &[&str],
     data_format: &str,
@@ -215,9 +258,9 @@ fn run_network<const O: usize>(
 ) {
     let save_format = saved_format(with_p3);
     let input_getter = if with_p3 {
-        SykoraInputs::P3(P3Inputs::new(BUCKET_LAYOUT_V3_10))
+        SykoraInputs::P3(P3Inputs::new(layout))
     } else {
-        SykoraInputs::V8(FullThreatInputs::new(BUCKET_LAYOUT_V3_10))
+        SykoraInputs::V8(FullThreatInputs::new(layout))
     };
     let training_inputs = input_getter.num_inputs();
 
@@ -312,7 +355,7 @@ fn run_network<const O: usize>(
     trainer.optimiser.set_params_for_weight("l0w", ft_clipping);
     trainer.optimiser.add_clip_range_for_weight(
         "l0w",
-        full_threats_v1::THREAT_OFFSET * hl_size,
+        full_threats_v1::threat_offset(num_input_buckets) * hl_size,
         full_threats_v1::FEATURE_COUNT * hl_size,
         THREAT_WEIGHT_MIN,
         THREAT_WEIGHT_MAX,
@@ -469,7 +512,11 @@ fn run_network<const O: usize>(
     for path in dataset_paths {
         println!("  Dataset: {path}");
     }
-    println!("Filter: ply>=16, not in check, |score|<=10000");
+    if skip_tactical {
+        println!("Filter: ply>=16, not in check, |score|<=10000, recorded move quiet");
+    } else {
+        println!("Filter: ply>=16, not in check, |score|<=10000");
+    }
 
     match data_format {
         "binpack" => {
@@ -486,7 +533,7 @@ fn run_network<const O: usize>(
                 dataset_paths,
                 binpack_buffer_mb,
                 binpack_threads,
-                binpack_filter,
+                if skip_tactical { binpack_filter_quiet } else { binpack_filter },
             );
             trainer.run(&schedule, &settings, &dataloader);
         }
@@ -555,10 +602,12 @@ fn main() {
         "pairwise architectures require an even FT width"
     );
 
-    assert_eq!(
-        bucket_layout_name, "v3_10",
-        "only the proven v3_10 bucket layout is currently supported"
+    let layout = bucket_layout(&bucket_layout_name);
+    assert!(
+        !with_p3 || bucket_layout_name == "v3_10",
+        "the P3 adapter is fixed to the v3_10 bucket layout"
     );
+    let skip_tactical = env_usize("SYK_SKIP_TACTICAL", 0) != 0;
     assert!(
         (network_format == "syk8" && architecture == "pairwise-mlp")
             || (network_format == "syk9" && with_p3),
@@ -575,7 +624,7 @@ fn main() {
         "SYKNNUE8 registered widths are H=1408 (T1408), H=1024 (T1024), and H=768 (T768)"
     );
 
-    let num_input_buckets = get_num_buckets(&BUCKET_LAYOUT_V3_10);
+    let num_input_buckets = get_num_buckets(&layout);
     let dataset_paths: Vec<&str> = dataset_path
         .split(';')
         .filter(|path| !path.is_empty())
@@ -591,7 +640,10 @@ fn main() {
         batch_size * batches_per_superbatch
     );
 
+    println!("Input buckets: {bucket_layout_name} ({num_input_buckets})");
     run_network::<8>(
+        layout,
+        skip_tactical,
         num_input_buckets,
         &dataset_paths,
         &data_format,
@@ -616,4 +668,36 @@ fn main() {
         with_p3,
         freeze_p3_base,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bullet_lib::game::formats::sfbinpack::chess::{coords::Square, position::Position, r#move::Move};
+
+    fn square(name: &str) -> Square {
+        let bytes = name.as_bytes();
+        Square::new(u32::from(bytes[1] - b'1') * 8 + u32::from(bytes[0] - b'a'))
+    }
+
+    fn entry(fen: &str, mv: Move) -> TrainingDataEntry {
+        TrainingDataEntry { pos: Position::from_fen(fen).unwrap(), mv, score: 0, ply: 30, result: 0 }
+    }
+
+    #[test]
+    fn quiet_filter_drops_only_captures_and_promotions() {
+        let open = "r3k2r/8/8/3p4/4P3/8/8/R3K2R w KQkq - 0 1";
+        assert!(binpack_filter_quiet(&entry(open, Move::normal(square("a1"), square("a2")))));
+        assert!(!binpack_filter_quiet(&entry(open, Move::normal(square("e4"), square("d5")))));
+        // Castling is encoded as the king moving onto its own rook.
+        assert!(binpack_filter_quiet(&entry(open, Move::castle(square("e1"), square("h1")))));
+        let promotion = "8/4P3/8/8/8/8/k7/4K3 w - - 0 1";
+        assert!(!binpack_filter_quiet(&entry(
+            promotion,
+            Move::promotion(square("e7"), square("e8"), Piece::WHITE_QUEEN),
+        )));
+        let en_passant = "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1";
+        assert!(!binpack_filter_quiet(&entry(en_passant, Move::en_passant(square("e5"), square("d6")))));
+        assert!(binpack_filter(&entry(en_passant, Move::en_passant(square("e5"), square("d6")))));
+    }
 }
