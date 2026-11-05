@@ -5,6 +5,7 @@ LMRKiller, int, 1024, 0, 2048, 102.4, 0.002
 LMRCounter, int, 1024, 0, 2048, 102.4, 0.002
 LMRImproving, int, 1024, 0, 2048, 102.4, 0.002
 LMRPV, int, 1024, 0, 2048, 102.4, 0.002
+LMRCutNode, int, 1024, 0, 3072, 153.6, 0.002
 LMPMoveScale, int, 90, 50, 200, 7.5, 0.002
 HistoryBonusScale, int, 100, 30, 300, 13.5, 0.002
 HistoryMaxBonus, int, 490, 50, 1600, 77.5, 0.002

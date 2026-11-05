@@ -913,7 +913,7 @@ pub const SearchEngine = struct {
 
             // Aspiration window loop - re-search with wider window on fail
             while (true) {
-                score = try self.alphaBeta(asp_alpha, asp_beta, depth, 0, true);
+                score = try self.alphaBeta(asp_alpha, asp_beta, depth, 0, true, false);
 
                 if (self.stop_search.load(.monotonic)) break;
 
@@ -1201,7 +1201,7 @@ pub const SearchEngine = struct {
                 self.history_count += 1;
             }
 
-            const score = -try self.alphaBeta(-singular_beta, -singular_beta + 1, reduced_depth, ply + 1, true);
+            const score = -try self.alphaBeta(-singular_beta, -singular_beta + 1, reduced_depth, ply + 1, true, true);
 
             self.popAccumulator();
             self.board.unmakeMoveUnchecked(move, undo);
@@ -1319,6 +1319,7 @@ pub const SearchEngine = struct {
 
     fn tryNullMovePrune(
         self: *Self,
+        cut_node: bool,
         do_null: bool,
         is_pv_node: bool,
         in_check: bool,
@@ -1378,7 +1379,7 @@ pub const SearchEngine = struct {
         self.history_count += 1;
         self.repetition_floor = self.combinedHistoryCount() - 1;
 
-        const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false);
+        const null_score = -try self.alphaBeta(-beta_adj, -beta_adj + 1, search_depth -| reduction, ply + 1, false, !cut_node);
 
         self.history_count = old_hist_count;
         self.repetition_floor = old_repetition_floor;
@@ -1392,7 +1393,7 @@ pub const SearchEngine = struct {
         if (eval.isMateScore(null_score)) return beta_adj;
 
         if (search_depth >= NULL_MOVE_VERIFICATION_DEPTH) {
-            const verify_score = try self.alphaBeta(beta_adj - 1, beta_adj, search_depth - reduction, ply, false);
+            const verify_score = try self.alphaBeta(beta_adj - 1, beta_adj, search_depth - reduction, ply, false, cut_node);
             if (verify_score >= beta_adj) {
                 return null_score;
             }
@@ -1404,6 +1405,7 @@ pub const SearchEngine = struct {
 
     fn tryProbCut(
         self: *Self,
+        cut_node: bool,
         do_null: bool,
         is_pv_node: bool,
         in_check: bool,
@@ -1460,6 +1462,7 @@ pub const SearchEngine = struct {
                     search_depth - PROBCUT_REDUCTION,
                     ply + 1,
                     true,
+                    !cut_node,
                 );
             }
 
@@ -1579,7 +1582,8 @@ pub const SearchEngine = struct {
     }
 
     /// Alpha-beta search (negamax variant) with various pruning techniques
-    fn alphaBeta(self: *Self, alpha_in: i32, beta: i32, depth: u32, ply: u32, do_null: bool) anyerror!i32 {
+    /// `cut_node` marks zero-window nodes expected to fail high.
+    fn alphaBeta(self: *Self, alpha_in: i32, beta: i32, depth: u32, ply: u32, do_null: bool, cut_node: bool) anyerror!i32 {
         // Quiescence at depth 0
         if (depth == 0) {
             return self.quiescence(alpha_in, beta, ply);
@@ -1654,11 +1658,11 @@ pub const SearchEngine = struct {
             return razor_score;
         }
 
-        if (try self.tryNullMovePrune(do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply)) |null_score| {
+        if (try self.tryNullMovePrune(cut_node, do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply)) |null_score| {
             return null_score;
         }
 
-        const probcut_score = try self.tryProbCut(do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply);
+        const probcut_score = try self.tryProbCut(cut_node, do_null, is_pv_node, in_check, search_depth, static_eval, beta_adj, ply);
         if (self.stop_search.load(.monotonic)) return 0;
         if (probcut_score) |score| return score;
 
@@ -1859,21 +1863,25 @@ pub const SearchEngine = struct {
                 if (is_pv_node) {
                     reduction -= self.tuning.lmr_pv;
                 }
+                // Expected cut nodes reduce more: one good move should suffice.
+                if (cut_node) {
+                    reduction += self.tuning.lmr_cut_node;
+                }
                 // Clamp reduction: at least 1, at most depth-2 (leave at least 1 ply)
                 const reduction_plies: i64 = @divTrunc(reduction, LMR_GRAIN);
                 const r: u32 = @intCast(@max(1, @min(reduction_plies, @as(i64, next_depth) - 1)));
 
                 // Search with reduced depth
-                score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - r, ply + 1, true);
+                score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth - r, ply + 1, true, true);
 
                 // If LMR found something good, re-search at full depth
                 if (score > alpha) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true, !cut_node);
                 }
             } else {
                 // PVS - search with null window first if not first move
                 if (moves_searched > 0) {
-                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true);
+                    score = -try self.alphaBeta(-alpha - 1, -alpha, next_depth, ply + 1, true, !cut_node);
                 } else {
                     // First move always searched with full window
                     score = alpha + 1; // Force full search
@@ -1883,7 +1891,7 @@ pub const SearchEngine = struct {
             // A full-depth fail-high already proves the cutoff, unless the
             // later sacrifice penalty can lower it below beta.
             if (moves_searched == 0 or (score > alpha and (score < beta_adj or speculative_sac_candidate))) {
-                score = -try self.alphaBeta(-beta, -alpha, next_depth, ply + 1, true);
+                score = -try self.alphaBeta(-beta, -alpha, next_depth, ply + 1, true, false);
             }
 
             // Unmake move
@@ -2434,16 +2442,16 @@ test "draw and mate precedence are shared by alpha beta and quiescence" {
     defer std.testing.allocator.destroy(engine);
     engine.* = try SearchEngine.init(&b, std.testing.allocator, &stop, null, &tt, false, null, 100, 100);
     defer engine.deinit();
-    try std.testing.expectEqual(DRAW_SCORE, try engine.alphaBeta(-INF, INF, 4, 1, true));
+    try std.testing.expectEqual(DRAW_SCORE, try engine.alphaBeta(-INF, INF, 4, 1, true, false));
     try std.testing.expectEqual(DRAW_SCORE, try engine.quiescence(-INF, INF, 1));
     b = try Board.fromFen("7k/6Q1/5K2/8/8/8/8/8 b - - 100 1");
-    try std.testing.expectEqual(-eval.mateIn(1), try engine.alphaBeta(-INF, INF, 4, 1, true));
+    try std.testing.expectEqual(-eval.mateIn(1), try engine.alphaBeta(-INF, INF, 4, 1, true, false));
     try std.testing.expectEqual(-eval.mateIn(1), try engine.quiescence(-INF, INF, 1));
     b = try Board.fromFen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1");
     try std.testing.expectEqual(DRAW_SCORE, try engine.quiescence(-2000, -1999, 1));
     // The stack guard must also preserve mate precedence.
     b = try Board.fromFen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1");
-    try std.testing.expectEqual(-eval.mateIn(MAX_PLY - 1), try engine.alphaBeta(-INF, INF, 4, MAX_PLY - 1, true));
+    try std.testing.expectEqual(-eval.mateIn(MAX_PLY - 1), try engine.alphaBeta(-INF, INF, 4, MAX_PLY - 1, true, false));
     b = Board.startpos();
     try std.testing.expectEqual(engine.evaluatePosition(), try engine.quiescence(-INF, INF, MAX_PLY - 1));
 }
@@ -2457,15 +2465,15 @@ test "rule fifty context blocks old TT bounds while retaining the move" {
     defer std.testing.allocator.destroy(engine);
     engine.* = try SearchEngine.init(&b, std.testing.allocator, &stop, null, &tt, false, null, 100, 100);
     defer engine.deinit();
-    _ = try engine.alphaBeta(1999, 2000, 4, 1, true);
+    _ = try engine.alphaBeta(1999, 2000, 4, 1, true, false);
     b.board.halfmove_clock = 99;
     const probe = engine.probeTransposition(4, 1, false, 1999, 2000);
     try std.testing.expect(probe.tt_move != null);
     try std.testing.expectEqual(@as(?i32, null), probe.cutoff);
     try std.testing.expectEqual(@as(?i32, null), probe.tt_score);
-    try std.testing.expectEqual(DRAW_SCORE, try engine.alphaBeta(1999, 2000, 4, 1, true));
+    try std.testing.expectEqual(DRAW_SCORE, try engine.alphaBeta(1999, 2000, 4, 1, true, false));
     tt.clear();
-    try std.testing.expectEqual(DRAW_SCORE, try engine.alphaBeta(1999, 2000, 4, 1, true));
+    try std.testing.expectEqual(DRAW_SCORE, try engine.alphaBeta(1999, 2000, 4, 1, true, false));
     try std.testing.expect(tt.probe(b.zobrist_hasher.zobrist_hash) == null);
 }
 

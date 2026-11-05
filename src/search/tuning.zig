@@ -15,6 +15,7 @@ pub const SearchTuning = struct {
     lmr_counter: i32 = 1024,
     lmr_improving: i32 = 1024,
     lmr_pv: i32 = 1024,
+    lmr_cut_node: i32 = 1024,
 
     // Late move pruning.
     lmp_move_scale_pct: i32 = 90,
@@ -131,6 +132,7 @@ pub const tunables = [_]Tunable{
     .{ .name = "LMRCounter", .field = "lmr_counter", .min = 0, .max = 2048 },
     .{ .name = "LMRImproving", .field = "lmr_improving", .min = 0, .max = 2048 },
     .{ .name = "LMRPV", .field = "lmr_pv", .min = 0, .max = 2048 },
+    .{ .name = "LMRCutNode", .field = "lmr_cut_node", .min = 0, .max = 3072 },
     .{ .name = "LMRMinDepth", .field = "lmr_min_depth", .min = 1, .max = 6, .group = .discrete },
     .{ .name = "LMPMoveScale", .field = "lmp_move_scale_pct", .min = 50, .max = 200 },
     .{ .name = "LMPMaxDepth", .field = "lmp_max_depth", .min = 0, .max = 3, .group = .discrete },
