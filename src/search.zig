@@ -1487,9 +1487,11 @@ pub const SearchEngine = struct {
         return null;
     }
 
+    /// Linear in depth so a few cutoffs move a cell well into its +/-16384
+    /// range; the old depth^2 bonus left nearly all scores within +/-512.
     inline fn historyBonus(self: *const Self, depth: u32) i32 {
-        const scaled = @divTrunc(@as(i64, depth) * @as(i64, depth) * @as(i64, self.tuning.history_bonus_scale_pct), 100);
-        return @intCast(std.math.clamp(scaled, 0, @as(i64, self.tuning.history_max_bonus)));
+        const linear = self.tuning.history_bonus_mult * @as(i32, @intCast(depth)) - self.tuning.history_bonus_offset;
+        return std.math.clamp(linear, 0, @as(i32, @intCast(self.tuning.history_max_bonus)));
     }
 
     fn updateQuietHeuristicsOnBetaCutoff(
