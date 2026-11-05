@@ -1056,66 +1056,6 @@ inline fn applyFeatureSlice(comptime add: bool, dest: anytype, weights: []const 
     }
 }
 
-inline fn applyThreatFeatureBatch(
-    net: *const Network,
-    destination: anytype,
-    additions: []const u16,
-    removals: []const u16,
-) void {
-    std.debug.assert(additions.len <= 2);
-    std.debug.assert(removals.len <= 2);
-    const hidden_size = destination.len;
-    const threat_weights = net.threat_weights;
-    const DestVec = AccVecOf(@TypeOf(destination));
-    const Dest = std.meta.Elem(@TypeOf(destination));
-    var h: usize = 0;
-    while (h + SIMD_LANES <= hidden_size) : (h += SIMD_LANES) {
-        const destination_ptr: *align(1) DestVec = @ptrCast(&destination[h]);
-        var values = destination_ptr.*;
-        for (additions) |feature| {
-            const base = @as(usize, feature) * hidden_size + h;
-            const weight_ptr: *align(1) const ThreatWeightVec = @ptrCast(&threat_weights[base]);
-            values += @as(DestVec, @intCast(weight_ptr.*));
-        }
-        for (removals) |feature| {
-            const base = @as(usize, feature) * hidden_size + h;
-            const weight_ptr: *align(1) const ThreatWeightVec = @ptrCast(&threat_weights[base]);
-            values -= @as(DestVec, @intCast(weight_ptr.*));
-        }
-        destination_ptr.* = values;
-    }
-    while (h < hidden_size) : (h += 1) {
-        for (additions) |feature| {
-            destination[h] += @as(Dest, threat_weights[@as(usize, feature) * hidden_size + h]);
-        }
-        for (removals) |feature| {
-            destination[h] -= @as(Dest, threat_weights[@as(usize, feature) * hidden_size + h]);
-        }
-    }
-}
-
-fn applyThreatFeatureChanges(
-    net: *const Network,
-    destination: anytype,
-    additions: []const u16,
-    removals: []const u16,
-) void {
-    var addition_index: usize = 0;
-    var removal_index: usize = 0;
-    while (addition_index < additions.len or removal_index < removals.len) {
-        const addition_end = @min(addition_index + 2, additions.len);
-        const removal_end = @min(removal_index + 2, removals.len);
-        applyThreatFeatureBatch(
-            net,
-            destination,
-            additions[addition_index..addition_end],
-            removals[removal_index..removal_end],
-        );
-        addition_index = addition_end;
-        removal_index = removal_end;
-    }
-}
-
 fn applyThreatFeatureChangesFromPrev(
     net: *const Network,
     destination: []i16,
@@ -2679,6 +2619,8 @@ fn evaluatePairwiseMlpFromSplitSlices(
     );
 }
 
+const zero_threat_values = [_]i16{0} ** MAX_HIDDEN_SIZE;
+
 /// Full initialization of the V8 threat sums at a search root.
 pub fn initThreatAccumulators(net: *const Network, b: *Board) ThreatAccumulatorPair {
     var result = ThreatAccumulatorPair{
@@ -2701,8 +2643,8 @@ pub fn initThreatAccumulators(net: *const Network, b: *Board) ThreatAccumulatorP
     );
 
     const hidden_size: usize = @intCast(net.ft_hidden_size);
-    applyThreatFeatureChanges(net, result.white.values[0..hidden_size], features.white, &.{});
-    applyThreatFeatureChanges(net, result.black.values[0..hidden_size], features.black, &.{});
+    applyThreatFeatureChangesFromPrev(net, result.white.values[0..hidden_size], zero_threat_values[0..hidden_size], features.white, &.{});
+    applyThreatFeatureChangesFromPrev(net, result.black.values[0..hidden_size], zero_threat_values[0..hidden_size], features.black, &.{});
     return result;
 }
 
@@ -2713,10 +2655,10 @@ fn refreshThreatAccumulator(
     result: *ThreatAccumulator,
 ) void {
     const hidden_size: usize = @intCast(net.ft_hidden_size);
-    @memset(result.values[0..hidden_size], 0);
     var feature_storage: [full_threats_v1.max_active]u16 = undefined;
     const features = full_threats_v1.enumerate(&b.board, perspective, &feature_storage);
-    applyThreatFeatureChanges(net, result.values[0..hidden_size], features, &.{});
+    // One tiled pass over all active rows instead of a pass per pair of rows.
+    applyThreatFeatureChangesFromPrev(net, result.values[0..hidden_size], zero_threat_values[0..hidden_size], features, &.{});
 }
 
 fn updateThreatAccumulator(
