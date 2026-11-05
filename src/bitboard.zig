@@ -904,12 +904,14 @@ pub const BitBoard = struct {
         if ((self.color_sets[@intFromEnum(color)] & color_mask) == 0)
             return null;
 
-        for (self.kind_sets, 0..) |kind_mask, i| {
-            if ((kind_mask & color_mask) != 0)
-                return @enumFromInt(i);
+        // An occupied square holds exactly one kind, so sum kind * bit without
+        // the mispredicted early exits of a search loop.
+        const shift: u6 = @intCast(index);
+        var kind: u64 = 0;
+        inline for (1..6) |i| {
+            kind += i * ((self.kind_sets[i] >> shift) & 1);
         }
-
-        return null;
+        return @enumFromInt(kind);
     }
 
     /// Check if there are any pawns of the given color adjacent to the specified square.
