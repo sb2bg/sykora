@@ -22,6 +22,10 @@ pub const SearchTuning = struct {
     lmp_max_depth: u32 = 3,
     lmp_improving_bonus: u32 = 2,
 
+    // History pruning: skip quiets below -margin * depth.
+    history_prune_max_depth: u32 = 4,
+    history_prune_margin: i32 = 1024,
+
     // History.
     history_bonus_mult: i32 = 160,
     history_bonus_offset: i32 = 96,
@@ -140,6 +144,8 @@ pub const tunables = [_]Tunable{
     .{ .name = "LMPMoveScale", .field = "lmp_move_scale_pct", .min = 50, .max = 200 },
     .{ .name = "LMPMaxDepth", .field = "lmp_max_depth", .min = 0, .max = 3, .group = .discrete },
     .{ .name = "LMPImprovingBonus", .field = "lmp_improving_bonus", .min = 0, .max = 8, .group = .discrete },
+    .{ .name = "HistoryPruneMargin", .field = "history_prune_margin", .min = 256, .max = 8192 },
+    .{ .name = "HistoryPruneMaxDepth", .field = "history_prune_max_depth", .min = 0, .max = 8, .group = .discrete },
     .{ .name = "HistoryBonusMult", .field = "history_bonus_mult", .min = 40, .max = 400 },
     .{ .name = "HistoryBonusOffset", .field = "history_bonus_offset", .min = 0, .max = 400 },
     .{ .name = "HistoryMaxBonus", .field = "history_max_bonus", .min = 400, .max = 4000 },

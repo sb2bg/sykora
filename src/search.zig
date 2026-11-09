@@ -1754,6 +1754,19 @@ pub const SearchEngine = struct {
                     if (quiet_history_score <= 0) continue;
                 }
 
+                // History pruning: at shallow non-PV nodes, skip quiets whose
+                // history says they almost never work here.
+                if (!is_pv_node and
+                    !in_check and
+                    moves_searched > 0 and
+                    search_depth <= self.tuning.history_prune_max_depth and
+                    !is_killer and
+                    !is_counter_move and
+                    quiet_history_score < -self.tuning.history_prune_margin * @as(i32, @intCast(search_depth)))
+                {
+                    continue;
+                }
+
                 // Quiet SEE pruning: trim late moves that leave material hanging.
                 if (!is_pv_node and
                     !in_check and
