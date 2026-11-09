@@ -18,9 +18,8 @@ pub const SearchTuning = struct {
     lmr_cut_node: i32 = 1024,
 
     // Late move pruning.
-    lmp_move_scale_pct: i32 = 90,
-    lmp_max_depth: u32 = 3,
-    lmp_improving_bonus: u32 = 2,
+    lmp_move_scale_pct: i32 = 100,
+    lmp_max_depth: u32 = 8,
 
     // History.
     history_bonus_mult: i32 = 160,
@@ -138,8 +137,7 @@ pub const tunables = [_]Tunable{
     .{ .name = "LMRCutNode", .field = "lmr_cut_node", .min = 0, .max = 3072 },
     .{ .name = "LMRMinDepth", .field = "lmr_min_depth", .min = 1, .max = 6, .group = .discrete },
     .{ .name = "LMPMoveScale", .field = "lmp_move_scale_pct", .min = 50, .max = 200 },
-    .{ .name = "LMPMaxDepth", .field = "lmp_max_depth", .min = 0, .max = 3, .group = .discrete },
-    .{ .name = "LMPImprovingBonus", .field = "lmp_improving_bonus", .min = 0, .max = 8, .group = .discrete },
+    .{ .name = "LMPMaxDepth", .field = "lmp_max_depth", .min = 0, .max = 12, .group = .discrete },
     .{ .name = "HistoryBonusMult", .field = "history_bonus_mult", .min = 40, .max = 400 },
     .{ .name = "HistoryBonusOffset", .field = "history_bonus_offset", .min = 0, .max = 400 },
     .{ .name = "HistoryMaxBonus", .field = "history_max_bonus", .min = 400, .max = 4000 },

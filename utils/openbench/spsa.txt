@@ -6,7 +6,7 @@ LMRCounter, int, 1024, 0, 2048, 102.4, 0.002
 LMRImproving, int, 1024, 0, 2048, 102.4, 0.002
 LMRPV, int, 1024, 0, 2048, 102.4, 0.002
 LMRCutNode, int, 1024, 0, 3072, 153.6, 0.002
-LMPMoveScale, int, 90, 50, 200, 7.5, 0.002
+LMPMoveScale, int, 100, 50, 200, 7.5, 0.002
 HistoryBonusMult, int, 160, 40, 400, 18.0, 0.002
 HistoryBonusOffset, int, 96, 0, 400, 20.0, 0.002
 HistoryMaxBonus, int, 1600, 400, 4000, 180.0, 0.002
