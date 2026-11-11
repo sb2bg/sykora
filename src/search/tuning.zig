@@ -5,74 +5,74 @@ const std = @import("std");
 /// Defaults track the latest accepted SPSA candidate.
 pub const SearchTuning = struct {
     // Late move reductions. The base and table are hundredths of a ply.
-    lmr_base_x100: i32 = 0,
-    lmr_scale_pct: i32 = 140,
-    lmr_history_scale_pct: i32 = 95,
+    lmr_base_x100: i32 = 4,
+    lmr_scale_pct: i32 = 147,
+    lmr_history_scale_pct: i32 = 100,
     lmr_full_depth_moves: u32 = 3,
     lmr_min_depth: u32 = 3,
     // Reduction relief in 1/1024 ply.
-    lmr_killer: i32 = 1024,
-    lmr_counter: i32 = 1024,
-    lmr_improving: i32 = 1024,
-    lmr_pv: i32 = 1024,
-    lmr_cut_node: i32 = 1024,
+    lmr_killer: i32 = 1019,
+    lmr_counter: i32 = 1040,
+    lmr_improving: i32 = 967,
+    lmr_pv: i32 = 1043,
+    lmr_cut_node: i32 = 1088,
 
     // Late move pruning.
-    lmp_move_scale_pct: i32 = 90,
+    lmp_move_scale_pct: i32 = 92,
     lmp_max_depth: u32 = 3,
     lmp_improving_bonus: u32 = 2,
 
     // History.
-    history_bonus_mult: i32 = 160,
-    history_bonus_offset: i32 = 96,
-    history_max_bonus: u32 = 1600,
+    history_bonus_mult: i32 = 157,
+    history_bonus_offset: i32 = 87,
+    history_max_bonus: u32 = 1593,
 
     // Static-eval correction history weights (pawn, per-side non-pawn).
-    corr_pawn_weight: i32 = 200,
-    corr_non_pawn_weight: i32 = 100,
+    corr_pawn_weight: i32 = 201,
+    corr_non_pawn_weight: i32 = 111,
     corr_minor_weight: i32 = 100,
-    corr_major_weight: i32 = 100,
+    corr_major_weight: i32 = 101,
 
     // Aspiration windows.
-    asp_delta: i32 = 25,
+    asp_delta: i32 = 27,
     asp_widen_pct: i32 = 200,
 
     // Reverse futility pruning: margin * depth - improving_margin * improving.
-    rfp_margin: i32 = 100,
-    rfp_improving_margin: i32 = 100,
+    rfp_margin: i32 = 96,
+    rfp_improving_margin: i32 = 92,
     rfp_max_depth: u32 = 7,
 
     // Futility pruning: base + mult * depth (+ improving).
-    futility_base: i32 = 200,
+    futility_base: i32 = 201,
     futility_mult: i32 = 120,
-    futility_improving: i32 = 80,
+    futility_improving: i32 = 75,
     futility_max_depth: u32 = 3,
 
-    razor_margin: i32 = 500,
+    razor_margin: i32 = 511,
 
     // Null move pruning.
     nmp_min_depth: u32 = 3,
     nmp_base_reduction: u32 = 3,
-    nmp_eval_margin: i32 = 80,
+    nmp_eval_margin: i32 = 79,
     nmp_eval_reduce_margin: i32 = 200,
     nmp_depth_divisor: u32 = 3,
 
     // ProbCut.
     probcut_min_depth: u32 = 6,
-    probcut_margin: i32 = 200,
+    probcut_margin: i32 = 190,
 
     // Singular extensions: margin = base + per_ply * depth.
     singular_min_depth: u32 = 8,
-    singular_margin_base: i32 = 30,
-    singular_margin_per_ply: i32 = 25,
+    singular_margin_base: i32 = 29,
+    singular_margin_per_ply: i32 = 26,
 
     // SEE pruning. Main-search margins scale with depth.
-    main_see_margin: i32 = 70,
+    main_see_margin: i32 = 68,
     main_see_max_depth: u32 = 4,
-    quiet_see_margin: i32 = 20,
+    quiet_see_margin: i32 = 19,
     quiet_see_max_depth: u32 = 7,
-    qs_see_threshold: i32 = -80,
-    qs_delta_margin: i32 = 300,
+    qs_see_threshold: i32 = -77,
+    qs_delta_margin: i32 = 314,
 
     // Adaptive soft time limit, in permille.
     tm_node_base: i32 = 1480,
