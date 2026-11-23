@@ -6,6 +6,44 @@ This changelog was reconstructed from the tagged release history and the commits
 
 ## [Unreleased]
 
+## [4.2] - 2026-11-23
+
+### Added
+
+- Added pawn, non-pawn, minor-piece, and major-piece static-eval correction
+  history.
+- Exposed search margins, reduction terms, and time-management factors as UCI
+  spin options; `sykora spsa [group...]` prints them as OpenBench SPSA input.
+- Added `zig build -Devalfile=PATH` (and `make EVALFILE=PATH`) to embed a
+  chosen network, so OpenBench network tests build the intended evaluator.
+- `sykora bench` accepts an optional depth.
+
+### Changed
+
+- Scaled the reverse futility margin by improving and extended it to depth 7.
+- Scaled null-move reduction with depth and eval surplus.
+- Accumulated late-move reductions in 1/1024 ply with tunable killer, counter,
+  improving, and PV relief, plus an extra ply at expected cut nodes.
+- Bucketed quiet history by whether a move leaves or enters an attacked
+  square, and switched to a linear history bonus.
+- Adopted the defaults from SPSA tune #59 (2000 iterations, 32k STC games).
+- Optimized NNUE inference: i16 pairwise pooling, packed dot products in the
+  second dense layer, independent L1 partial sums, tiled accumulator kernels,
+  a compact threat-encoding table, and deferred accumulator updates.
+- Optimized search hot paths: TT and eval-cache prefetching, 8-byte eval-cache
+  entries, vectorized move-picker selection, targeted unmake updates, and
+  cheaper SEE and qsearch stalemate checks.
+- Requested Linux huge pages for the network weights and transposition table.
+
+### Fixed
+
+- Applied the September audit correctness fixes: signed history gravity,
+  persistent worker history, legal SEE, shared draw and rule-50 handling in
+  qsearch, TT safeguards near rule 50, evaluator cache invalidation, PVS
+  re-search, the movetime budget, and gensfen orientation.
+- Fixed `SYKNNUE9` P³ features on ARM dot-product builds (Apple Silicon),
+  which previously evaluated those networks incorrectly.
+
 ## [4.1] - 2026-09-22
 
 ### Added
@@ -157,7 +195,8 @@ This changelog was reconstructed from the tagged release history and the commits
 - Fixed castling, en passant, capture handling, move legality edge cases, transposition-table scoring issues, and early search stability problems.
 - Fixed cleanup and shutdown behavior around search threads, bot sessions, and Zig `0.16` compatibility.
 
-[Unreleased]: https://github.com/sb2bg/sykora/compare/v4.1...HEAD
+[Unreleased]: https://github.com/sb2bg/sykora/compare/v4.2...HEAD
+[4.2]: https://github.com/sb2bg/sykora/compare/v4.1...v4.2
 [4.1]: https://github.com/sb2bg/sykora/compare/v4.0...v4.1
 [4.0]: https://github.com/sb2bg/sykora/compare/v3.1...v4.0
 [3.1]: https://github.com/sb2bg/sykora/compare/v3.0...v3.1
